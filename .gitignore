@@ -1,0 +1,23 @@
+# ── 개인정보 ── 절대 올리면 안 되는 것들
+# config.json 에는 NAI 토큰·유튜브 OAuth 시크릿·Gemini 키가 들어있습니다.
+# state.json 에는 내 프롬프트·청크·씬·유튜브 기록이 들어있습니다.
+data/
+
+# ── 빌드 산출물 ──
+dist/
+build/
+.build-venv/
+*.spec.bak
+
+# ── 런타임에 설치되는 것 ──
+vendor/
+__pycache__/
+*.pyc
+
+# ── 배포본에 넣기 위해 복사되는 사본 (원본은 data/) ──
+assets/tags_kr.seed.json.gz
+
+# ── 기타 ──
+*.log
+Thumbs.db
+desktop.ini
