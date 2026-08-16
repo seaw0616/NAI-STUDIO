@@ -1,0 +1,44 @@
+NAI Studio — 서드파티 고지
+=========================
+
+이 프로그램은 GNU General Public License v3.0 으로 배포됩니다 (LICENSE 파일 참고).
+
+포함된 구성요소와 각각의 출처·라이선스
+--------------------------------------
+
+1) NovelAI Image Studio 3 (NAIS3)
+   https://github.com/sunanakgo/NAIS3   —   GPL-3.0
+   생성 요청(payload) 규격, 조각/와일드카드 문법, Anlas 계산식, 스트리밍 파싱,
+   T5 토크나이저 사전, 영문 태그 사전을 참고·활용했습니다.
+   → 이 프로젝트 전체가 GPL-3.0 으로 배포되는 이유입니다.
+
+2) hls.js
+   https://github.com/video-dev/hls.js   —   Apache License 2.0
+   assets/hls.min.js 로 원본 그대로 포함. 480p 이상 유튜브 직접 재생에 사용합니다.
+
+3) yt-dlp
+   https://github.com/yt-dlp/yt-dlp   —   Unlicense (public domain)
+   유튜브 스트림 추출에 사용하며 실행 파일에 포함되어 있습니다.
+
+4) 한글 단부루 태그 위키
+   https://github.com/localsmile/danbooru_KR_wiki_tag_search
+   한글 태그 이름·설명·분류의 출처입니다.
+
+5) 단부루 태그 그룹 (Danbooru Tag Groups 위키)
+   https://danbooru.donmai.us/wiki_pages/tag_groups
+   태그 그룹 탐색기의 분류 데이터입니다.
+
+6) novelai.app 태그생성기
+   https://novelai.app
+   한글 문장형 태그 표현("얼굴이 작다" → small_face)의 출처입니다.
+   해당 사이트 운영자의 명시적 재배포 허락은 받지 않았습니다.
+
+7) 작가 태그 모음
+   커뮤니티에서 정리·공유된 목록을 사용했습니다. 원 작성자를 특정하지 못했습니다.
+   출처를 아시는 분은 알려주시면 표기하겠습니다.
+
+6·7 번 데이터의 권리자께서 삭제를 요청하시면 즉시 배포본에서 제거하겠습니다.
+
+이 프로그램은 NovelAI, Danbooru, YouTube, Google 과 아무런 제휴 관계가 없습니다.
+NovelAI 이용에는 본인의 유료 구독과 API 토큰이 필요하며, 각 서비스의 이용약관을
+지키는 책임은 사용자 본인에게 있습니다.
