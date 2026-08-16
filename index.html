@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<!--
+  NAI Studio — NovelAI 로컬 이미지 생성 스튜디오
+  Copyright (C) 2026 seaw0616
+
+  이 프로그램은 자유 소프트웨어입니다. 자유 소프트웨어 재단이 발표한
+  GNU 일반 공중 사용 허가서 버전 3 또는 (선택에 따라) 그 이후 버전의
+  조건에 따라 재배포하거나 수정할 수 있습니다.
+
+  이 프로그램은 유용하게 쓰이기를 바라며 배포되지만 어떠한 보증도 하지 않습니다.
+  자세한 내용은 GNU 일반 공중 사용 허가서를 보십시오: <https://www.gnu.org/licenses/>
+
+  NAIS3 (https://github.com/sunanakgo/NAIS3, GPL-3.0) 의 규격·구현을 참고했습니다.
+  그 밖의 서드파티 고지는 NOTICE.txt 를 참고하십시오.
+-->
+<html lang="ko" data-theme="violet">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>NAI Studio</title>
+<script>
+try {
+  var _q = new URLSearchParams(location.search).get('theme');
+  var _s = JSON.parse(localStorage.getItem('nst_state') || '{}');
+  document.documentElement.dataset.theme = _q || _s.theme || 'violet';
+} catch (e) {}
+</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="topbar">
+  <div class="brand">
+    <span class="brand-mark">✦</span>
+    <span class="brand-name">NAI <b>Studio</b></span>
+    <span id="appVer" class="ver" title="앱 버전 (클릭: 서버 버전·업데이트 정보)">v…</span>
+    <span id="srvDot" class="dot" title="로컬 서버"></span>
+    <span id="srvText" class="srv-text">서버 확인 중…</span>
+    <button id="naiStat" class="pill tiny" title="NovelAI 서버 상태 (클릭: 자세히)"><span id="naiDot" class="dot"></span> NAI <span id="naiMs">…</span></button>
+  </div>
+  <nav class="nav">
+    <button class="nav-tab on" data-mode="main"><span class="nv-ico">⌂</span>메인</button>
+    <button class="nav-tab" data-mode="scene"><span class="nv-ico">🎬</span>씬 모드</button>
+    <button class="nav-tab" data-mode="tools"><span class="nv-ico">🪄</span>스마트 툴</button>
+    <button class="nav-tab" data-mode="library"><span class="nv-ico">🗂</span>라이브러리</button>
+  </nav>
+  <div id="ytNow" class="yt-now" hidden>
+    <button id="ytNowToggle" class="ic" title="재생/일시정지">▶</button>
+    <span id="ytNowTitle" title="클릭: 플레이어 열기"></span>
+    <button id="ytNowNext" class="ic" title="다음 곡">⏭</button>
+  </div>
+  <nav class="top-actions">
+    <button id="anlas" class="pill gold" title="Anlas 잔량">◈ —</button>
+    <button id="btnTagSearch" class="pill" title="태그 검색 (Ctrl+K)">🔎<span class="lbl"> 태그</span></button>
+    <button id="btnArtist" class="pill" title="작가 태그 찾아보기 — 단부루 실제 그림 샘플·비슷한 작가 추천">🎨<span class="lbl"> 작가</span></button>
+    <button id="btnAiPrompt" class="pill" title="AI 프롬프트 생성 — 한국어 장면 설명을 단부루 태그로 (Gemini)">✨<span class="lbl"> AI</span></button>
+    <button id="btnChunks" class="pill" title="프롬프트 청크">🧩<span class="lbl"> 청크</span></button>
+    <button id="btnStyles" class="pill" title="스타일 프리셋 (고정 프롬프트)">🎨<span class="lbl"> 스타일</span></button>
+    <button id="btnCharLib" class="pill" title="캐릭터 라이브러리">👤<span class="lbl"> 캐릭터</span></button>
+    <button id="btnNaiImport" class="pill" title="NAI 웹에서 만든 PNG를 드롭해 설정 그대로 재현">📥<span class="lbl"> NAI PNG</span></button>
+    <button id="btnExif" class="pill" title="EXIF/메타데이터 도구">🧹</button>
+    <button id="btnYt" class="pill" title="YouTube 플레이어">🎵</button>
+    <button id="btnTheme" class="pill" title="다크/라이트">🌙</button>
+    <button id="btnBackup" class="pill" title="전체 백업 / 복원 (설정 + 이미지 ZIP)">📦</button>
+    <button id="btnReload" class="pill" title="새로고침 (F5) — 업데이트 반영">↻</button>
+    <button id="btnUpdate" class="pill upd" title="새 버전이 있습니다 — 눌러서 받기" hidden></button>
+    <button id="btnSettings" class="pill accent" title="설정">⚙</button>
+  </nav>
+</header>
+
+<main id="layout">
+
+  <!-- ══════════ SCENE MODE ══════════ -->
+  <section id="sceneView" class="fullview" hidden>
+    <aside class="sc-side card">
+      <div class="card-body">
+        <div class="ptool"><span class="ptitle">씬 목록</span><button id="scAdd" class="btn xs">＋ 새 씬</button></div>
+        <div id="scList" class="sc-list"></div>
+        <button id="scTemplates" class="btn sm">✨ 감정 12종 · 세트 만들기</button>
+        <hr>
+        <button id="scRunAll" class="btn primary">▶ 전체 씬 순서대로 생성</button>
+        <button id="scStop" class="btn sm danger" hidden>■ 정지</button>
+        <div id="scRunState" class="hint"></div>
+        <div class="hint">씬마다 설정한 장수만큼 자동 짤뽑됩니다. 이미지는 씬 이름으로 묶이고, 자동 저장 폴더가 있으면 씬별 하위 폴더에 저장됩니다.</div>
+      </div>
+    </aside>
+    <section id="scEditor" class="card sc-editor"></section>
+  </section>
+
+  <!-- ══════════ LIBRARY ══════════ -->
+  <section id="toolView" class="fullview card" hidden>
+    <div class="st-wrap">
+      <div class="st-drop" id="stDrop">
+        <input type="file" id="stFile" accept="image/*" hidden>
+        <div class="st-empty" id="stEmpty"><div class="st-ico">⬆</div><div><b>이미지를 열거나 드래그하세요</b></div>
+          <div class="hint">PNG · JPG · WEBP · 히스토리에서 선택한 이미지도 자동으로 들어옵니다</div>
+          <button class="btn sm" id="stOpen">이미지 열기</button>
+          <button class="btn sm" id="stFromCur">현재 이미지 가져오기</button></div>
+        <img id="stImg" hidden>
+        <div class="st-meta hint" id="stMeta"></div>
+      </div>
+      <aside class="st-side">
+        <div class="st-h">🪄 스마트 툴 <span class="hint" id="stCost"></span></div>
+        <div id="stList"></div>
+      </aside>
+    </div>
+  </section>
+  <section id="libView" class="fullview card" hidden>
+    <div class="card-body grow">
+      <div class="ptool">
+        <span class="ptitle">라이브러리 <span id="libN" class="hint"></span></span>
+        <div class="ptool-r">
+          <select id="libScene" style="width:auto"></select>
+          <button id="libFav" class="btn xs ghost">☆ 즐겨찾기만</button>
+          <span class="hint" id="libSelN"></span>
+          <button id="libSelAll" class="btn xs ghost">전체 선택</button>
+          <button id="libSelNone" class="btn xs ghost">해제</button>
+          <button id="libSelSave" class="btn xs" disabled>💾 선택 저장</button>
+          <button id="libSelDel" class="btn xs danger" disabled>🗑 선택 삭제</button>
+        </div>
+      </div>
+      <div id="libGrid" class="scgal lib"></div>
+    </div>
+  </section>
+
+  <!-- ══════════ LEFT: 모델 → 프롬프트 → 이미지 입력 → 샘플링/옵션/인핸스 ══════════ -->
+  <aside id="left" class="col">
+    <div class="card">
+      <div class="card-body tight">
+        <div class="row nowrap">
+          <select id="model" style="flex:1"></select>
+          <span id="modelKind" class="kind"></span>
+        </div>
+        <div class="row nowrap">
+          <select id="sizePreset" style="flex:1;min-width:0"></select>
+          <div class="wh" style="width:132px;flex-shrink:0">
+            <input type="number" id="w" step="64" min="64" max="2048" title="가로"><span>×</span>
+            <input type="number" id="h" step="64" min="64" max="2048" title="세로">
+          </div>
+          <button id="btnSwap" class="ic" title="가로/세로 바꾸기">⇄</button>
+        </div>
+        <div class="seg mini" id="batchSeg" title="한 번에 생성할 장수">
+          <span class="seg-label">장수</span>
+          <button data-n="1" class="on">1</button><button data-n="2">2</button><button data-n="3">3</button><button data-n="4">4</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <div class="ptool">
+          <span class="ptitle">프롬프트</span>
+          <div class="ptool-r">
+            <select id="mainStyle" class="style-sel sm" title="고정 프롬프트(스타일)"></select>
+            <button id="btnSecEdit" class="btn xs ghost" title="프롬프트 칸 편집 (추가·이름·순서·한 칸 모드)">⚙ 칸</button>
+            <button id="btnPromptClear" class="btn xs ghost">지우기</button>
+            <button id="btnSaveChunkSel" class="btn xs ghost" title="선택한 텍스트(없으면 현재 칸 전체)를 청크로 저장">＋청크</button>
+          </div>
+        </div>
+        <div id="secList"></div>
+        <textarea id="prompt" class="ta ac big" rows="4" spellcheck="false" placeholder="1girl, ..." hidden></textarea>
+        <div id="chunkBar" class="chunkbar"></div>
+        <details id="pvWrap"><summary>최종 프롬프트 미리보기 <span id="pvInfo" class="hint"></span></summary>
+          <div id="pvBox" class="pv"><div class="pv-l">프롬프트</div><div id="pvPrompt" class="pv-t"></div><div class="pv-l">네거티브</div><div id="pvUc" class="pv-t"></div></div>
+        </details>
+        <details id="ucBox">
+          <summary>Undesired Content (네거티브 추가)</summary>
+          <textarea id="uc" class="ta ac" rows="2" spellcheck="false" placeholder="프리셋 뒤에 이어붙을 네거티브"></textarea>
+        </details>
+        <div class="chead">
+          <span class="ptitle">캐릭터 프롬프트 <span class="hint">V4+</span></span>
+          <div class="row"><button id="aiChoiceBtn" class="btn xs" title="캐릭터 위치: AI 자동 배치 / 좌표 지정">✔ AI 자동 배치</button><button id="btnAddChar" class="btn xs">＋ 캐릭터</button></div>
+        </div>
+        <div id="charList"></div>
+      </div>
+    </div>
+
+    <details class="card">
+      <summary><span class="ico">🖼</span>이미지 입력 <span id="refBadge" class="kind"></span></summary>
+      <div class="card-body">
+        <div class="tabs">
+          <button class="tab reftab on" data-t="i2i">이미지→이미지</button>
+          <button class="tab reftab" data-t="vibe">바이브 <span id="vibeN" class="hint"></span></button>
+          <button class="tab reftab" data-t="pref">Precise Ref <span id="prefN" class="hint"></span></button>
+          <span id="modeBadge" class="badge" hidden></span>
+        </div>
+        <div id="panelI2i" class="panel">
+          <div class="i2i">
+            <div id="i2iDrop" class="drop">이미지 드롭<br>또는 클릭</div>
+            <div class="i2i-ctl">
+              <label class="rng">Strength <output id="strengthV"></output><input type="range" id="strength" min="0.01" max="0.99" step="0.01"></label>
+              <label class="rng">Noise <output id="noiseV"></output><input type="range" id="noise" min="0" max="0.99" step="0.01"></label>
+              <div class="row"><button id="btnMask" class="btn sm">🖌 마스크</button><button id="btnI2iClear" class="btn sm danger">✕</button><span id="maskState" class="hint"></span></div>
+            </div>
+          </div>
+        </div>
+        <div id="panelVibe" class="panel" hidden>
+          <div id="vibeList"></div>
+          <div class="row"><button id="vibeAdd" class="btn sm">＋ 바이브 이미지</button><button id="vibeLibBtn" class="btn sm" title="저장한 바이브 재사용 (인코딩 Anlas 절약) · .naiv4vibe 가져오기">📚 라이브러리</button><label class="ck"><input type="checkbox" id="vibeNormalize" checked> 강도 정규화</label></div>
+        </div>
+        <div id="panelPref" class="panel" hidden>
+          <div id="prefList"></div>
+          <div class="row"><button id="prefAdd" class="btn sm">＋ 레퍼런스 이미지</button><span class="hint">V4.5 · 장당 +5 Anlas · 바이브와 동시 불가</span></div>
+        </div>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="ico">◔</span>샘플링 <span id="sampSum" class="kind"></span></summary>
+      <div class="card-body">
+        <label class="rng">Steps <output id="stepsV"></output><input type="range" id="steps" min="1" max="50" step="1"></label>
+        <label class="rng">Prompt Guidance <output id="scaleV"></output><input type="range" id="scale" min="0" max="10" step="0.1"></label>
+        <label class="rng">Guidance Rescale <output id="rescaleV"></output><input type="range" id="rescale" min="0" max="1" step="0.02"></label>
+        <div class="grid2">
+          <label class="fld">Sampler<select id="sampler"></select></label>
+          <label class="fld">Noise Schedule<select id="schedule"></select></label>
+        </div>
+        <div id="v3Box" hidden>
+          <div class="grid2"><label class="ck"><input type="checkbox" id="smea"> SMEA</label><label class="ck"><input type="checkbox" id="smeaDyn"> SMEA DYN</label></div>
+          <label class="rng">Undesired Content 강도 <output id="ucStrengthV"></output><input type="range" id="ucStrength" min="0" max="1.5" step="0.05"></label>
+        </div>
+        <div id="v4Box" hidden><label class="ck"><input type="checkbox" id="legacyUc"> 레거시 프롬프트 컨디셔닝</label></div>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="ico">◕</span>옵션 <span id="optSum" class="kind"></span></summary>
+      <div class="card-body">
+        <label class="ck"><input type="checkbox" id="quality"> 퀄리티 태그 자동 추가</label>
+        <label class="fld">Undesired Content 프리셋<select id="ucPreset"></select></label>
+        <div class="grid2"><label class="ck"><input type="checkbox" id="variety"> Variety+</label><label class="ck"><input type="checkbox" id="decrisper"> Decrisper</label></div>
+        <label class="ck" title="NAI 웹과 동일: 프롬프트에 nsfw가 없으면 네거티브 맨 앞에 'nsfw, ' 자동 추가"><input type="checkbox" id="autoNsfw"> 네거티브에 nsfw 자동 추가 (NAI 웹과 동일)</label>
+        <label class="ck" title="(a/b/c) 와 a/b/c 를 랜덤 선택으로 씁니다. fate/zero, (fate/apocrypha), k/da 처럼 슬래시가 이름에 들어간 정상 태그가 깨지므로 기본은 꺼둡니다. &lt;a|b|c&gt; 와 &lt;조각이름&gt; 은 이 설정과 무관하게 항상 동작합니다."><input type="checkbox" id="slashWild"> 슬래시 와일드카드 (a/b/c) 사용 — 태그가 깨질 수 있음</label>
+        <details class="sub"><summary>프리셋 문자열 편집</summary>
+          <label class="fld">퀄리티 태그<textarea id="qtagsEdit" rows="2" spellcheck="false"></textarea></label>
+          <label class="fld">UC 프리셋 내용<textarea id="ucEdit" rows="3" spellcheck="false"></textarea></label>
+          <button id="btnResetPreset" class="btn sm">기본값 복원</button></details>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="ico">✎</span>인핸스 · 변형 기본값</summary>
+      <div class="card-body">
+        <label class="rng">인핸스 Strength <output id="enhStrV"></output><input type="range" id="enhStr" min="0.01" max="0.99" step="0.01"></label>
+        <label class="rng">인핸스 Noise <output id="enhNoiseV"></output><input type="range" id="enhNoise" min="0" max="0.99" step="0.01"></label>
+        <label class="fld">인핸스 확대<select id="enhScale"><option value="1">1× (같은 크기)</option><option value="1.5">1.5×</option></select></label>
+        <label class="rng">변형 Strength <output id="varStrV"></output><input type="range" id="varStr" min="0.01" max="0.99" step="0.01"></label>
+        <label class="rng">변형 Noise <output id="varNoiseV"></output><input type="range" id="varNoise" min="0" max="0.99" step="0.01"></label>
+      </div>
+    </details>
+  </aside>
+
+  <!-- ══════════ CENTER: 큰 이미지 화면 ══════════ -->
+  <section id="center" class="col">
+    <div class="genbar">
+      <button id="btnGen"><span class="g-ico">✦</span><span id="btnGenLbl">생성</span><small id="genCost"></small></button>
+      <button id="btnCancel" class="btn danger" hidden title="진행 중인 생성 취소">■ 취소</button>
+      <label class="ck cont" title="켜면 [생성]이 짤뽑 패널의 횟수·간격·방식으로 연속 생성을 시작/정지합니다"><input type="checkbox" id="contGen"> 연속</label>
+      <div id="genStatus" class="hint"></div>
+    </div>
+    <div class="card viewer grow">
+      <div class="vstage" id="vstage">
+        <div id="viewerEmpty" class="vempty">
+          <div class="vempty-ico">✦</div>
+          <div>아직 생성된 이미지가 없습니다</div>
+          <div class="hint">왼쪽에 프롬프트를 쓰고 <b>생성</b> · Ctrl+Enter</div>
+        </div>
+        <img id="viewerImg" alt="" hidden>
+        <button id="btnPrev" class="vnav l" title="이전">‹</button>
+        <button id="btnNext" class="vnav r" title="다음">›</button>
+      </div>
+      <div class="vtools">
+        <div class="vgroup">
+          <button id="tEnhance" class="tb" title="인핸스 (디테일 보강 · 확대)">✨<span>인핸스</span></button>
+          <button id="tUpscale" class="tb" title="업스케일 4× (Anlas 소모)">🔍<span>업스케일</span></button>
+          <button id="tVary" class="tb" title="변형">🎲<span>변형</span></button>
+          <button id="tInpaint" class="tb" title="편집 — 마스크 인페인트">🖌<span>편집</span></button>
+          <button id="tDirector" class="tb" title="디렉터 툴">🪄<span>디렉터</span></button>
+        </div>
+        <div class="vgroup">
+          <button id="tToI2i" class="tb" title="i2i 소스로">↪<span>i2i</span></button>
+          <button id="tToVibe" class="tb" title="바이브로 추가">🎨<span>바이브</span></button>
+          <button id="tToPref" class="tb" title="Precise Reference로 (V4.5)">🪞<span>레퍼런스</span></button>
+        </div>
+        <div class="vgroup">
+          <button id="tFav" class="tb" title="즐겨찾기 (F)">☆</button>
+          <button id="tCopy" class="tb" title="설정 복사">📋</button>
+          <button id="tApply" class="tb" title="이 이미지의 프롬프트·설정 불러오기">⤴</button>
+          <button id="tSeed" class="tb" title="이 시드 재사용">🌱<span id="tSeedV"></span></button>
+          <button id="tSave" class="tb" title="저장">💾</button>
+          <button id="tSaveClean" class="tb" title="메타데이터 제거 후 저장">🧹</button>
+          <button id="tMeta" class="tb" title="메타데이터 보기">🏷</button>
+          <button id="tDelete" class="tb danger" title="삭제 (Delete)">🗑</button>
+        </div>
+      </div>
+      <div id="viewerMeta" class="vmeta"></div>
+    </div>
+  </section>
+
+  <!-- ══════════ RIGHT: 시드 → 짤뽑 → 저장 → 히스토리 ══════════ -->
+  <aside id="right" class="col">
+    <div class="card">
+      <div class="card-body tight">
+        <div class="ptool"><span class="ptitle">시드</span><span id="lastSeed" class="hint"></span></div>
+        <div class="seedrow">
+          <input type="text" id="seed" placeholder="비우면 랜덤" inputmode="numeric">
+          <button id="btnDice" class="ic" title="랜덤 시드 뽑기">🎲</button>
+          <button id="btnSeedLast" class="ic" title="마지막 생성 시드 가져오기">↶</button>
+        </div>
+        <label class="ck"><input type="checkbox" id="randomSeed"> 생성할 때마다 랜덤</label>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <div class="ptool"><span class="ptitle">짤뽑 (연속 생성)</span><span id="autoProg" class="hint"></span></div>
+        <div class="grid2">
+          <label class="fld">횟수 (0=무한)<input type="number" id="autoCount" min="0" max="9999"></label>
+          <label class="fld">간격(초)<input type="number" id="autoDelay" min="0" max="600"></label>
+        </div>
+        <div class="seg" id="autoModeSeg" title="매번 프롬프트를 새로 조합할지, 지금 조합을 고정하고 시드만 바꿀지">
+          <button data-m="random" class="on">🎲 매번 랜덤 조합</button><button data-m="fixed">📌 지금 조합 고정</button>
+        </div>
+        <div class="hint" id="autoModeHint">&lt;a|b|c&gt;·청크가 매번 새로 뽑힙니다</div>
+        <div class="row">
+          <button id="btnAutoStart" class="btn sm go">▶ 시작</button>
+          <button id="btnAutoStop" class="btn sm danger" disabled>■ 정지</button>
+        </div>
+      </div>
+    </div>
+
+    <details class="card" open>
+      <summary><span class="ico">⬇</span>자동 저장</summary>
+      <div class="card-body">
+        <div class="row"><button id="btnPickDir" class="btn sm">📁 폴더 선택</button><span id="dirName" class="hint">선택 안 됨 (없으면 다운로드)</span></div>
+        <label class="ck"><input type="checkbox" id="autoSaveOn"> 생성되면 자동 저장</label>
+        <label class="ck"><input type="checkbox" id="stripOnSave"> 저장 시 메타데이터 제거</label>
+      </div>
+    </details>
+
+    <div class="card grow">
+      <div class="card-body grow">
+        <div class="ptool">
+          <span class="ptitle">히스토리 <span id="histCount" class="hint"></span></span>
+          <div class="ptool-r"><button id="histFavOnly" class="btn xs ghost">☆</button><button id="histClear" class="btn xs ghost danger">비우기</button></div>
+        </div>
+        <div id="histGrid" class="hgrid"></div>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<!-- ══════════ 떠 있는 YouTube 플레이어 ══════════ -->
+<div id="ytFloat" hidden>
+  <div id="ytHead">
+    <span class="yt-logo">▶</span><span id="ytHeadTitle">YouTube</span>
+    <div class="yt-hbtns">
+      <button id="ytSizeBtn" class="ic" title="컴팩트(플레이어만) ↔ 전체">⤡</button>
+      <button id="ytMinBtn" class="ic" title="제목줄만 남기고 접기 (재생 유지)">—</button>
+      <button id="ytCloseBtn" class="ic" title="닫기 (재생 유지)">✕</button>
+    </div>
+  </div>
+  <div id="ytBody">
+    <div class="row yt-search"><input type="text" id="ytQ" placeholder="검색어 또는 URL"><button id="ytGo" class="btn sm">검색</button></div>
+    <div id="ytPlayerWrap"></div>
+    <div class="yt-ctl">
+      <button id="ytPrevBtn" class="ic" title="처음부터">⏮</button>
+      <button id="ytPlayBtn" class="ic" title="재생/일시정지">▶</button>
+      <button id="ytNextBtn" class="ic" title="다음 곡">⏭</button>
+      <input type="range" id="ytVol" min="0" max="100" step="1" title="볼륨">
+      <button id="ytAudioBtn" class="ic" title="오디오만 (고음질) ↔ 영상+오디오">🎧</button>
+      <select id="ytQual" class="yt-qual" title="영상 화질 — 480p 이상은 HLS 로 재생합니다"><option value="auto">화질 자동</option></select>
+      <button id="ytModeBtn" class="btn xs" title="재생 방식">모드: <span id="ytModeLbl">…</span></button>
+      <button id="ytPopBtn" class="ic" title="유튜브 창으로 열기 (수동)">🡕</button>
+      <button id="ytTabRes" class="btn xs on yt-tab">검색결과</button>
+      <button id="ytTabQ" class="btn xs yt-tab">대기열 <span id="ytQueueN"></span></button>
+      <button id="ytTabMine" class="btn xs yt-tab" title="YouTube 계정 연결 시 내 재생목록·좋아요">👤 내 목록</button>
+      <button id="ytTabHist" class="btn xs yt-tab" title="최근 재생 기록 · 사라진 목록 복구">🕘 최근</button>
+    </div>
+    <div id="ytResults" class="ytlist"></div>
+    <div id="ytQueue" class="ytlist" hidden></div>
+    <div id="ytMine" class="ytlist" hidden></div>
+    <div id="ytHist" class="ytlist" hidden></div>
+    <div class="yt-foot">
+      <div class="row"><label class="ck" title="대기열이 비면 지금 곡 기반 유튜브 믹스(연관 곡)를 자동으로 채워 이어 듣습니다"><input type="checkbox" id="ytAutoRelated" checked> 🎶 알고리즘 이어듣기</label>
+        <label class="ck" title="켜면 곡마다 음량을 비슷하게 자동 보정 (기본 꺼짐 = 설정한 볼륨 그대로)"><input type="checkbox" id="ytNormalize"> 🔊 자동 음량 맞춤 (선택)</label>
+        <button id="ytRelatedNow" class="btn xs" title="지금 곡 기반 연관 곡을 대기열에 채움">지금 채우기</button></div>
+      <div class="row"><button id="ytGuideBtn" class="btn xs">👤 내 계정으로 듣기 · 재생 방식</button>
+      <label class="ck" title="유튜브 페이지(로그인 계정)에서 재생"><input type="checkbox" id="ytUsePop"> 내 계정으로</label></div>
+    </div>
+  </div>
+</div>
+
+<div id="acBox" hidden></div>
+<div id="modalOverlay" hidden>
+  <div id="modal">
+    <div id="modalHead"><span id="modalTitle"></span><button id="modalClose" class="ic">✕</button></div>
+    <div id="modalBody"></div>
+  </div>
+</div>
+<div id="toasts"></div>
+
+<script src="app.js"></script>
+<script src="tags.js"></script>
+<script src="tools.js"></script>
+<script src="scenes.js"></script>
+</body>
+</html>
