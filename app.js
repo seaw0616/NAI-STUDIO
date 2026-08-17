@@ -495,7 +495,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '11.10';   // 화면 표시용 앱 버전 (상단)
+const APP_VERSION = '11.11';   // 화면 표시용 앱 버전 (상단)
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 async function tryHealth(base) {
   try {
@@ -1877,7 +1877,7 @@ function init() {
 }
 
 /* ─────────────── NAI 서버 상태 (NAI 웹과 같은 방식: 접속 확인 + static.novelai.net/status 공지) ─────────────── */
-const NST = { last: null, genTimes: [] };
+const NST = { last: null, genTimes: [], q: null };   // q = 그림 품질 캐시 (상단 표시등도 이 값을 본다)
 async function naiStatusLoop() {
   if (!R.srvOk) { setTimeout(naiStatusLoop, 3000); return; }
   try { const r = await fetch(R.api + '/nai/status', { cache: 'no-store' }); if (r.ok) { NST.last = await r.json(); NST.at = Date.now(); paintNaiStatus(); } } catch (e) {}
@@ -1885,19 +1885,80 @@ async function naiStatusLoop() {
 }
 const IMG_SVC = /image/i; // 공식 상태페이지의 "Image Generation" 항목
 function officialImg(o) { return o && (o.services || []).find(s => IMG_SVC.test(s.name || '')); }
-function paintNaiStatus() {
-  const s = NST.last; const dot = $('#naiDot'), ms = $('#naiMs'); if (!s || !dot) return;
-  const worst = Math.max(s.api_ms || 0, s.img_ms || 0);
+/* NAI 상태 항목별 판정 — 상단 표시등과 상세창이 같은 기준을 쓴다.
+   lv: 0 정상 · 1 주의(주황) · 2 나쁨(빨강) · -1 정보 없음
+   q 는 qualityHealth() 결과(선택). 없으면 그림 품질 항목은 "정보 없음". */
+function naiMarks(q) {
+  const s = NST.last || {};
   const o = s.official, img = officialImg(o);
-  const offBad = o && (o.code >= 400 || (img && img.code >= 400));      // Down / Service Disruption
-  const offWarn = o && ((o.code > 100 && o.code < 400) || (img && img.code > 100) || (o.incidents || []).length || o.maintenance_active);
-  const bad = !s.api_ok || !s.img_ok || offBad, slow = worst > 2500, notice = !!s.notice;
-  dot.className = 'dot ' + (bad ? 'bad' : (slow || notice || offWarn ? 'warn' : 'ok'));
-  ms.textContent = !s.api_ok || !s.img_ok ? '접속 불가' : offBad ? '장애' : (worst / 1000).toFixed(1) + 's' + (notice || offWarn ? ' ⚠' : '');
-  $('#naiStat').title = 'NovelAI 서버' + (o ? ' — 공식: ' + o.overall + (img ? ' · 이미지 생성: ' + img.status : '') : '')
-    + '\napi ' + (s.api_ms || '?') + 'ms · image ' + (s.img_ms || '?') + 'ms'
-    + ((o && (o.incidents || []).length) ? '\n진행 중 장애: ' + o.incidents.map(i => i.name).join(', ') : '')
-    + (notice ? '\n공지: ' + s.notice : '') + '\n(클릭: 자세히)';
+  const gh = genHealth();
+  const marks = [];
+  const add = (name, lv, txt) => marks.push({ name, lv, txt });
+
+  if (!NST.last) add('NAI 접속', -1, '확인 중');
+  else if (!s.api_ok || !s.img_ok) add('NAI 접속', 2, `api ${s.api_ok ? s.api_ms + 'ms' : '불가'} · image ${s.img_ok ? s.img_ms + 'ms' : '불가'}`);
+  else {
+    const worst = Math.max(s.api_ms || 0, s.img_ms || 0);
+    add('NAI 접속', worst > 2500 ? 1 : 0, `api ${s.api_ms}ms · image ${s.img_ms}ms`);
+  }
+
+  if (!o) add('공식 상태', -1, s.official_error ? '가져오기 실패' : '확인 중');
+  else if (o.code >= 400 || (img && img.code >= 400)) add('공식 상태', 2, '이미지 생성 장애');
+  else if (img && img.code > 100) add('공식 상태', 1, '이미지 생성 성능 저하');
+  else if (o.code > 100) add('공식 상태', 1, o.overall || '일부 서비스 저하');
+  else if ((o.incidents || []).length) add('공식 상태', 1, '진행 중 장애 공지 있음');
+  else if (o.maintenance_active) add('공식 상태', 1, '점검 진행 중');
+  else add('공식 상태', 0, o.overall || 'Operational');
+
+  // 공식 서비스 중 하나라도 초록이 아니면 주의 (이미지 생성 외 서비스도 표시)
+  const svcBad = (o && (o.services || []).filter(x => x.code != null && x.code !== 100)) || [];
+  if (svcBad.length) add('공식 서비스', svcBad.some(x => x.code >= 400) ? 2 : 1,
+    svcBad.map(x => x.name).slice(0, 3).join(', '));
+
+  if (s.notice) add('사이트 공지', 1, String(s.notice).slice(0, 60));
+
+  if (!gh.enough) add('내 생성 속도', -1, `기록 ${gh.n}장 (3장 이상 필요)`);
+  else if (gh.ratio == null) add('내 생성 속도', 0, `최근 중앙값 ${gh.recentSec.toFixed(1)}s · 기준선이 모이는 중`);
+  else {
+    const r = gh.ratio;
+    add('내 생성 속도', r >= 2 ? 2 : r >= 1.4 ? 1 : 0,
+      `최근 ${gh.recentSec.toFixed(1)}s · 평소 대비 <b>${r.toFixed(2)}배</b> (스텝·해상도 환산, 기준선 ${gh.baseN}장)`);
+  }
+  if (gh.total >= 5) add('실패율(24h)', gh.failRate >= 0.3 ? 2 : gh.failRate >= 0.1 ? 1 : 0,
+    `${gh.fails}/${gh.total}회 실패 (${Math.round(gh.failRate * 100)}%)`);
+
+  if (!q || !q.enough) add('그림 품질', -1, `최근 이미지 ${(q && q.n) || 0}장 (3장 이상 필요)`);
+  else if (!q.ratio) add('그림 품질', -1, `선명도 ${q.cur.lap} · 대비 ${q.cur.sd} · 다양성 ${q.cur.ent} — “평소로 기준 저장”을 눌러두면 다음부터 비교합니다`);
+  else {
+    const r = q.ratio;
+    const bad = r.lap < 0.5 || r.sd < 0.6 || r.ent < 0.75;
+    const warn = r.lap < 0.75 || r.sd < 0.8 || r.ent < 0.9;
+    add('그림 품질', bad ? 2 : warn ? 1 : 0,
+      `선명도 ${(r.lap * 100).toFixed(0)}% · 대비 ${(r.sd * 100).toFixed(0)}% · 다양성 ${(r.ent * 100).toFixed(0)}% (평소=100%)`);
+  }
+  return marks;
+}
+const naiWorst = marks => marks.reduce((a, m) => Math.max(a, m.lv), -1);
+
+function paintNaiStatus() {
+  const s = NST.last; const dot = $('#naiDot'), ms = $('#naiMs'), pill = $('#naiStat');
+  if (!s || !dot) return;
+  // 항목이 하나라도 주황이면 상단도 주황, 하나라도 빨강이면 빨강 (상세창과 같은 기준)
+  const marks = naiMarks(NST.q);
+  const lv = naiWorst(marks);
+  const cls = lv >= 2 ? 'bad' : lv === 1 ? 'warn' : 'ok';
+  dot.className = 'dot ' + cls;
+  if (pill) pill.className = 'pill tiny ' + cls;
+
+  const worstMs = Math.max(s.api_ms || 0, s.img_ms || 0);
+  const flagged = marks.filter(m => m.lv >= 1);
+  ms.textContent = !s.api_ok || !s.img_ok ? '접속 불가'
+    : (lv >= 2 ? '이상' : (worstMs / 1000).toFixed(1) + 's' + (lv === 1 ? ' ⚠' : ''));
+
+  const strip = t => String(t).replace(/<[^>]*>/g, '');
+  if (pill) pill.title = 'NovelAI 상태 — ' + (lv >= 2 ? '🔴 정상 아님' : lv === 1 ? '🟡 평소보다 나쁨' : '🟢 정상')
+    + (flagged.length ? '\n\n' + flagged.map(m => (m.lv >= 2 ? '🔴 ' : '🟡 ') + m.name + ': ' + strip(m.txt)).join('\n') : '')
+    + '\n\n(클릭: 자세히)';
 }
 /* 생성 실적 기록 — 설정(스텝·해상도·장수)이 다르면 초 단위는 비교가 안 되므로
    "메가픽셀·스텝당 초"로 정규화해서 함께 남긴다. 이게 있어야 "22초가 느린 건지"를 판정할 수 있다. */
@@ -1944,47 +2005,15 @@ function genHealth() {
 }
 function openNaiStatus() {
   openModal('NovelAI 상태 종합 판정', async body => {
+    // 상세창을 열 때는 그림 품질을 새로 재서 캐시에 넣는다 (상단 표시등도 이 값을 쓴다)
+    if (typeof qualityHealth === 'function') NST.q = await qualityHealth(8).catch(() => null);
     const s = NST.last || {};
     const o = s.official, img = officialImg(o);
-    const gh = genHealth();
     const ico = c => c == null ? '·' : c === 100 ? '🟢' : c >= 400 ? '🔴' : '🟡';
     const svcRows = o ? (o.services || []).map(x => `<span class="svc ${x.code === 100 ? 'ok' : x.code >= 400 ? 'bad' : 'warn'}">${ico(x.code)} ${escHtml(x.name)}</span>`).join('') : '';
     const incRows = o && (o.incidents || []).length ? o.incidents.map(i => `<div class="inc"><b>${escHtml(i.name || '')}</b> <span class="hint">${escHtml((i.status || '') + ' · ' + (i.at || '').slice(0, 16).replace('T', ' '))}</span><div>${escHtml((i.detail || '').slice(0, 300))}</div></div>`).join('') : '';
 
-    // ── 항목별 판정 (초록/노랑/빨강 + 근거) ─────────────────────────
-    const marks = [];
-    const add = (name, lv, txt) => marks.push({ name, lv, txt });   // lv: 0 정상 1 주의 2 나쁨 -1 정보없음
-    if (!s.api_ok || !s.img_ok) add('NAI 접속', 2, `api ${s.api_ok ? s.api_ms + 'ms' : '불가'} · image ${s.img_ok ? s.img_ms + 'ms' : '불가'}`);
-    else {
-      const worst = Math.max(s.api_ms || 0, s.img_ms || 0);
-      add('NAI 접속', worst > 2500 ? 1 : 0, `api ${s.api_ms}ms · image ${s.img_ms}ms`);
-    }
-    if (!o) add('공식 상태', -1, s.official_error ? '가져오기 실패' : '확인 중');
-    else if (img && img.code >= 400) add('공식 상태', 2, '이미지 생성 장애');
-    else if (img && img.code > 100) add('공식 상태', 1, '이미지 생성 성능 저하');
-    else if ((o.incidents || []).length) add('공식 상태', 1, '진행 중 장애 공지 있음');
-    else add('공식 상태', 0, o.overall || 'Operational');
-
-    if (!gh.enough) add('내 생성 속도', -1, `기록 ${gh.n}장 (3장 이상 필요)`);
-    else if (gh.ratio == null) add('내 생성 속도', 0, `최근 중앙값 ${gh.recentSec.toFixed(1)}s · 기준선은 ${20 - gh.n > 0 ? (20 - gh.n) + '장 더' : '곧'} 모이면 생깁니다`);
-    else {
-      const r = gh.ratio;
-      add('내 생성 속도', r >= 2 ? 2 : r >= 1.4 ? 1 : 0,
-        `최근 ${gh.recentSec.toFixed(1)}s · 평소 대비 <b>${r.toFixed(2)}배</b> (같은 스텝·해상도로 환산, 기준선 ${gh.baseN}장)`);
-    }
-    if (gh.total >= 5) add('실패율(24h)', gh.failRate >= 0.3 ? 2 : gh.failRate >= 0.1 ? 1 : 0, `${gh.fails}/${gh.total}회 실패 (${Math.round(gh.failRate * 100)}%)`);
-
-    const q = typeof qualityHealth === 'function' ? await qualityHealth(8).catch(() => ({ enough: false })) : { enough: false };
-    if (!q.enough) add('그림 품질', -1, `최근 이미지 ${q.n || 0}장 (3장 이상 필요)`);
-    else if (!q.ratio) add('그림 품질', -1, `선명도 ${q.cur.lap} · 대비 ${q.cur.sd} · 다양성 ${q.cur.ent} — 아래 “평소로 기준 저장”을 눌러두면 다음부터 비교합니다`);
-    else {
-      const r = q.ratio;
-      const bad = r.lap < 0.5 || r.sd < 0.6 || r.ent < 0.75;
-      const warn = r.lap < 0.75 || r.sd < 0.8 || r.ent < 0.9;
-      add('그림 품질', bad ? 2 : warn ? 1 : 0,
-        `선명도 ${(r.lap * 100).toFixed(0)}% · 대비 ${(r.sd * 100).toFixed(0)}% · 다양성 ${(r.ent * 100).toFixed(0)}% (평소=100%)`);
-    }
-
+    const marks = naiMarks(NST.q);
     const worstLv = Math.max(...marks.map(m => m.lv));
     const verdict = worstLv >= 2
       ? '🔴 정상이 아닙니다 — 아래 빨간 항목을 보세요'
