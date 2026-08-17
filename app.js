@@ -338,7 +338,7 @@ function updatePreview() {
     + (S.activeStyle && getStyle(S.activeStyle) ? ' · 스타일 "' + getStyle(S.activeStyle).name + '" 적용' : '') + ' · 생성할 때마다 다시 랜덤';
 }
 /* 청크 치환 — 단, <...> 안(조각 이름·랜덤 옵션)은 건드리지 않는다.
-   이걸 안 하면 <의붓처형> 의 "의붓처형" 이 청크 본문으로 먼저 바뀌어 <본문전체> 가 되고,
+   이걸 안 하면 <의상> 의 "의상" 이 청크 본문으로 먼저 바뀌어 <본문전체> 가 되고,
    조각 뽑기가 통째로 죽는다 (꺾쇠와 줄바꿈이 그대로 NAI 로 전송됨). */
 function chunksKeepTags(s) {
   const held = [];
