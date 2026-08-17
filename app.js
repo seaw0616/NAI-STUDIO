@@ -495,8 +495,8 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '11.9';   // 화면 표시용 앱 버전 (상단)
-const NEED_SERVER_VER = 16;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
+const APP_VERSION = '11.10';   // 화면 표시용 앱 버전 (상단)
+const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 async function tryHealth(base) {
   try {
     const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 2500);
@@ -2022,7 +2022,12 @@ function openNaiStatus() {
         const res = await apiFetch('/ai/judge', { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ image: await blobToB64(it.blob), prompt: p, model: S.aiModel || 'gemini-2.5-flash' }) });
         const j = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(j.message || ('HTTP ' + res.status));
+        if (!res.ok) {
+          // 실패 원인을 그대로 보여준다 (모델·중단사유·응답 일부)
+          const detail = [j.finish ? '중단사유 ' + j.finish : '', j.model ? '모델 ' + j.model : ''].filter(Boolean).join(' · ');
+          out.innerHTML = detail || j.raw ? `<div class="hint">${escHtml(detail)}${j.raw ? '<br>응답: ' + escHtml(String(j.raw).slice(0, 200)) : ''}</div>` : '';
+          throw new Error(j.message || ('HTTP ' + res.status));
+        }
         const g = j.judge || {};
         const row = (k, label) => g[k] ? `<div class="jrow"><span>${label} <b>${g[k].score}/10</b></span><span class="hint">${escHtml(g[k].note || '')}</span></div>` : '';
         out.innerHTML = `<div class="judge-list">

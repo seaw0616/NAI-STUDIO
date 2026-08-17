@@ -37,8 +37,8 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = 16
-RELEASE = "11.9"            # 배포 버전. GitHub 릴리스 태그 "v11.9" 와 짝을 이룬다.
+VERSION = 17
+RELEASE = "11.10"            # 배포 버전. GitHub 릴리스 태그 "v11.10" 과 짝을 이룬다.
 UPDATE_REPO = ""            # "사용자명/저장소" — 비어 있으면 설정에서 넣는다 (config.json 의 updateRepo)
 FROZEN = getattr(sys, "frozen", False)          # PyInstaller 로 묶인 단일 exe 인가
 if FROZEN:
@@ -1349,7 +1349,9 @@ class Handler(BaseHTTPRequestHandler):
             payload = {
                 "systemInstruction": {"parts": [{"text": sysmsg}]},
                 "contents": [{"role": "user", "parts": parts}],
-                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 900, "responseMimeType": "application/json"},
+                # 2.5 계열은 "생각(thinking)" 토큰이 maxOutputTokens 를 같이 먹는다.
+                # 900 으로 두면 생각하다 한도를 다 써서 JSON 이 잘리거나 아예 비어 나온다.
+                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 4096, "responseMimeType": "application/json"},
             }
             url = ("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % model)
             req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
@@ -1357,17 +1359,33 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with urllib.request.urlopen(req, timeout=90) as r:
                     j = json.loads(r.read())
+                cands = j.get("candidates") or []
                 txt = ""
-                for c in (j.get("candidates") or []):
+                for c in cands:
                     for part in ((c.get("content") or {}).get("parts") or []):
                         txt += part.get("text") or ""
-                txt = txt.strip().strip("`")
-                if txt.startswith("json"):
+                fin = (cands[0].get("finishReason") if cands else "") or ""
+                txt = txt.strip().strip("`").strip()
+                if txt.lower().startswith("json"):
                     txt = txt[4:].strip()
+                # 앞뒤에 설명이 붙어 나와도 첫 { 부터 마지막 } 까지 잘라서 시도
+                if txt and not txt.startswith("{"):
+                    a, b = txt.find("{"), txt.rfind("}")
+                    if a >= 0 and b > a:
+                        txt = txt[a:b + 1]
                 try:
                     self._json(200, {"judge": json.loads(txt)})
                 except Exception:
-                    self._json(502, {"message": "판정 응답을 읽지 못했습니다", "raw": txt[:300]})
+                    why = ("응답이 비었습니다" if not txt else "JSON 형식이 아닙니다")
+                    if fin == "MAX_TOKENS":
+                        why = "답이 길이 제한에 걸려 잘렸습니다"
+                    elif fin in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST"):
+                        why = "이미지가 Gemini 안전 필터에 걸려 판정이 거부됐습니다 (%s)" % fin
+                    elif fin == "RECITATION":
+                        why = "Gemini 가 응답을 거부했습니다 (RECITATION)"
+                    self._json(502, {"message": "판정 실패: %s" % why,
+                                     "finish": fin, "raw": txt[:400],
+                                     "model": model})
             except urllib.error.HTTPError as e:
                 detail = ""
                 try:
