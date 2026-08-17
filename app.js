@@ -495,7 +495,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '11.11';   // 화면 표시용 앱 버전 (상단)
+const APP_VERSION = '11.12';   // 화면 표시용 앱 버전 (상단)
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 async function tryHealth(base) {
   try {
@@ -685,13 +685,20 @@ async function attachImages(body, ov) {
     const strength = ov.strength != null ? ov.strength : S.strength;
     p.noise = ov.noise != null ? ov.noise : S.noise;
     if (!ov.image && R.maskCanvas) {
-      // 인페인트: NAI 웹은 NativeInfillingRequest 로 보내고 strength 를 inpaintImg2ImgStrength 로 옮긴다
-      // (top-level strength / extra_noise_seed / color_correct 는 보내지 않음)
+      // 인페인트. 규격은 NAI 서버 스키마(image.novelai.net/docs/doc.json)와 웹 번들로 확인:
+      //  · request_type / NativeInfillingRequest 는 NAI 에 존재하지 않는 필드다 (스키마 0회, 번들 0회).
+      //    예전에 이걸 보내던 것이 마스크 영역이 뭉개지던 원인.
+      //  · 강도를 1 이 아닌 값으로 주려면 top-level strength 가 아니라
+      //    img2img:{strength, color_correct} 서브객체로 보내야 한다 (스키마: "used by inpaint").
+      //  · inpaintImg2ImgStrength 는 t2i 포함 모든 요청에 늘 들어간다(실캡처 12/12, 기본 1).
       body.action = 'infill'; body.model = info.inpaint;
-      p.request_type = 'NativeInfillingRequest';
       p.mask = maskToB64(p.width, p.height);
-      if (info.ver >= 40) p.inpaintImg2ImgStrength = strength;
-      else p.strength = strength;
+      if (info.ver >= 40) {
+        if (strength !== 1) {
+          p.inpaintImg2ImgStrength = strength;
+          p.img2img = { strength, color_correct: true };
+        }
+      } else p.strength = strength;
     } else {
       body.action = 'img2img';
       p.strength = strength;
@@ -1207,12 +1214,27 @@ function maskToB64(w, h) {
     const dw = mc.width * r, dh = mc.height * r;
     x.drawImage(mc, (w - dw) / 2, (h - dh) / 2, dw, dh);
   }
-  // NAI 웹과 동일하게 이진화: 칠한 곳=순백, 나머지=순흑, 알파 불투명.
-  // (안티앨리어싱된 회색 경계를 그대로 보내면 인페인트 경계가 뭉개진다)
+  // 이진화 + 8x8 격자 정렬.
+  // 모델은 마스크를 1/8 해상도(latent)로 줄여서 쓴다. 브러시로 1px 단위로 칠한 경계를
+  // 그대로 보내면 격자에 안 맞아 경계가 뭉개진다. NAI 웹도 1/8 로 줄였다가 되돌리고,
+  // bedovyy 클라이언트도 ceil(w/64)*8 로 줄인 뒤 8배 확대한다 — 결과는 8x8 블록 양자화.
   const d = x.getImageData(0, 0, w, h);
-  for (let i = 0; i < d.data.length; i += 4) {
-    const on = (d.data[i] + d.data[i + 1] + d.data[i + 2]) / 3 > 20 ? 255 : 0;
-    d.data[i] = d.data[i + 1] = d.data[i + 2] = on; d.data[i + 3] = 255;
+  const px = d.data;
+  const on = new Uint8Array(w * h);
+  for (let i = 0, k = 0; i < px.length; i += 4, k++) {
+    on[k] = (px[i] + px[i + 1] + px[i + 2]) / 3 > 20 ? 1 : 0;
+  }
+  for (let by = 0; by < h; by += 8) {
+    for (let bx = 0; bx < w; bx += 8) {
+      let any = 0;
+      const ye = Math.min(by + 8, h), xe = Math.min(bx + 8, w);
+      for (let y = by; y < ye && !any; y++) for (let xx = bx; xx < xe; xx++) if (on[y * w + xx]) { any = 1; break; }
+      const v = any ? 255 : 0;
+      for (let y = by; y < ye; y++) for (let xx = bx; xx < xe; xx++) {
+        const i = (y * w + xx) * 4;
+        px[i] = px[i + 1] = px[i + 2] = v; px[i + 3] = 255;
+      }
+    }
   }
   x.putImageData(d, 0, 0);
   return c.toDataURL('image/png').split(',')[1];
@@ -1917,14 +1939,19 @@ function naiMarks(q) {
 
   if (s.notice) add('사이트 공지', 1, String(s.notice).slice(0, 60));
 
-  if (!gh.enough) add('내 생성 속도', -1, `기록 ${gh.n}장 (3장 이상 필요)`);
-  else if (gh.ratio == null) add('내 생성 속도', 0, `최근 중앙값 ${gh.recentSec.toFixed(1)}s · 기준선이 모이는 중`);
+  if (!gh.enough) add('내 생성 속도', -1,
+    `같은 설정으로 ${SPD.minN}장 이상 쌓이면 판정합니다 (지금 ${gh.groupN}장)`);
   else {
-    const r = gh.ratio;
-    add('내 생성 속도', r >= 2 ? 2 : r >= 1.4 ? 1 : 0,
-      `최근 ${gh.recentSec.toFixed(1)}s · 평소 대비 <b>${r.toFixed(2)}배</b> (스텝·해상도 환산, 기준선 ${gh.baseN}장)`);
+    const bits = [`최근 ${gh.recentSec.toFixed(1)}s · 평소 ${gh.baseSec.toFixed(1)}s`,
+      `평균 <b>${gh.meanR.toFixed(2)}배</b>`];
+    if (gh.slow) bits.push(`<b>${gh.slow}/${gh.win}장</b>이 평소의 1.6배 넘게 느림`);
+    bits.push(`${gh.cfg} 기준 ${gh.baseN}장`);
+    add('내 생성 속도', gh.lv, bits.join(' · '));
   }
-  if (gh.total >= 5) add('실패율(24h)', gh.failRate >= 0.3 ? 2 : gh.failRate >= 0.1 ? 1 : 0,
+  // 실패는 원래 거의 없는 일이라(실측 359장 중 0건) 조금만 나도 알린다.
+  // 단 1건짜리 잡음은 걸러내려고 2건 이상일 때부터 본다.
+  if (gh.total >= 8) add('실패율(24h)',
+    (gh.fails >= 2 && gh.failRate >= 0.2) ? 2 : (gh.fails >= 2 && gh.failRate >= 0.08) ? 1 : 0,
     `${gh.fails}/${gh.total}회 실패 (${Math.round(gh.failRate * 100)}%)`);
 
   if (!q || !q.enough) add('그림 품질', -1, `최근 이미지 ${(q && q.n) || 0}장 (3장 이상 필요)`);
@@ -1986,22 +2013,58 @@ function recordGenFail(msg) {
   save();
 }
 const med = a => { if (!a.length) return null; const b = [...a].sort((x, y) => x - y); return b[Math.floor(b.length / 2)]; };
-/* 내 생성 실적 요약: 최근 vs 기준선(과거 중앙값) 배율 + 실패율 */
+
+/* 내 생성 실적 판정 — 사용자 실제 기록 359장으로 검증해 두 가지를 고쳤다.
+
+   (1) 설정이 다르면 비교하면 안 된다.
+       genUnit() 이 메가픽셀·스텝으로 나눠도 정규화가 덜 된다. 실측 u 중앙값:
+         1216x832 28st = 0.2295 | 832x1216 28st = 0.3106 | 1024x1024 28st = 0.3474
+       832x1216 과 1216x832 는 픽셀 수가 똑같은데 1.35배 차이다(세로가 느리다).
+       해상도만 바꿔도 지표가 1.5배 튀어 경보가 떴다 — 헛경보 14회의 주원인이었다.
+       → 같은 (해상도·스텝·장수·모델) 그룹 안에서만 비교한다.
+
+   (2) 중앙값으로는 간헐적 지연을 원리상 못 잡는다.
+       12장 중 5장이 4배로 느려도 중앙값은 7번째 값이라 안 움직인다.
+       실측 2000회: 정상 중앙값비 최대 1.206 vs 고장 최소 0.969 — 완전히 겹친다.
+       → 평균배율 + "느린 장 개수" 로 바꿨다. 이 둘은 깨끗이 갈린다.
+           평균배율    정상 최대 1.255 · 고장 최소 2.026
+           느린 장 수  정상 최대 2장   · 고장 최소 5장
+
+   임계값은 실제 359장에서 헛경보 0회가 되도록 잡았다(평균 1.6/2.0 · 느린장 3/5).
+   같은 설정 안에서도 자연 변동이 1.52배까지 가므로 그보다 낮추면 정상에도 경보가 뜬다. */
+const SPD = { warnMean: 1.6, badMean: 2.0, warnSlow: 3, badSlow: 5, slowAt: 1.6, win: 12, minN: 20 };
+const cfgKey = r => [r.w, r.h, r.st, r.n || 1, r.m || ''].join('|');
+
 function genHealth() {
   const log = (S.genLog || []).filter(x => x && x.t);
   const okAll = log.filter(x => x.u > 0);
-  if (okAll.length < 3) return { enough: false, n: okAll.length };
-  const recent = okAll.slice(-12), base = okAll.slice(0, -12);
-  const rMed = med(recent.map(x => x.u));
-  const bMed = base.length >= 8 ? med(base.map(x => x.u)) : null;
-  const ratio = bMed ? rMed / bMed : null;
+  const groups = {};
+  for (const r of okAll) (groups[cfgKey(r)] = groups[cfgKey(r)] || []).push(r);
+  let g = null;
+  for (const k in groups) if (!g || groups[k].length > g.length) g = groups[k];
+
   const day = Date.now() - 864e5;
   const recentAll = log.filter(x => x.t > day);
   const fails = recentAll.filter(x => x.fail).length;
-  const failRate = recentAll.length ? fails / recentAll.length : 0;
-  return { enough: true, n: okAll.length, recentSec: med(recent.map(x => x.sec)),
-    recentUnit: rMed, baseUnit: bMed, ratio, failRate, fails, total: recentAll.length,
-    baseN: base.length };
+  const out = { n: okAll.length, fails, total: recentAll.length,
+    failRate: recentAll.length ? fails / recentAll.length : 0,
+    groupN: g ? g.length : 0, groups: Object.keys(groups).length, enough: false };
+
+  if (!g || g.length < SPD.minN) return out;
+  const recent = g.slice(-SPD.win), prior = g.slice(0, -SPD.win);
+  if (prior.length < 8) return out;
+  const B = med(prior.map(x => x.u));
+  const meanR = (recent.reduce((a, x) => a + x.u, 0) / recent.length) / B;
+  const slow = recent.filter(x => x.u > SPD.slowAt * B).length;
+  out.enough = true;
+  out.meanR = meanR; out.slow = slow; out.win = recent.length;
+  out.recentSec = med(recent.map(x => x.sec));
+  out.baseSec = med(prior.map(x => x.sec));
+  out.baseN = prior.length;
+  out.lv = (meanR >= SPD.badMean || slow >= SPD.badSlow) ? 2
+    : (meanR >= SPD.warnMean || slow >= SPD.warnSlow) ? 1 : 0;
+  out.cfg = `${recent[0].w}×${recent[0].h} ${recent[0].st}st`;
+  return out;
 }
 function openNaiStatus() {
   openModal('NovelAI 상태 종합 판정', async body => {
