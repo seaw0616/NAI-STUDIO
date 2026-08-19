@@ -38,7 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 VERSION = 17
-RELEASE = "11.12"            # 배포 버전. GitHub 릴리스 태그 "v11.10" 과 짝을 이룬다.
+RELEASE = "11.13"            # 배포 버전. GitHub 릴리스 태그 "v11.13" 과 짝을 이룬다.
 UPDATE_REPO = ""            # "사용자명/저장소" — 비어 있으면 설정에서 넣는다 (config.json 의 updateRepo)
 FROZEN = getattr(sys, "frozen", False)          # PyInstaller 로 묶인 단일 exe 인가
 if FROZEN:
@@ -169,8 +169,13 @@ def _ydl_opts(fmt, client):
     return o
 
 
+# 합집합으로 지켜야 하는 것은 "만들어 둔 내용"뿐이다 (탭을 두 개 열어도 서로 지우지 않도록).
+#
+# ytQueue·ytHistory 는 여기 있으면 안 된다. 이 둘은 톰스톤 종류가 없어서(kind=None)
+# 합집합이 곧 "절대 지워지지 않음"이 된다 — 사용자가 대기열에서 곡을 빼도 서버가 그대로
+# 되살려 보냈다. 대기열은 지금 재생 중인 목록이라 마지막에 바꾼 쪽이 옳다(최신 우선).
 _STATE_LISTS = [("chunks", "name", "chunk"), ("styles", "id", "style"), ("characters", "name", "char"),
-                ("scenes", "id", "scene"), ("ytQueue", "id", None), ("ytHistory", "id", None)]
+                ("scenes", "id", "scene")]
 
 
 def _merge_state(cur, inc):
@@ -732,7 +737,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        # 기본은 캐시 금지지만, 호출부가 Cache-Control 을 직접 주면 그것을 따른다.
+        # (예전엔 무조건 no-store 를 먼저 보내서, 뒤에 붙는 max-age 가 헤더만 두 줄
+        #  나가고 실제로는 무시됐다 → HLS 조각이 절대 캐시되지 않아 되감을 때마다 재요청)
+        if not any(k.lower() == "cache-control" for k in (extra or {})):
+            self.send_header("Cache-Control", "no-store")
         self._cors()
         for k, v in (extra or {}).items():
             self.send_header(k, v)
@@ -1593,14 +1602,39 @@ class Handler(BaseHTTPRequestHandler):
             if not _yt_host_ok(u):
                 self._json(400, {"message": "bad url"})
                 return True
-            try:
-                req = urllib.request.Request(u, headers={"User-Agent": UA, "Origin": "https://www.youtube.com",
-                                                         "Referer": "https://www.youtube.com/"})
-                with urllib.request.urlopen(req, timeout=30) as r:
-                    data = r.read()
-                    ctype = r.headers.get("Content-Type") or "video/mp2t"
-            except Exception as e:
-                self._json(502, {"message": "seg failed: %s" % str(e)[:120]})
+            # 조각 하나를 못 받으면 hls.js 가 결국 치명적 오류를 내고 재생이 끊긴다.
+            # googlevideo 는 순간적으로 타임아웃/5xx 를 흘리므로 몇 번 다시 물어본다.
+            #
+            # 다만 두 가지를 지켜야 한다.
+            #  (1) 총 소요 시간이 클라이언트(hls.js)가 포기하는 시간을 넘으면 안 된다. 넘으면
+            #      브라우저는 이미 재요청을 보냈는데 서버 스레드만 죽은 요청을 붙들고 있게 된다.
+            #      → 시도당 10초 · 최대 3회 · 짧은 간격으로 총 21초 안쪽에 끝낸다.
+            #  (2) 다시 물어봐야 소용없는 응답은 즉시 포기한다. googlevideo 조각 URL 에는
+            #      만료 시각이 박혀 있어서, 오래 틀어두면 이후 모든 조각이 곧바로 403 을 받는다.
+            #      이때 재시도를 돌면 조각마다 1초 넘게 헛되이 버린다.
+            NO_RETRY = (400, 401, 403, 404, 410)
+            data = ctype = None
+            last = ""
+            for attempt in range(3):
+                try:
+                    req = urllib.request.Request(u, headers={"User-Agent": UA, "Origin": "https://www.youtube.com",
+                                                             "Referer": "https://www.youtube.com/"})
+                    with urllib.request.urlopen(req, timeout=10) as r:
+                        data = r.read()
+                        ctype = r.headers.get("Content-Type") or "video/mp2t"
+                    break
+                except urllib.error.HTTPError as e:
+                    last = "HTTP %d" % e.code
+                    if e.code in NO_RETRY:
+                        break
+                    if attempt < 2:
+                        time.sleep(0.3)
+                except Exception as e:
+                    last = str(e)[:120]
+                    if attempt < 2:
+                        time.sleep(0.3)
+            if data is None:
+                self._json(502, {"message": "seg failed: %s" % last})
                 return True
             if ctype == "application/octet-stream":
                 ctype = "video/mp2t"
