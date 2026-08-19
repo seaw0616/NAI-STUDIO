@@ -58,8 +58,19 @@ function openStyleManager(editId) {
     draw();
     body.querySelector('#stAdd').onclick = () => { S.styles.push({ id: uid(), name: '스타일 ' + (S.styles.length + 1), prefix: '', suffix: '', uc: '', createdAt: Date.now() }); save(); draw(); renderStyleSelects(); };
     body.querySelector('#stFromMain').onclick = () => {
-      S.styles.push({ id: uid(), name: '내 스타일 ' + (S.styles.length + 1), prefix: S.prompt.trim(), suffix: '', uc: S.uc.trim(), createdAt: Date.now() });
-      save(); draw(); renderStyleSelects(); toast('현재 프롬프트를 앞 고정 프롬프트로 넣었습니다 — 가변 부분은 지워서 정리하세요');
+      /* 프롬프트를 스타일로 옮겨 담는 기능이다. 그런데 원래 칸을 그대로 두면, 그 스타일을
+         고르는 순간 앞 고정 프롬프트 + 칸 내용으로 전부 두 번 나간다(토큰·Anlas 낭비에
+         그림도 망가진다). 예전엔 토스트 한 줄이 유일한 경고라 알아채기 어려웠다.
+         → 옮긴 것인지 복사한 것인지 그 자리에서 정하게 한다. */
+      const p = S.prompt.trim(), u = S.uc.trim();
+      if (!p && !u) { toast('프롬프트가 비어 있습니다', 'err'); return; }
+      S.styles.push({ id: uid(), name: '내 스타일 ' + (S.styles.length + 1), prefix: p, suffix: '', uc: u, createdAt: Date.now() });
+      const moved = confirm('현재 프롬프트를 스타일에 담았습니다.\n\n프롬프트 칸을 비울까요?\n\n'
+        + '[확인] 비우기 — 스타일이 그 내용을 넣어줍니다 (권장)\n'
+        + '[취소] 그대로 두기 — 이 스타일을 고르면 같은 내용이 두 번 들어갑니다');
+      if (moved) { S.prompt = ''; S.secText = {}; S.uc = ''; if (typeof renderSections === 'function') renderSections(); if (typeof syncUI === 'function') syncUI(); }
+      save(); draw(); renderStyleSelects();
+      toast(moved ? '스타일로 옮겼습니다 — 프롬프트 칸은 비웠습니다' : '스타일로 복사했습니다 — 칸에 남은 내용과 겹치면 두 번 들어갑니다');
     };
     body.querySelector('#stExport').onclick = () => downloadBlob(new Blob([JSON.stringify(S.styles, null, 2)], { type: 'application/json' }), 'nai-styles.json');
     body.querySelector('#stImport').onclick = () => pickFiles(false, async f => {

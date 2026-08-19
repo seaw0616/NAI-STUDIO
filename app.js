@@ -349,6 +349,19 @@ function expandChunks(s, depth) {
   return out === s ? s : expandChunks(out, depth + 1);
 }
 function isChunkToken(tok) { const t = normKey(tok.replace(/^-?[\d.]+::/, '').replace(/::$/, '').replace(/^@/, '')); return !!t && S.chunks.some(c => normKey(c.name) === t); }
+/* 최종 프롬프트에서 두 번 이상 나오는 태그를 찾는다.
+   가중치 표기(1.4::tag::, {tag}, [tag])와 대소문자·공백·언더바 차이는 같은 태그로 본다. */
+function dupTags(text) {
+  const seen = new Map();
+  for (let t of String(text || '').split(/[,\n]/)) {
+    t = t.replace(/-?[\d.]+::/g, '').replace(/::/g, '').replace(/[{}\[\]]/g, '')
+         .replace(/_/g, ' ').trim().toLowerCase();
+    if (t.length < 2) continue;                       // 빈 칸이나 한 글자는 무시
+    seen.set(t, (seen.get(t) || 0) + 1);
+  }
+  return [...seen].filter(([, n]) => n > 1).sort((a, b) => b[1] - a[1]).map(([tag, n]) => ({ tag, n }));
+}
+
 /* 최종 프롬프트 미리보기 (실제 전송될 형태 — 랜덤 <a|b>는 생성 때 다시 뽑힘) */
 function previewFinal() {
   const st = getStyle(S.activeStyle);
@@ -368,8 +381,18 @@ function updatePreview() {
   // 토큰 수 (T5, V4/4.5 한도 512) — 넘으면 뒤가 잘리므로 눈에 띄게
   const tok = typeof countTokens === 'function' ? countTokens(p) : null;
   const tokTxt = tok == null ? '' : ` · 토큰 ${tok}/512${tok > 512 ? ' ⚠ 초과분은 무시됩니다' : ''}`;
+  // 같은 태그가 여러 번 들어가는 것을 눈에 보이게 한다.
+  // 스타일 프리셋의 앞 고정 프롬프트가 지금 칸에 있는 내용과 겹치면 프롬프트가 통째로
+  // 두 번 나가는데(토큰·Anlas 낭비에 그림도 망가진다) 예전엔 알 방법이 전혀 없었다.
+  const dup = dupTags(p);
+  const dupTxt = dup.length ? ` · ⚠ 중복 태그 ${dup.length}개` : '';
   $('#pvInfo').textContent = `${p.length}자${tokTxt} · 청크 ${nChunks}개 치환` + (nFrag ? ` · 조각/랜덤 ${nFrag}개` : '')
-    + (S.activeStyle && getStyle(S.activeStyle) ? ' · 스타일 "' + getStyle(S.activeStyle).name + '" 적용' : '') + ' · 생성할 때마다 다시 랜덤';
+    + (S.activeStyle && getStyle(S.activeStyle) ? ' · 스타일 "' + getStyle(S.activeStyle).name + '" 적용' : '') + dupTxt + ' · 생성할 때마다 다시 랜덤';
+  $('#pvInfo').title = dup.length
+    ? '두 번 이상 들어간 태그: ' + dup.slice(0, 12).map(d => `${d.tag} ×${d.n}`).join(', ')
+      + (dup.length > 12 ? ` … 외 ${dup.length - 12}개` : '')
+      + '\n스타일 프리셋의 앞/뒤 고정 프롬프트와 프롬프트 칸에 같은 내용이 들어 있지 않은지 확인해 보세요.'
+    : '';
 }
 /* 청크 치환 — 단, <...> 안(조각 이름·랜덤 옵션)은 건드리지 않는다.
    이걸 안 하면 <의상> 의 "의상" 이 청크 본문으로 먼저 바뀌어 <본문전체> 가 되고,
