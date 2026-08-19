@@ -183,7 +183,9 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
     if (!srv || !srv.savedAt) { R.booted = true; pushStateToServer(); return false; }
     const localNewer = (S.savedAt || 0) >= srv.savedAt && !forceMerge;
     const base = localNewer ? { ...S } : { ...DEFAULTS, ...srv }, other = localNewer ? srv : S;
-    for (const [k, key, kind] of [['chunks', 'name', 'chunk'], ['styles', 'id', 'style'], ['characters', 'name', 'char'], ['scenes', 'id', 'scene'], ['ytQueue', 'id', null], ['ytHistory', 'id', null]])
+    // 대기열·기록은 합치지 않는다. 톰스톤이 없어서 합집합이 곧 '절대 못 지움'이 되기 때문에
+    // 대기열에서 뺀 곡이 서버/다른 탭에서 그대로 되살아났다. 이 둘은 최신 쪽(base)을 그대로 쓴다.
+    for (const [k, key, kind] of [['chunks', 'name', 'chunk'], ['styles', 'id', 'style'], ['characters', 'name', 'char'], ['scenes', 'id', 'scene']])
       base[k] = mergeByKey(base[k], other[k], key, kind, S.deleted, srv.deleted);
     base.deleted = { ...(srv.deleted || {}), ...(S.deleted || {}) };
     base.chunkCats = [...new Set([...(base.chunkCats || []), ...(other.chunkCats || [])])].filter(c => !isTombed(base.deleted, 'cat', c));
@@ -495,7 +497,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '11.12';   // 화면 표시용 앱 버전 (상단)
+const APP_VERSION = '11.13';   // 화면 표시용 앱 버전 (상단)
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 async function tryHealth(base) {
   try {
@@ -1720,6 +1722,47 @@ function updateRefBadge() {
   const parts = [R.i2iBlob ? (R.maskCanvas ? '인페인트' : 'i2i') : '', R.vibes.length ? '바이브 ' + R.vibes.length : '',
     R.prefs.length ? '레퍼런스 ' + R.prefs.length + (prefOk ? '' : ' (V4.5 전용·미적용)') : ''].filter(Boolean);
   b.textContent = parts.join(' · ');
+  renderAttachBar();
+}
+/* 붙어 있는 이미지 입력을 생성 버튼 옆에서 바로 떼는 줄.
+   칩 본문을 누르면 해당 패널이 열리고, ✕ 를 누르면 그 자리에서 떨어진다. */
+function renderAttachBar() {
+  const bar = $('#attachBar'); if (!bar) return;
+  const prefOk = MODELS[S.model].ver >= 45;
+  const chips = [];
+  if (R.i2iBlob && R.maskCanvas) chips.push({ ico: '🖌', txt: '인페인트 마스크', tip: '마스크만 떼기 — 이미지는 남아서 일반 i2i 가 됩니다',
+    tab: 'i2i', off: () => { R.maskCanvas = null; updateI2IUI(); toast('마스크를 뗐습니다 — 이제 일반 i2i 입니다'); } });
+  if (R.i2iBlob) chips.push({ ico: '🖼', txt: R.maskCanvas ? '원본 이미지' : 'i2i 이미지', tip: '이미지 입력을 완전히 떼기 (t2i 로 돌아감)',
+    tab: 'i2i', off: () => { clearI2I(); toast('이미지 입력을 뗐습니다 — 일반 생성(t2i)'); } });
+  if (R.vibes.length) chips.push({ ico: '🎨', txt: `바이브 ${R.vibes.length}`, tip: '바이브 트랜스퍼 전부 떼기',
+    tab: 'vibe', off: () => { R.vibes = []; renderVibes(); toast('바이브를 전부 뗐습니다'); } });
+  if (R.prefs.length) chips.push({ ico: '📐', txt: `레퍼런스 ${R.prefs.length}${prefOk ? '' : ' (V4.5 전용·미적용)'}`, tip: 'Precise Reference 전부 떼기',
+    tab: 'pref', off: () => { R.prefs = []; renderPrefs(); toast('레퍼런스를 전부 뗐습니다'); } });
+
+  bar.hidden = !chips.length;
+  bar.innerHTML = '';
+  if (!chips.length) return;
+  bar.appendChild(Object.assign(document.createElement('span'), { className: 'hint', textContent: '붙은 이미지' }));
+  for (const c of chips) {
+    const el = document.createElement('span'); el.className = 'achip'; el.title = c.tip;
+    el.innerHTML = `<b></b><i></i><button class="x" title="떼기">✕</button>`;
+    el.querySelector('b').textContent = c.ico;
+    el.querySelector('i').textContent = c.txt;
+    el.onclick = e => { if (e.target.closest('.x')) return; openRefPanel(c.tab); };
+    el.querySelector('.x').onclick = e => { e.stopPropagation(); c.off(); };
+    bar.appendChild(el);
+  }
+  if (chips.length > 1) {
+    const all = document.createElement('button'); all.className = 'btn xs danger'; all.textContent = '전부 떼기';
+    all.title = '붙어 있는 이미지 입력을 모두 떼고 일반 생성으로 돌아갑니다';
+    all.onclick = () => { clearI2I(); R.vibes = []; renderVibes(); R.prefs = []; renderPrefs(); toast('붙은 이미지를 전부 뗐습니다'); };
+    bar.appendChild(all);
+  }
+}
+function openRefPanel(tab) {   // '이미지 입력' 카드를 펼치고 해당 탭으로 (칩에서 바로 이동)
+  const card = $('#refBadge') && $('#refBadge').closest('details');
+  if (card) { card.open = true; card.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+  switchRefTab(tab);
 }
 function rebuildUcPresets() {
   const sel = $('#ucPreset'); sel.innerHTML = '';

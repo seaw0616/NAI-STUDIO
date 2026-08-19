@@ -377,6 +377,27 @@ function agcAttach(v) {
 }
 function agcDetach() { clearInterval(AGC.timer); if (AGC.src) { try { AGC.src.disconnect(); } catch (e) {} } AGC.src = null; AGC.el = null; }
 function ytSetVolume(pct) { S.ytVol = pct; const live = (ytPlayDirect._v && ytPlayDirect._v.isConnected) ? ytPlayDirect._v : $('#ytVideo'); if (AGC.el && AGC.user && AGC.el === live) { AGC.user.gain.value = pct / 100; if (AGC.el.volume !== 1) AGC.el.volume = 1; } else { const v = ytPlayDirect._v && ytPlayDirect._v.isConnected ? ytPlayDirect._v : $('#ytVideo'); if (v) { v._progVol = true; v.volume = pct / 100; if (pct > 0 && v.muted) { v.muted = false; S.ytMuted = false; } setTimeout(() => { v._progVol = false; }, 50); } } }
+/* 끊겼다 다시 틀 때 "보던 위치"를 잃지 않기 위한 장치.
+   예전에는 화질을 바꾸거나 스트림이 한 번 끊기기만 해도 플레이어를 통째로 새로 만들어
+   0초부터 다시 시작했다.
+
+   목표 위치는 "실제로 그 지점까지 재생될 때까지" 붙잡고 있어야 한다. 한 번 쓰고 지우면
+   복구 시도가 연달아 실패할 때(1080p→720p→480p) 두 번째 시도부터 위치가 0 으로 날아간다. */
+function ytLiveVideo() { const v = ytPlayDirect._v; return (v && v.isConnected) ? v : $('#ytVideo'); }
+function ytSetResume(item, t) { if (item && item.id && t > 1 && isFinite(t)) YT._resume = { id: item.id, t }; }
+function ytWantResume(item) { const r = YT._resume; return (r && item && r.id === item.id) ? r.t : 0; }
+function ytKeepPos() {          // 지금 보던 위치를 기억 (같은 곡을 다시 열 때만 쓰인다)
+  const v = ytLiveVideo();
+  if (v && isFinite(v.currentTime) && v.currentTime > 1) ytSetResume(YT.cur, v.currentTime);
+  return ytWantResume(YT.cur);
+}
+function ytSeekTo(v, t) {       // 메타데이터가 준비된 뒤에 이동 (준비 전엔 무시된다)
+  if (!v || !(t > 1)) return;
+  const go = () => { try { if (Math.abs(v.currentTime - t) > 1.5) v.currentTime = t; } catch (e) {} };
+  if (v.readyState >= 1) go(); else v.addEventListener('loadedmetadata', go, { once: true });
+}
+function ytReplayHere() { const t = ytKeepPos(); if (YT.cur) ytPlayDirect(YT.cur); return t; }
+
 function ytBindVideoEvents(v, item, cands, getCi, tryNext, load, diag) {
   // 플레이어 안 기본 컨트롤로 볼륨/음소거를 바꿔도 앱 설정과 슬라이더에 반영 → 다음 곡에도 그대로 유지
   v.onvolumechange = () => {
@@ -385,13 +406,48 @@ function ytBindVideoEvents(v, item, cands, getCi, tryNext, load, diag) {
     if (S.ytMuted !== v.muted) { S.ytMuted = v.muted; save(); }
   };
   v.muted = !!S.ytMuted;
-  v.onerror = () => { if (YT.cur !== item || !v.isConnected || !v.getAttribute('src')) return; const ci = getCi(); diag.push(`${cands[ci - 1] ? cands[ci - 1][0] : '?'}: 재생 오류 코드 ${v.error ? v.error.code : '?'}`); tryNext(); };
-  v.onplaying = () => { load.hidden = true; YT.playing = true; YT._audioRetry = false; ytSetPlayIcon(true); if (S.ytNormalize && v.crossOrigin === 'anonymous') agcAttach(v); else if (!AGC.el || AGC.el !== v) { const want = (S.ytVol == null ? 60 : S.ytVol) / 100; if (Math.abs(v.volume - want) > 0.005) { v._progVol = true; v.volume = want; setTimeout(() => { v._progVol = false; }, 50); } } };
+  v.onerror = () => {
+    if (YT.cur !== item || !v.isConnected || !v.getAttribute('src')) return;   // 요소가 교체되면 isConnected 로 걸러진다
+    if (YT._hls) return;                       // HLS 재생 중이면 hls.js 가 스스로 복구한다
+    // 이미 잘 나오던 중에 난 오류는 "이 소스가 틀렸다"가 아니라 "도중에 끊겼다"는 뜻이다.
+    // 다음 후보로 넘기면 0초부터 다시 시작하므로, 같은 소스로 보던 위치에서 이어 붙인다.
+    const t = v.currentTime;
+    // 재시도 예산은 '재생이 시작될 때마다'가 아니라 '같은 자리에서 반복될 때' 기준이어야 한다.
+    // onplaying 에서 리셋하면 잠깐 재생됐다 또 끊기는 스트림에서 무한히 되돌아온다.
+    // 지난 오류 이후 20초 넘게 실제로 진행했다면 그때만 예산을 회복시킨다.
+    if (v._lastErrT == null || t - v._lastErrT > 20) v._resumeTries = 0;
+    v._lastErrT = t;
+    if (t > 1 && (v._resumeTries = (v._resumeTries || 0) + 1) <= 3) {
+      diag.push(`재생 중 끊김 ${t.toFixed(0)}s — 이어서 재시도 ${v._resumeTries}/3`);
+      ytSetResume(item, t);
+      const src = v.src;
+      load.hidden = false; load.textContent = `⏳ 끊긴 지점(${fmtDur(t)})부터 이어서…`;
+      v.src = src; v.load(); ytSeekTo(v, t); v.play().catch(() => {});
+      return;
+    }
+    const ci = getCi(); diag.push(`${cands[ci - 1] ? cands[ci - 1][0] : '?'}: 재생 오류 코드 ${v.error ? v.error.code : '?'}`); tryNext();
+  };
+  v.onplaying = () => { load.hidden = true; YT.playing = true; YT._audioRetry = false; if (YT._resume && YT._resume.id === item.id && v.currentTime >= YT._resume.t - 3) YT._resume = null; ytSetPlayIcon(true); if (S.ytNormalize && v.crossOrigin === 'anonymous') agcAttach(v); else if (!AGC.el || AGC.el !== v) { const want = (S.ytVol == null ? 60 : S.ytVol) / 100; if (Math.abs(v.volume - want) > 0.005) { v._progVol = true; v.volume = want; setTimeout(() => { v._progVol = false; }, 50); } } };
   v.onpause = () => { YT.playing = false; ytSetPlayIcon(false); };
   v.onended = () => { YT.playing = false; ytSetPlayIcon(false); if (S.ytQueue.length || S.ytAutoRelated !== false) ytNext(); };
 }
+function fmtDur(s) { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
 function ytPlayDirectMode(item, mode) { YT._forceMode = mode; const p = ytPlayDirect(item); YT._forceMode = null; return p; }
 async function ytPlayDirect(item) {
+  // 이어보기: 같은 곡을 다시 여는 경우(화질 변경·오디오 전환·오류 복구)에만 위치를 물려받는다.
+  // 목록에서 곡을 새로 고른 경우에는 0초부터 — 그래서 자동이 아니라 호출한 쪽이 명시한다.
+  if (!YT.cur || YT.cur.id !== item.id) { YT._resume = null; YT._qualCap = 0; YT._noHls = null; }
+  const resumeAt = ytWantResume(item);
+  /* 재진입 무효화 토큰. 예전에는 `YT.cur !== item` 으로만 걸렀는데, 화질 변경·오디오 전환은
+     같은 item 객체를 그대로 다시 넘기므로 그 검사를 통과한다. 그러면 앞서 진행 중이던
+     호출이 끝까지 살아남아 나중에 tryNext() 를 돌리고 ytPlayDirect._v 를 덮어써서,
+     플레이어가 둘로 갈라지거나 방금 만든 요소가 엉뚱한 소스로 바뀐다. */
+  const gen = (YT._gen = (YT._gen || 0) + 1);
+  const stale = () => YT._gen !== gen;
+  // 앞 곡의 hls.js 인스턴스를 반드시 여기서 정리한다. 남겨두면 HLS 를 안 쓰는 곡에서도
+  // YT._hls 가 참인 채라 onerror 의 "HLS 는 hls.js 가 알아서 복구" 분기에 걸려
+  // 재생이 끊겨도 아무 복구가 안 된다.
+  ytDestroyHls();
   YT.cur = item; YT.pop = false; YT.direct = true; YT.directUrl = null; ytRemember(item);
   const wrap = $('#ytPlayerWrap');
   wrap.innerHTML = `<div class="ytv"><video id="ytVideo" controls autoplay playsinline preload="auto"${item.thumb ? ` poster="${esc(item.thumb)}"` : ''}></video>
@@ -406,18 +462,12 @@ async function ytPlayDirect(item) {
     if (r.status === 503) { load.textContent = '엔진 미설치'; const ok = await ytEngineEnsure(true); if (ok) return ytPlayDirect(item); setYtMode('embed'); return ytPlay(item, true); }
     if (!r.ok) throw await apiError(r);
     const j = await r.json();
-    if (YT.cur !== item) return;
+    if (stale()) return;
     YT.directUrl = j.url;
     if (j.title) { $('#ytNowTitle').textContent = j.title; $('#ytHeadTitle').textContent = j.title; item.title = item.title || j.title; }
     if (!item.thumb && j.thumb) v.poster = j.thumb;
-    // 480p 이상은 유튜브가 HLS 로만 준다 → hls.js 로 재생 (progressive 는 itag 18 = 360p 뿐)
     YT.hls = (j.hls || []);
     ytFillQualSelect();
-    if (useMode === 'video' && YT.hls.length) {
-      const want = S.ytQual && S.ytQual !== 'auto' ? +S.ytQual : Math.max(...YT.hls.map(x => x.h));
-      const pick = YT.hls.find(x => x.h === want) || YT.hls.find(x => x.h <= want) || YT.hls[0];
-      if (pick && await ytPlayHls(v, pick, load)) return;   // 성공하면 아래 progressive 경로는 건너뜀
-    }
     // 소스 후보: ① 서버 경유(가장 안정적) ② 직접 URL. 각 후보는 재생 전에 미리 검사(Range 0-0)해 상태를 기록 → 실패 원인이 남음.
     // 다 실패하면 오디오만 한 번 더(이번 곡에만), 그래도 안 되면 오류 패널(자동 전환 없음 → 루프 방지)
     const proxyOf = u => R.api + '/yt/media?u=' + b64url(new TextEncoder().encode(u)) + '&id=' + encodeURIComponent(item.id) + '&mode=' + (YT._forceModeUsed || 'video');
@@ -441,7 +491,7 @@ async function ytPlayDirect(item) {
         const me = v.error ? `코드 ${v.error.code}${v.error.message ? ' · ' + v.error.message : ''}` : '알 수 없음';
         er.innerHTML = `<div>이 영상은 직접 재생이 안 됩니다 (${esc(me)})</div><div class="hint" style="color:#ccc">${esc(diag.join(' · ') || '진단 정보 없음')}</div><div class="row" style="justify-content:center;margin-top:6px">
           <button class="btn sm primary" id="ytDrRetry">↻ 다시 시도</button><button class="btn sm" id="ytDrEmbed">임베드로 재생</button><button class="btn sm" id="ytDrTab">🡕 유튜브 탭</button>${S.ytQueue.length ? '<button class="btn sm" id="ytDrNext">⏭ 다음 곡</button>' : ''}<button class="btn sm" id="ytDrUpd">엔진 업데이트</button></div>`;
-        er.querySelector('#ytDrRetry').onclick = () => { YT.directFail[item.id] = false; ytPlayDirect(item); };
+        er.querySelector('#ytDrRetry').onclick = () => { YT.directFail[item.id] = false; YT._noHls = null; ytPlayDirect(item); };
         er.querySelector('#ytDrEmbed').onclick = () => { setYtMode('embed'); YT._embedTry = 0; YT._embedList = null; ytPlay(item, true); };
         er.querySelector('#ytDrTab').onclick = () => ytPopup(item);
         const nb = er.querySelector('#ytDrNext'); if (nb) nb.onclick = ytNext;
@@ -451,8 +501,8 @@ async function ytPlayDirect(item) {
       }
       const [label, src] = cands[ci++];
       load.hidden = false; load.textContent = '⏳ ' + label + ' 검사 중…';
-      if (!(await preflight(label, src))) { if (YT.cur !== item) return; return tryNext(); }
-      if (YT.cur !== item) return;
+      if (!(await preflight(label, src))) { if (stale()) return; return tryNext(); }
+      if (stale()) return;
       load.textContent = '⏳ ' + label + '로 재생 준비…';
       const viaProxy = src.startsWith(R.api + '/yt/media');
       // 노멀라이저는 같은 출처(프록시) 스트림에서만 가능 — 직접 URL(교차 출처)에선 끔. 소스가 바뀌면 오디오 그래프에 물리지 않은 새 요소로 교체
@@ -460,10 +510,21 @@ async function ytPlayDirect(item) {
       const vv = ytPlayDirect._v || v;
       vv._progVol = true; vv.volume = (S.ytVol == null ? 60 : S.ytVol) / 100; vv.muted = !!S.ytMuted; setTimeout(() => { vv._progVol = false; }, 50); // 요소가 바뀌어도 설정한 볼륨 유지
       if (viaProxy && S.ytNormalize) vv.crossOrigin = 'anonymous'; else vv.removeAttribute('crossorigin');
-      vv.src = src; vv.load(); vv.play().catch(() => { load.textContent = '▶ 를 눌러 재생 (브라우저 자동재생 차단)'; });
+      // resumeAt(진입 시점 상수)이 아니라 최신 목표를 읽어야 한다. 재생 중 끊겨 여기까지 온 경우
+      // onerror 가 그 사이 목표를 갱신해 두는데, 낡은 값을 쓰면 대체 후보가 0초부터 시작한다.
+      vv.src = src; vv.load(); ytSeekTo(vv, ytWantResume(item) || resumeAt); vv.play().catch(() => { load.textContent = '▶ 를 눌러 재생 (브라우저 자동재생 차단)'; });
     };
     ytPlayDirect._v = v;
     ytBindVideoEvents(v, item, cands, () => ci, tryNext, load, diag);
+    // 480p 이상은 유튜브가 HLS 로만 준다 → hls.js 로 재생 (progressive 는 itag 18 = 360p 뿐).
+    // 이벤트를 먼저 걸어두는 이유: 예전엔 HLS 성공 즉시 return 해서 onended·볼륨 저장·재생아이콘이
+    // 하나도 안 걸렸다. 그래서 HLS(=사실상 모든 영상 재생)에서는 곡이 끝나도 다음 곡으로 안 넘어갔다.
+    if (useMode === 'video' && YT.hls.length && YT._noHls !== item.id) {
+      let want = S.ytQual && S.ytQual !== 'auto' ? +S.ytQual : Math.max(...YT.hls.map(x => x.h));
+      if (YT._qualCap && YT._qualCap < want) want = YT._qualCap;   // 끊겨서 임시로 낮춘 경우
+      const pick = YT.hls.find(x => x.h === want) || YT.hls.find(x => x.h <= want) || YT.hls[0];
+      if (pick && await ytPlayHls(v, pick, load, item, resumeAt)) return;
+    }
     tryNext();
   } catch (e) {
     load.hidden = true; const er = $('#ytErr'); er.hidden = false;
@@ -483,6 +544,10 @@ async function ytPlayList(item) { // 재생목록 → 서버가 항목을 풀어
   } catch (e) { toast('재생목록 불러오기 실패: ' + e.message, 'err'); }
 }
 function ytPlay(item, force) {
+  /* 여기로 들어온다는 것은 "이 곡을 새로 튼다"는 뜻이다 — 목록 클릭, 대기열 자동 진행(ytNext),
+     전부 재생, 검색창에 주소 입력. 끊김 복구는 ytPlayDirect 를 직접 부르므로 여기를 거치지 않는다.
+     남아 있던 이어보기 목표를 안 지우면 대기열에 같은 곡이 두 번 있을 때 두 번째가 중간부터 나온다. */
+  YT._resume = null; YT._qualCap = 0; YT._noHls = null;
   if (!YT.cur || YT.cur.id !== item.id || YT.cur.list !== item.list) { YT._embedTry = 0; YT._embedList = null; YT.altTries = 0; YT.altSeen = null; }
   const mode = ytMode();
   if (!force && (mode === 'tab' || mode === 'popup')) { ytPopup(item); return; }
@@ -613,11 +678,18 @@ function renderYtHistory() {
   const box = $('#ytHist'); if (!box) return; box.innerHTML = '';
   const h = S.ytHistory || [];
   const bar = document.createElement('div'); bar.className = 'row'; bar.style.padding = '2px 4px 6px';
-  bar.innerHTML = `<span class="hint" style="flex:1">최근 재생 ${h.length}곡 · 대기열에서 빠져도 여기 남습니다</span><button class="btn xs" id="ytHistAll">＋ 전부 대기열</button><button class="btn xs ghost" id="ytHistRecover">🛟 복구</button>`;
+  bar.innerHTML = `<span class="hint" style="flex:1">최근 재생 ${h.length}곡 · 대기열에서 빠져도 여기 남습니다</span><button class="btn xs" id="ytHistAll">＋ 전부 대기열</button><button class="btn xs ghost" id="ytHistRecover">🛟 복구</button><button class="btn xs danger" id="ytHistClear" title="재생 기록을 전부 지웁니다">🗑</button>`;
   box.appendChild(bar);
   bar.querySelector('#ytHistAll').onclick = () => { h.forEach(it => S.ytQueue.push(it)); save(); renderYtQueue(); toast(h.length + '곡 대기열 추가'); };
   bar.querySelector('#ytHistRecover').onclick = openYtRecover;
-  h.forEach(it => box.appendChild(ytItemEl(it, {})));
+  bar.querySelector('#ytHistClear').onclick = () => {
+    if (!h.length || !confirm(`재생 기록 ${h.length}곡을 전부 지웁니다. 계속할까요?`)) return;
+    S.ytHistory = []; save(); renderYtHistory(); toast('재생 기록을 지웠습니다');
+  };
+  h.forEach(it => box.appendChild(ytItemEl(it, {
+    remove: x => { S.ytHistory = (S.ytHistory || []).filter(y => y !== x); save(); renderYtHistory(); },
+    removeTip: '이 곡을 재생 기록에서 빼기',
+  })));
   if (!h.length) { const e = document.createElement('div'); e.className = 'hint'; e.style.padding = '8px'; e.textContent = '아직 재생 기록이 없습니다'; box.appendChild(e); }
 }
 async function openYtRecover() { // 이전 브라우저/서버 이전 상태에서 대기열·검색결과·기록 복구
@@ -650,17 +722,39 @@ function ytItemEl(it, opts) {
   d.querySelector('.yt-t').textContent = it.title || it.id;
   d.querySelector('.yt-s').textContent = [it.related ? '🎶 연관' : '', it.noembed ? ((R.srvInfo && R.srvInfo.ytEngine) ? '🚫 임베드 불가 → 직접 재생' : '🚫 임베드 불가') : '', it.channel, it.len, it.views].filter(Boolean).join(' · ');
   if (!opts.queue && it.id) { const rb = document.createElement('button'); rb.className = 'ic yt-add'; rb.title = '이 곡 기반 연관 곡으로 이어듣기 (알고리즘)'; rb.textContent = '🎶'; rb.onclick = e => { e.stopPropagation(); ytFillRelated(it); }; d.appendChild(rb); }
+  // 기록·내 재생목록처럼 "빼기"가 따로 필요한 목록은 제거 버튼을 하나 더 단다
+  if (opts.remove) { const xb = document.createElement('button'); xb.className = 'ic yt-add yt-del'; xb.title = opts.removeTip || '목록에서 빼기'; xb.textContent = '✕'; xb.onclick = e => { e.stopPropagation(); opts.remove(it); }; d.appendChild(xb); }
   if (it.noembed) d.classList.add('noembed');
-  d.onclick = () => { YT.altTries = 0; YT.altSeen = null; YT._embedTry = 0; YT._embedList = null; if (it.noembed && ytMode() === 'embed') { if (R.srvInfo && R.srvInfo.ytEngine) { toast('임베드가 막힌 영상 → 직접 재생'); ytPlayDirect(it); } else ytPopup(it); return; } ytPlay(it); };
+  // 목록에서 직접 고른 것은 '처음부터 듣겠다'는 뜻이다 — 남아 있던 이어보기 목표를 버린다
+  d.onclick = () => { YT._resume = null; YT._qualCap = 0; YT._noHls = null; YT.altTries = 0; YT.altSeen = null; YT._embedTry = 0; YT._embedList = null; if (it.noembed && ytMode() === 'embed') { if (R.srvInfo && R.srvInfo.ytEngine) { toast('임베드가 막힌 영상 → 직접 재생'); ytPlayDirect(it); } else ytPopup(it); return; } ytPlay(it); };
   d.querySelector('.yt-add').onclick = e => { e.stopPropagation(); if (opts.queue) { S.ytQueue.splice(opts.idx, 1); save(); renderYtQueue(); } else ytEnqueue(it); };
   return d;
 }
 function renderYtResults() { const box = $('#ytResults'); box.innerHTML = ''; ytLastResults.forEach(it => box.appendChild(ytItemEl(it, {}))); }
 function renderYtQueue() {
   const box = $('#ytQueue'); box.innerHTML = '';
+  const n = S.ytQueue.length;
+  if (n) {
+    // 재생목록을 통째로 넣으면 수십~수백 곡이 쌓인다 → 한 곡씩 ✕ 말고 통째로 빼는 길도 준다
+    const bar = document.createElement('div'); bar.className = 'row'; bar.style.padding = '2px 4px 6px';
+    bar.innerHTML = `<span class="hint" style="flex:1">${n}곡 · 각 줄의 ✕ 로 한 곡씩 뺄 수 있습니다</span>
+      <button class="btn xs" id="ytQDedup" title="같은 곡이 여러 번 들어간 것을 정리">중복 정리</button>
+      <button class="btn xs danger" id="ytQClear" title="대기열을 통째로 비웁니다">🗑 전부 빼기</button>`;
+    box.appendChild(bar);
+    bar.querySelector('#ytQClear').onclick = () => {
+      if (!confirm(`대기열 ${n}곡을 전부 뺍니다. 계속할까요?\n(기록 탭에 남아 있어 되돌릴 수 있습니다)`)) return;
+      S.ytQueue = []; save(); renderYtQueue(); toast(`${n}곡을 대기열에서 뺐습니다`);
+    };
+    bar.querySelector('#ytQDedup').onclick = () => {
+      const seen = new Set(); const kept = S.ytQueue.filter(x => { const k = x.id || x.list; if (!k || seen.has(k)) return false; seen.add(k); return true; });
+      const gone = n - kept.length;
+      if (!gone) { toast('중복이 없습니다'); return; }
+      S.ytQueue = kept; save(); renderYtQueue(); toast(`중복 ${gone}곡 제거`);
+    };
+  }
   S.ytQueue.forEach((it, i) => box.appendChild(ytItemEl(it, { queue: true, idx: i })));
-  if (!S.ytQueue.length) box.innerHTML = '<div class="hint" style="padding:8px">대기열이 비었습니다 — 검색 결과의 ＋ 로 추가</div>';
-  $('#ytQueueN').textContent = S.ytQueue.length ? `(${S.ytQueue.length})` : '';
+  if (!n) box.innerHTML = '<div class="hint" style="padding:8px">대기열이 비었습니다 — 검색 결과의 ＋ 로 추가</div>';
+  $('#ytQueueN').textContent = n ? `(${n})` : '';
 }
 async function ytSearch(q) {
   q = q.trim(); if (!q) return;
@@ -829,12 +923,12 @@ function initYouTube() {
   $('#ytRelatedNow').onclick = async () => { const ok = await ytFillRelated(null); if (ok) { $('#ytTabQ').click(); if (!YT.cur && S.ytQueue.length) ytNext(); } };
   $('#ytAudioBtn').onclick = () => {
     S.ytAudioOnly = !S.ytAudioOnly; save(); ytPaintAudioBtn();
-    if (YT.direct && YT.cur) ytPlayDirect(YT.cur);
+    if (YT.direct && YT.cur) ytReplayHere();
     toast(S.ytAudioOnly ? '🎧 오디오만 (고음질 · 화면 없음)' : '🎬 영상 + 오디오');
   };
   ytPaintAudioBtn();
   const qs2 = $('#ytQual');
-  if (qs2) qs2.onchange = () => { S.ytQual = qs2.value; save(); if (YT.direct && YT.cur) ytPlayDirect(YT.cur); };
+  if (qs2) qs2.onchange = () => { S.ytQual = qs2.value; save(); YT._noHls = null; YT._qualCap = 0; if (YT.direct && YT.cur) ytReplayHere(); };  // 직접 고른 화질이 자동 강등에 눌리면 안 된다
   $('#ytModeBtn').onclick = openYtAccountGuide;
   $('#ytModeLbl').textContent = ({ direct: '직접', embed: '임베드', tab: '탭', popup: '팝업' })[ytMode()];
   window.onServerUp = (orig => () => { if (orig) orig(); const l = $('#ytModeLbl'); if (l) l.textContent = ({ direct: '직접', embed: '임베드', tab: '탭', popup: '팝업' })[ytMode()]; })(window.onServerUp);
@@ -1580,11 +1674,12 @@ async function ensureHlsLib() {
   return _hlsLib;
 }
 function ytDestroyHls() { if (YT._hls) { try { YT._hls.destroy(); } catch (e) {} YT._hls = null; } }
-async function ytPlayHls(video, variant, load) {
+async function ytPlayHls(video, variant, load, item, resumeAt) {
   const url = R.api + '/yt/hls?u=' + encodeURIComponent(variant.u);
   ytDestroyHls();
   if (video.canPlayType('application/vnd.apple.mpegurl')) {    // 사파리는 네이티브
     video.src = url;
+    ytSeekTo(video, resumeAt);
     try { await video.play(); } catch (e) {}
     if (load) load.hidden = true;
     YT.qualNow = variant.h; ytFillQualSelect();
@@ -1593,24 +1688,82 @@ async function ytPlayHls(video, variant, load) {
   const Hls = await ensureHlsLib();
   if (!Hls || !Hls.isSupported()) return false;
   return await new Promise(resolve => {
-    const h = new Hls({ maxBufferLength: 30, enableWorker: true });
+    // 조각 하나 못 받았다고 곡을 통째로 놓치지 않도록 재시도를 넉넉히 준다.
+    /* 이어볼 위치는 startPosition 으로 준다. MANIFEST_PARSED 시점에 currentTime 을 대입하는
+       방식은 아직 버퍼도 seekable 구간도 없어서 브라우저가 그냥 무시할 때가 있다(0초부터 재생됨).
+       startPosition 은 hls.js 가 그 지점의 조각부터 받아오게 하는 정식 경로다. */
+    const h = new Hls({ maxBufferLength: 30, enableWorker: true,
+      startPosition: resumeAt > 1 ? resumeAt : -1,
+      fragLoadingMaxRetry: 8, fragLoadingRetryDelay: 500, fragLoadingMaxRetryTimeout: 8000,
+      manifestLoadingMaxRetry: 4, levelLoadingMaxRetry: 4 });
     YT._hls = h;
-    let done = false;
-    const finish = ok => { if (done) return; done = true; resolve(ok); };
+    let done = false, started = false, abandoned = false, netFix = 0, medFix = 0;
+    /* 실패로 물러날 때는 반드시 인스턴스를 정리하고 손을 뗀다.
+       특히 20초 타임아웃으로 물러난 경우, 예전 방식대로 인스턴스를 살려두면
+       (1) 아래 progressive 로 재생이 시작된 뒤에 뒤늦게 치명적 오류가 나서
+           ytHlsGiveUp 이 멀쩡히 나오던 재생을 다시 갈아엎고
+       (2) YT._hls 가 참으로 남아 progressive 쪽 onerror 복구가 통째로 무시된다. */
+    const finish = ok => {
+      if (done) return;
+      done = true;
+      if (!ok) { abandoned = true; ytDestroyHls(); }
+      resolve(ok);
+    };
+    const diag = m => (YT._diag = YT._diag || []).push('HLS ' + variant.h + 'p: ' + m);
+    video.addEventListener('playing', () => { started = true; }, { once: true });
     h.on(Hls.Events.MANIFEST_PARSED, () => {
       if (load) load.hidden = true;
       YT.qualNow = variant.h; ytFillQualSelect();
+      ytSeekTo(video, resumeAt);
       video.play().catch(() => {});
       finish(true);
     });
     h.on(Hls.Events.ERROR, (_e, d) => {
-      if (!d.fatal) return;
-      (YT._diag = YT._diag || []).push('HLS ' + variant.h + 'p: ' + (d.details || d.type));
-      ytDestroyHls(); finish(false);
+      if (!d.fatal || abandoned) return;
+      diag(d.details || d.type);
+      /* 여기가 "유튜브가 자꾸 처음으로 돌아가던" 자리다.
+         hls.js 인스턴스를 destroy() 하면 detachMedia() 가 <video> 의 소스를 비워서
+         재생 위치가 0 으로 리셋되고 그대로 멈춘다. 조각 하나만 못 받아도 그랬다.
+         → 재생이 시작된 뒤라면 hls.js 가 제공하는 제자리 복구를 먼저 쓴다.
+
+         조건에 done 을 쓰면 안 된다: done 은 매니페스트를 읽은 순간(=재생 시작 시점)
+         이미 true 라서, 정작 재생 중에 나는 오류에서 복구가 한 번도 실행되지 않는다. */
+      if (started) {
+        const at = video.currentTime;
+        if (d.type === Hls.ErrorTypes.NETWORK_ERROR && netFix++ < 4) {
+          if (load) { load.hidden = false; load.textContent = '⏳ 끊긴 연결 복구 중…'; }
+          h.startLoad(); ytSeekTo(video, at); return;
+        }
+        if (d.type === Hls.ErrorTypes.MEDIA_ERROR && medFix++ < 3) {
+          if (medFix > 1) { try { h.swapAudioCodec(); } catch (e) {} }
+          h.recoverMediaError(); ytSeekTo(video, at); return;
+        }
+      }
+      // 제자리 복구로도 안 되면 물러난다. 보던 위치를 넘겨서 이어 붙이게 한다.
+      const at = video.currentTime;
+      const wasPlaying = done;   // 여기서 done 은 "성공으로 resolve 됐다"(=호출자는 이미 떠났다)는 뜻
+      abandoned = true;
+      ytDestroyHls();
+      if (wasPlaying) { ytHlsGiveUp(item, variant, at); return; }  // 재생 중이던 곡 → 다른 방법으로 이어서
+      finish(false);                                               // 아직 시작 전 → 아래 progressive 후보로
     });
     h.loadSource(url); h.attachMedia(video);
     setTimeout(() => finish(false), 20000);
   });
+}
+/* HLS 가 재생 도중 완전히 죽었을 때: 한 단계 낮은 화질로, 그것도 없으면 progressive 로 이어 붙인다. */
+function ytHlsGiveUp(item, variant, at) {
+  if (!item || YT.cur !== item) return;
+  ytSetResume(item, at);
+  const lower = (YT.hls || []).filter(x => x.h < variant.h)[0];
+  if (lower) {
+    YT._qualCap = lower.h;               // 이번 곡에서만 낮춘다 — 설정한 화질은 그대로 둔다
+    toast(`${variant.h}p 스트림이 끊겨 ${lower.h}p 로 이어서 재생합니다`);
+  } else {
+    YT._noHls = item.id;                 // 이 곡은 HLS 를 건너뛰고 progressive 로
+    toast('스트림이 끊겨 다른 방식으로 이어서 재생합니다');
+  }
+  ytPlayDirect(item);
 }
 function ytFillQualSelect() {
   const sel = $('#ytQual'); if (!sel) return;
@@ -1620,7 +1773,8 @@ function ytFillQualSelect() {
     + (list.length ? '' : '<option value="360">360p</option>')
     + list.map(x => `<option value="${x.h}">${x.h}p</option>`).join('');
   sel.value = [...sel.options].some(o => o.value === String(cur)) ? String(cur) : 'auto';
-  sel.title = YT.qualNow ? `현재 ${YT.qualNow}p` : '영상 화질';
+  // 끊겨서 임시로 낮춘 경우, 고른 화질과 실제 화질이 다르다 → 둘 다 보여준다
+  sel.title = YT.qualNow ? (YT._qualCap ? `현재 ${YT.qualNow}p (스트림이 끊겨 이 곡만 낮춤 · 다음 곡은 설정대로)` : `현재 ${YT.qualNow}p`) : '영상 화질';
 }
 
 /* 🎧/🎬 버튼이 "지금 어느 쪽인지"를 글리프로 보여준다 (테두리 색만으로는 알아보기 어려웠음) */
