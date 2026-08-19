@@ -385,7 +385,9 @@ ol.guide { padding-left: 20px; display: flex; flex-direction: column; gap: 6px; 
 .yt-loading { position: absolute; left: 0; right: 0; top: 0; padding: 6px 10px; background: linear-gradient(#000a, transparent); color: #fff; font-size: 12px; pointer-events: none; }
 .ic.on { border-color: var(--acc); color: var(--acc); }
 #ytPlayerWrap iframe { width: 100%; aspect-ratio: 16/9; border: none; border-radius: 10px; display: block; }
-.yt-ctl { display: flex; align-items: center; gap: 6px; }
+.yt-ctl { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* 탭은 항상 보여야 한다 — 좁은 폭에서도 줄바꿈으로 살아남게 */
+.yt-tabs { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .yt-ctl input[type=range] { flex: 1; min-width: 60px; }
 .ytlist { display: flex; flex-direction: column; gap: 3px; overflow-y: auto; max-height: 260px; }
 .ytitem { display: flex; gap: 8px; align-items: center; padding: 4px; border-radius: 9px; cursor: pointer; transition: .15s; }
