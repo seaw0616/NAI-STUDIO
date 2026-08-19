@@ -128,8 +128,12 @@ function save() {
 const contentCount = s => ['chunks', 'styles', 'characters', 'scenes'].reduce((a, k) => a + ((s && s[k] && s[k].length) || 0), 0);
 async function pushStateToServer(force) {
   if (!R.srvOk || !R.booted) return;
+  // 보내는 순간의 savedAt 을 붙잡아 둔다. 왕복 도중 사용자가 한 글자만 쳐도 S.savedAt 이
+  // 새로 찍히는데, 그 값을 기준으로 남기면 서버에 없는 버전을 기준 삼게 되어
+  // 다음 부팅에서 애먼 '갈라짐' 판정이 난다.
+  const sentAt = S.savedAt, sentBody = JSON.stringify(S);
   try {
-    const r = await fetch(R.api + '/state' + (force ? '?force=1' : ''), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(S) });
+    const r = await fetch(R.api + '/state' + (force ? '?force=1' : ''), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: sentBody });
     if (r.status === 409) { // 서버가 보호: 서버 쪽 내용이 훨씬 많음
       const j = await r.json().catch(() => ({}));
       if (R.protectShown) return; R.protectShown = true;
@@ -144,7 +148,9 @@ async function pushStateToServer(force) {
       return;
     }
     if (!r.ok && r.status !== 409) { R.stateSynced = false; logErr('설정 서버 저장 실패 ' + r.status); }
-    else R.stateSynced = true;
+    // 저장이 성공했다면 서버 버전 = 방금 보낸 것이다. 이걸 기준으로 남겨야 다음 부팅에서
+    // 이 브라우저가 '지금 서버 버전을 보고 있는 상태'로 인정돼 설정이 그대로 유지된다.
+    else { R.stateSynced = true; R.seenBase = sentAt || 0; try { localStorage.setItem('nst_base', String(sentAt || 0)); } catch (e) {} }
   } catch (e) { R.stateSynced = false; logErr('설정 서버 저장 실패: ' + e.message); }
 }
 /* 삭제 기록(툼스톤) — 지운 항목이 서버 동기화로 되살아나지 않게 */
@@ -181,7 +187,30 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
     const r = await fetch(R.api + '/state', { cache: 'no-store' }); if (!r.ok) { R.booted = true; return false; }
     const srv = await r.json();
     if (!srv || !srv.savedAt) { R.booted = true; pushStateToServer(); return false; }
-    const localNewer = (S.savedAt || 0) >= srv.savedAt && !forceMerge;
+    /* 로컬이 서버보다 시각이 늦다고 무조건 이기게 하면 안 된다.
+       서버가 아직 안 떴을 때(start.bat 재시작 직후 등) 앱은 '로컬 전용'으로 넘어가는데,
+       그 상태에서 뭐라도 건드리면 낡은 로컬 상태에 '지금' 시각이 찍힌다. 서버가 뜨는 순간
+       그 낡은 상태가 최신으로 판정돼 서버의 설정을 통째로 덮어썼다. 목록은 합집합과
+       개수 보호 덕에 살아남지만, 스칼라 설정(해상도·샘플러·CFG·테마·저장 옵션…)은
+       아무 보호가 없어서 전부 날아간다. 실제로 그렇게 24개 설정이 뒤바뀐 적이 있다.
+       → 로컬이 이기려면 '지금 서버 버전을 보고 만들어진 것'이어야 한다. */
+    const rawBase = localStorage.getItem('nst_base');
+    const seenBase = +(rawBase || 0);
+    // 이 키는 이 버전에서 처음 생긴다. 없으면 '갈라졌다'가 아니라 '판단할 근거가 없다'는 뜻이다.
+    // 근거 없이 갈라짐으로 처리하면 업데이트 직후 모든 사용자에게 헛경보가 뜨고,
+    // 진짜 복구용 백업(nst_state_prev)까지 덮어써 버린다. 이때는 서버를 따르면 그만이다
+    // (정상 사용 중이라면 서버 값 = 이 브라우저가 마지막에 올린 값이라 잃는 것이 없다).
+    const firstRun = rawBase == null;
+    /* nst_base 는 localStorage 라 같은 주소의 모든 탭이 공유한다. 탭 A 가 저장하면 그 값이
+       탭 B 에게도 '내가 본 서버 버전'처럼 보여서, B 의 낡은 상태가 가드를 그냥 통과한다.
+       그래서 이 탭이 직접 확인한 값(R.seenBase, 메모리라 탭마다 따로)도 함께 본다.
+       새로고침 직후에는 R.seenBase 가 없으므로 예전처럼 localStorage 만으로 판단한다
+       — 서버가 꺼진 동안 편집한 내용을 살리기 위해서다. */
+    const tabBase = R.seenBase;
+    const basedOnCurrent = !firstRun && seenBase > 0 && seenBase === srv.savedAt
+      && (tabBase == null || tabBase === srv.savedAt);
+    const localNewer = (S.savedAt || 0) >= srv.savedAt && basedOnCurrent && !forceMerge;
+    const diverged = !firstRun && (S.savedAt || 0) >= srv.savedAt && !basedOnCurrent && !forceMerge;
     const base = localNewer ? { ...S } : { ...DEFAULTS, ...srv }, other = localNewer ? srv : S;
     // 대기열·기록은 합치지 않는다. 톰스톤이 없어서 합집합이 곧 '절대 못 지움'이 되기 때문에
     // 대기열에서 뺀 곡이 서버/다른 탭에서 그대로 되살아났다. 이 둘은 최신 쪽(base)을 그대로 쓴다.
@@ -191,7 +220,9 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
     base.chunkCats = [...new Set([...(base.chunkCats || []), ...(other.chunkCats || [])])].filter(c => !isTombed(base.deleted, 'cat', c));
     // 복구용 백업은 "실제로 내용이 줄어드는" 경우에만 남긴다.
     // 예전엔 부팅할 때마다 무조건 덮어써서 🛟복구가 이미 깨진 상태만 보여줬다.
-    if (contentCount(base) < contentCount(S)) { try { localStorage.setItem('nst_state_prev', JSON.stringify(S)); } catch (e) {} }
+    if (contentCount(base) < contentCount(S) || diverged) { try { localStorage.setItem('nst_state_prev', JSON.stringify(S)); } catch (e) {} }
+    R.seenBase = srv.savedAt || 0;
+    try { localStorage.setItem('nst_base', String(srv.savedAt || 0)); } catch (e) {}   // 용량 초과로 pull 전체가 중단되면 안 된다
     if (localNewer) { S = base; R.booted = true; save(); if (typeof renderChunkBar === 'function') renderChunkBar(); if (typeof renderStyleSelects === 'function') renderStyleSelects(); return false; }
     S = base;
     localStorage.setItem('nst_state', JSON.stringify(S));
@@ -202,7 +233,8 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
     if (typeof renderYtQueue === 'function') renderYtQueue();
     setMode(S.mode || 'main');
     R.booted = true; save();
-    toast('서버에 저장된 설정(청크·스타일·씬)을 불러와 합쳤습니다');
+    toast(diverged ? '이 브라우저에 남아 있던 설정이 서버와 달라 서버 쪽을 따랐습니다 — 청크·스타일·씬은 합쳐져 그대로입니다'
+      : '서버에 저장된 설정(청크·스타일·씬)을 불러와 합쳤습니다');
     return true;
   } catch (e) { R.booted = true; return false; }
 }
@@ -497,7 +529,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '11.13';   // 화면 표시용 앱 버전 (상단)
+const APP_VERSION = '11.14';   // 화면 표시용 앱 버전 (상단)
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 async function tryHealth(base) {
   try {

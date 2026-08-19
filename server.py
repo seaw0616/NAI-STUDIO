@@ -38,7 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 VERSION = 17
-RELEASE = "11.13"            # 배포 버전. GitHub 릴리스 태그 "v11.13" 과 짝을 이룬다.
+RELEASE = "11.14"            # 배포 버전. GitHub 릴리스 태그 "v11.14" 과 짝을 이룬다.
 UPDATE_REPO = ""            # "사용자명/저장소" — 비어 있으면 설정에서 넣는다 (config.json 의 updateRepo)
 FROZEN = getattr(sys, "frozen", False)          # PyInstaller 로 묶인 단일 exe 인가
 if FROZEN:
@@ -948,13 +948,36 @@ class Handler(BaseHTTPRequestHandler):
                     if not force and isinstance(cur, dict) and isinstance(incoming, dict):
                         incoming = _merge_state(cur, incoming)
                         body = json.dumps(incoming, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-                    # 백업: 이전 저장본 + 타임스탬프 백업(내용 개수가 바뀔 때, 최근 30개 보관)
+                    # 백업: 이전 저장본 + 타임스탬프 백업(최근 30개 보관)
+                    #
+                    # 예전엔 "내용 개수가 바뀔 때"만 백업해서, 설정(해상도·CFG·시드·샘플러…)만
+                    # 바꾼 구간은 기록이 하나도 안 남았다. 실제로 설정이 통째로 덮어써진 사고가
+                    # 났을 때 되돌릴 근거가 없었다. → 설정이 바뀌어도 남기되, 슬라이더를 만질
+                    # 때마다 쌓이지 않도록 30분에 한 번으로 제한한다.
                     prev = DATA / "state.prev.json"
+                    # 매번 바뀌는 값(프롬프트·시드·현재 씬·유튜브 검색어…)은 '설정'으로 치지 않는다.
+                    # 이걸 세면 프롬프트만 고쳐도 30분마다 백업이 쌓여, 30개 상한 때문에
+                    # 정작 사고 직전의 오래된 스냅샷이 하루도 못 가 밀려난다.
+                    _VOLATILE = {"savedAt", "prompt", "uc", "seed", "curScene", "mode",
+                                 "ytLastQuery", "ytOpen", "ytPos", "updSeen"}
+                    def _scalars(o):
+                        if not isinstance(o, dict):
+                            return {}
+                        return {k: v for k, v in o.items()
+                                if not isinstance(v, (list, dict)) and k not in _VOLATILE}
+                    bdir = DATA / "backups"
+                    last_bk = 0.0
+                    if bdir.exists():
+                        try:
+                            last_bk = max((f.stat().st_mtime for f in bdir.glob("state-*.json")), default=0.0)
+                        except OSError:
+                            last_bk = 0.0
+                    setting_changed = _scalars(cur) != _scalars(incoming)
                     try:
                         if sp.exists() and (not prev.exists() or time.time() - prev.stat().st_mtime > 600):
                             prev.write_bytes(sp.read_bytes())
-                        if sp.exists() and ccount(cur) != ccount(incoming):
-                            bdir = DATA / "backups"
+                        if sp.exists() and (ccount(cur) != ccount(incoming)
+                                            or (setting_changed and time.time() - last_bk > 1800)):
                             bdir.mkdir(exist_ok=True)
                             (bdir / ("state-%s.json" % time.strftime("%Y%m%d-%H%M%S"))).write_bytes(sp.read_bytes())
                             olds = sorted(bdir.glob("state-*.json"))
