@@ -250,8 +250,18 @@ function ytOpen(show) { const f = $('#ytFloat'); f.hidden = !show; S.ytOpen = !!
 function ytApplyPos() {
   const f = $('#ytFloat');
   f.classList.toggle('compact', S.ytSize === 'compact');
-  if (S.ytPos) { f.style.left = Math.max(0, Math.min(innerWidth - 120, S.ytPos.x)) + 'px'; f.style.top = Math.max(0, Math.min(innerHeight - 60, S.ytPos.y)) + 'px'; f.style.right = 'auto'; f.style.bottom = 'auto'; }
+  if (!S.ytPos) return;
+  /* 저장된 위치가 창 밖이면 창 안으로 끌어온다.
+     예전에는 화면에 120px 만 남기고 잘랐다 — 380px 패널의 260px 이 화면 밖으로 나가,
+     오른쪽 끝에 있는 탭(검색결과·대기열·내 목록·최근)이 통째로 안 보였다.
+     창을 줄이거나 배율을 바꿔도 같은 일이 생기므로 resize 때도 다시 잡아준다. */
+  const w = f.offsetWidth || (S.ytSize === 'compact' ? 300 : 380);
+  const h = f.offsetHeight || 200;
+  f.style.left = Math.max(4, Math.min(innerWidth - w - 4, S.ytPos.x)) + 'px';
+  f.style.top = Math.max(4, Math.min(innerHeight - h - 4, S.ytPos.y)) + 'px';
+  f.style.right = 'auto'; f.style.bottom = 'auto';
 }
+addEventListener('resize', () => { if (S && S.ytPos && $('#ytFloat') && !$('#ytFloat').hidden) ytApplyPos(); });
 function ytPopupUrl(item) {
   if (item.list && !item.id) return `https://www.youtube.com/playlist?list=${item.list}`;
   return `https://www.youtube.com/watch?v=${item.id}${item.list ? '&list=' + item.list : ''}`;
@@ -420,9 +430,13 @@ function ytBindVideoEvents(v, item, cands, getCi, tryNext, load, diag) {
     if (t > 1 && (v._resumeTries = (v._resumeTries || 0) + 1) <= 3) {
       diag.push(`재생 중 끊김 ${t.toFixed(0)}s — 이어서 재시도 ${v._resumeTries}/3`);
       ytSetResume(item, t);
-      const src = v.src;
       load.hidden = false; load.textContent = `⏳ 끊긴 지점(${fmtDur(t)})부터 이어서…`;
-      v.src = src; v.load(); ytSeekTo(v, t); v.play().catch(() => {});
+      /* 첫 번째는 같은 주소로 싸게 재시도한다(순간적인 끊김).
+         그래도 또 끊기면 주소가 만료된 것이다. 같은 주소로 계속 매달리면 서버가 매번
+         새로 추출해 다른 포맷을 이어붙이게 되고, 브라우저는 Format error 로 죽는다.
+         → 스트림 주소부터 새로 받아 처음부터 다시 연다(위치는 위에서 기억해 뒀다). */
+      if (v._resumeTries === 1) { const src = v.src; v.src = src; v.load(); ytSeekTo(v, t); v.play().catch(() => {}); }
+      else { diag.push('주소를 새로 받아 다시 엽니다'); ytPlayDirect(item); }
       return;
     }
     const ci = getCi(); diag.push(`${cands[ci - 1] ? cands[ci - 1][0] : '?'}: 재생 오류 코드 ${v.error ? v.error.code : '?'}`); tryNext();
@@ -666,7 +680,22 @@ async function ytFillRelated(seed, silent) {
   } catch (e) { toast('연관 곡 실패: ' + e.message, 'err'); return false; }
 }
 function ytPlayRelatedNow(item) { S.ytQueue = []; ytFillRelated(item).then(ok => { if (ok) ytNext(); }); }
-function ytEnqueue(item) { S.ytQueue.push(item); save(); renderYtQueue(); toast('대기열 추가: ' + (item.title || '')); }
+/* 대기열에 여러 곡을 넣을 때, 이미 쌓여 있으면 어디에 넣을지 묻는다.
+   그냥 뒤에 붙이면 앞선 수백 곡이 다 나온 뒤에야 재생돼서, 방금 넣은 재생목록이
+   안 나오고 '엉뚱한 곡이 나온다'고 느끼게 된다. */
+function ytAddMany(items, label) {
+  if (!items || !items.length) { toast('넣을 곡이 없습니다', 'err'); return; }
+  const ahead = S.ytQueue.length;
+  let front = false;
+  if (ahead > 3) {
+    front = confirm(`${label || ''}${items.length}곡을 대기열에 넣습니다.\n\n앞에 이미 ${ahead}곡이 있습니다.\n\n`
+      + `[확인] 맨 앞에 넣어 바로 듣기\n[취소] 맨 뒤에 붙이기 (${ahead}곡이 먼저 재생됩니다)`);
+  }
+  if (front) S.ytQueue = items.concat(S.ytQueue); else S.ytQueue = S.ytQueue.concat(items);
+  save(); renderYtQueue();
+  toast(front ? `${items.length}곡을 대기열 맨 앞에 넣었습니다` : `${items.length}곡을 대기열 맨 뒤(${ahead + 1}번째부터)에 넣었습니다`);
+}
+function ytEnqueue(item) { S.ytQueue.push(item); save(); renderYtQueue(); toast(`대기열 ${S.ytQueue.length}번째에 추가: ` + (item.title || '')); }
 function ytRemember(item) { // 최근 재생 기록 (최대 200곡) — 대기열에서 빠져도 여기 남음
   if (!item || !(item.id || item.list)) return;
   S.ytHistory = (S.ytHistory || []).filter(h => !(h.id && h.id === item.id) && !(h.list && !h.id && h.list === item.list));
@@ -680,7 +709,7 @@ function renderYtHistory() {
   const bar = document.createElement('div'); bar.className = 'row'; bar.style.padding = '2px 4px 6px';
   bar.innerHTML = `<span class="hint" style="flex:1">최근 재생 ${h.length}곡 · 대기열에서 빠져도 여기 남습니다</span><button class="btn xs" id="ytHistAll">＋ 전부 대기열</button><button class="btn xs ghost" id="ytHistRecover">🛟 복구</button><button class="btn xs danger" id="ytHistClear" title="재생 기록을 전부 지웁니다">🗑</button>`;
   box.appendChild(bar);
-  bar.querySelector('#ytHistAll').onclick = () => { h.forEach(it => S.ytQueue.push(it)); save(); renderYtQueue(); toast(h.length + '곡 대기열 추가'); };
+  bar.querySelector('#ytHistAll').onclick = () => ytAddMany(h.slice(), '기록 ');
   bar.querySelector('#ytHistRecover').onclick = openYtRecover;
   bar.querySelector('#ytHistClear').onclick = () => {
     if (!h.length || !confirm(`재생 기록 ${h.length}곡을 전부 지웁니다. 계속할까요?`)) return;
@@ -875,7 +904,7 @@ async function renderYtMine() {
         d.querySelector('.yt-t').textContent = pl.snippet.title;
         d.querySelector('.yt-s').textContent = pl.contentDetails.itemCount != null ? pl.contentDetails.itemCount + '개' : '';
         d.onclick = () => { YTA.pl = { id: pl.id, title: pl.snippet.title }; renderYtMine(); };
-        d.querySelector('.yt-add').onclick = async e => { e.stopPropagation(); const items = await ytaPlaylistItems(pl.id); items.forEach(it => S.ytQueue.push(it)); save(); renderYtQueue(); toast(`${items.length}곡 대기열 추가`); };
+        d.querySelector('.yt-add').onclick = async e => { e.stopPropagation(); const items = await ytaPlaylistItems(pl.id); ytAddMany(items, `"${pl.snippet.title}" `); };
         list.appendChild(d);
       }
       $('#ytMineN').textContent = `${all.length - 1}개 재생목록`;
@@ -887,7 +916,7 @@ async function renderYtMine() {
       head.innerHTML = `<button class="btn xs">‹ 목록</button><b style="font-size:12px;flex:1">${esc(YTA.view === 'liked' ? '👍 좋아요' : YTA.pl.title)}</b><button class="btn xs" id="ytPlAll">▶ 전부 재생</button><button class="btn xs" id="ytPlQ">＋ 전부 대기열</button>`;
       head.querySelector('button').onclick = () => { YTA.pl = null; YTA.view = 'lists'; renderYtMine(); };
       head.querySelector('#ytPlAll').onclick = () => { if (!items.length) return; S.ytQueue = items.slice(1); save(); renderYtQueue(); ytPlay(items[0]); };
-      head.querySelector('#ytPlQ').onclick = () => { items.forEach(it => S.ytQueue.push(it)); save(); renderYtQueue(); toast(`${items.length}곡 대기열 추가`); };
+      head.querySelector('#ytPlQ').onclick = () => ytAddMany(items);
       list.appendChild(head);
       items.forEach(it => list.appendChild(ytItemEl(it, {})));
       $('#ytMineN').textContent = `${items.length}곡`;

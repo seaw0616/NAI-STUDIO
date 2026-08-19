@@ -376,11 +376,14 @@ try {
       <select id="ytQual" class="yt-qual" title="영상 화질 — 480p 이상은 HLS 로 재생합니다"><option value="auto">화질 자동</option></select>
       <button id="ytModeBtn" class="btn xs" title="재생 방식">모드: <span id="ytModeLbl">…</span></button>
       <button id="ytPopBtn" class="ic" title="유튜브 창으로 열기 (수동)">🡕</button>
+    </div>
+      <!-- 탭은 재생 컨트롤과 같은 줄에 두면 좁은 폭에서 밀려나 안 보인다 → 자기 줄로 -->
+      <div class="yt-tabs">
       <button id="ytTabRes" class="btn xs on yt-tab">검색결과</button>
       <button id="ytTabQ" class="btn xs yt-tab">대기열 <span id="ytQueueN"></span></button>
       <button id="ytTabMine" class="btn xs yt-tab" title="YouTube 계정 연결 시 내 재생목록·좋아요">👤 내 목록</button>
       <button id="ytTabHist" class="btn xs yt-tab" title="최근 재생 기록 · 사라진 목록 복구">🕘 최근</button>
-    </div>
+      </div>
     <div id="ytResults" class="ytlist"></div>
     <div id="ytQueue" class="ytlist" hidden></div>
     <div id="ytMine" class="ytlist" hidden></div>

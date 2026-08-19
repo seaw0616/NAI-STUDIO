@@ -38,7 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 VERSION = 17
-RELEASE = "11.14"            # 배포 버전. GitHub 릴리스 태그 "v11.14" 과 짝을 이룬다.
+RELEASE = "11.15"            # 배포 버전. GitHub 릴리스 태그 "v11.15" 과 짝을 이룬다.
 UPDATE_REPO = ""            # "사용자명/저장소" — 비어 있으면 설정에서 넣는다 (config.json 의 updateRepo)
 FROZEN = getattr(sys, "frozen", False)          # PyInstaller 로 묶인 단일 exe 인가
 if FROZEN:
@@ -1222,6 +1222,26 @@ class Handler(BaseHTTPRequestHandler):
                 req = urllib.request.Request(u, headers=h)
                 return _yt_opener.open(req, timeout=60)
 
+            def splice_ok(r, want_start, want_total):
+                """이 응답을 앞 조각 뒤에 그대로 이어붙여도 되는가.
+
+                이어붙이면 안 되는 응답을 그냥 쓰면 브라우저가
+                MEDIA_ELEMENT_ERROR: Format error 로 죽는다. 두 경우가 실제로 났다.
+                  - 중간에 403 이 나서 새로 추출했는데 다른 포맷(다른 itag)이 돌아온 경우.
+                    앞부분은 A 포맷, 뒷부분은 B 포맷이 되어 파일이 깨진다.
+                  - 업스트림이 Range 를 무시하고 200 으로 파일 전체를 준 경우.
+                    파일 첫 바이트가 스트림 한가운데에 끼어든다.
+                전체 크기가 같고 요청한 위치에서 시작할 때만 통과시킨다."""
+                if getattr(r, "status", None) != 206:
+                    return False
+                m2 = re.search(r"bytes\s+(\d+)-\d+/(\d+)", r.headers.get("Content-Range") or "")
+                if not m2:
+                    return False
+                got_start, got_total = int(m2.group(1)), int(m2.group(2))
+                if got_start != want_start:
+                    return False
+                return want_total is None or got_total == want_total
+
             first_end = end if (end is not None and end - start + 1 <= CH) else start + CH - 1
             started = False
             try:
@@ -1229,7 +1249,14 @@ class Handler(BaseHTTPRequestHandler):
                     r = open_chunk(url, start, first_end)
                 except urllib.error.HTTPError as e:
                     if e.code in (403, 410) and re.fullmatch(r"[\w-]{6,20}", vid or ""):
-                        _r = yt_stream(vid, mode, fresh=True)           # URL 만료/차단 → 새로 추출해 재시도
+                        # URL 만료/차단 → 새로 추출해 재시도.
+                        # 클라이언트의 <video src> 에는 만료된 주소가 박혀 있어 갱신되지 않는다.
+                        # 그래서 요청마다 fresh=True 로 뽑으면 매번 yt-dlp 전체 추출이 돌고,
+                        # 그때그때 다른 포맷이 걸려 앞뒤가 섞인다. 먼저 캐시를 보고,
+                        # 캐시가 이미 새 것이면(=다른 요청이 방금 갱신) 그것을 쓴다.
+                        _r = yt_stream(vid, mode)
+                        if _r.get("url") == url:
+                            _r = yt_stream(vid, mode, fresh=True)
                         url = _r["url"]
                         # 재추출은 다른 클라이언트를 고를 수 있다 — URL 과 헤더는 한 쌍이라 함께 갈아야 또 403 이 안 난다
                         up_hdr.clear(); up_hdr["User-Agent"] = UA
@@ -1237,6 +1264,13 @@ class Handler(BaseHTTPRequestHandler):
                         r = open_chunk(url, start, first_end)
                     else:
                         raise
+                # 재개 요청(start > 0)의 '첫' 조각도 검사해야 한다.
+                # 이 검사가 없으면, 중간 조각을 거부하고 커넥션을 끊어봐야 브라우저가
+                # 같은 오프셋으로 재요청할 때 그 첫 조각이 무검증으로 통과해
+                # 앞(포맷 A) + 뒤(포맷 B) 뒤섞임이 요청 경계로 옮겨갈 뿐이다.
+                if has_range and start > 0 and not splice_ok(r, start, None):
+                    self._json(502, {"message": "range not honored — reopen"})
+                    return True
                 cr = r.headers.get("Content-Range") or ""
                 mt = re.search(r"/(\d+)$", cr)
                 total = int(mt.group(1)) if mt else None
@@ -1260,8 +1294,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 started = True
                 pos = start
+                last_pos = start - 1
                 cur = r
-                cur_end = first_end if r.status == 206 else total - 1
                 while True:
                     try:
                         while True:
@@ -1274,19 +1308,35 @@ class Handler(BaseHTTPRequestHandler):
                                 return True
                             if not chunk:
                                 break
+                            # 업스트림이 Range 를 무시하고 파일 전체를 주면 선언한 길이보다
+                            # 훨씬 많이 쓰게 된다 → keep-alive 프레이밍이 깨져 다음 요청이
+                            # 미디어 바이트를 HTTP 요청으로 읽는다. 선언한 만큼만 쓴다.
+                            if pos + len(chunk) > resp_end + 1:
+                                chunk = chunk[:resp_end + 1 - pos]
+                            if not chunk:
+                                break
                             try:
                                 self.wfile.write(chunk)
                             except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
                                 return True     # 브라우저가 떠남 — 소켓은 이미 죽었다
                             pos += len(chunk)
+                            if pos > resp_end:
+                                break
                     finally:
                         try:
                             cur.close()
                         except Exception:
                             pass
-                    if pos > resp_end or cur_end >= resp_end:
+                    if pos > resp_end:
                         break
-                    s = cur_end + 1
+                    if pos == last_pos:       # 한 바이트도 못 받았다 — 무한 재요청 방지
+                        self.close_connection = True
+                        return True
+                    last_pos = pos
+                    # 요청했던 끝(cur_end+1)이 아니라 실제로 보낸 위치에서 이어야 한다.
+                    # 업스트림이 Content-Length 를 못 채우고 조용히 끊으면(파이썬 read 는
+                    # 예외 없이 b"" 를 준다) 그 차이만큼 바이트가 통째로 빠진 채 이어붙는다.
+                    s = pos
                     e = min(s + CH - 1, resp_end)
                     try:
                         cur = open_chunk(url, s, e)
@@ -1304,7 +1354,16 @@ class Handler(BaseHTTPRequestHandler):
                         else:
                             self.close_connection = True   # 남은 바이트를 못 보내면 연결을 끊어 브라우저가 재요청하게
                             return True
-                    cur_end = e
+                    if not splice_ok(cur, s, total):
+                        # 이어붙이면 파일이 깨진다 → 보내다 말고 끊는다.
+                        # 브라우저가 같은 범위를 다시 요청하면 처음부터 일관된 스트림으로 받는다.
+                        try:
+                            cur.close()
+                        except Exception:
+                            pass
+                        self.close_connection = True
+                        return True
+
                 if pos <= resp_end:
                     # 선언한 Content-Length 를 못 채웠다 (업스트림이 조용히 FIN) → 커넥션을 끊어야
                     # 브라우저가 멈춘 채로 기다리지 않고 재요청한다
