@@ -38,7 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 VERSION = 17
-RELEASE = "11.19"            # 배포 버전. GitHub 릴리스 태그 "v11.19" 과 짝을 이룬다.
+RELEASE = "11.20"            # 배포 버전. GitHub 릴리스 태그 "v11.20" 과 짝을 이룬다.
 UPDATE_REPO = ""            # "사용자명/저장소" — 비어 있으면 설정에서 넣는다 (config.json 의 updateRepo)
 FROZEN = getattr(sys, "frozen", False)          # PyInstaller 로 묶인 단일 exe 인가
 if FROZEN:
@@ -1003,6 +1003,21 @@ class Handler(BaseHTTPRequestHandler):
                     # 보호: 들어온 설정의 내용(청크·스타일·캐릭터·씬)이 서버 것의 절반 미만이면 덮어쓰지 않음 (빈 브라우저가 덮어쓰는 사고 방지)
                     if not force and ccount(cur) >= 3 and ccount(incoming) < ccount(cur) * 0.5:
                         self._json(409, {"message": "protected", "serverCount": ccount(cur), "incomingCount": ccount(incoming)})
+                        return True
+
+                    # 프롬프트도 지켜야 한다. 위 검사는 청크·스타일·캐릭터·씬 개수만 보므로,
+                    # 빈 프롬프트가 통째로 덮어써도 통과했다. 서버가 아직 안 떴을 때 열린
+                    # 빈 화면이 그대로 저장되어 프롬프트가 사라지는 사고가 실제로 났다.
+                    def _has_text(o):
+                        if not isinstance(o, dict):
+                            return False
+                        if (o.get("prompt") or "").strip():
+                            return True
+                        st = o.get("secText")
+                        return isinstance(st, dict) and any((v or "").strip() for v in st.values() if isinstance(v, str))
+                    if not force and _has_text(cur) and not _has_text(incoming):
+                        self._json(409, {"message": "protected-prompt",
+                                         "serverCount": ccount(cur), "incomingCount": ccount(incoming)})
                         return True
                     # 목록은 서버에서 합친다 — 탭을 두 개 열어두면 나중에 저장한 탭이 다른 탭에서
                     # 만든 항목을 통째로 지우던 문제(클라이언트끼리는 서로의 변경을 모른다)
