@@ -21,3 +21,6 @@ assets/tags_kr.seed.json.gz
 *.log
 Thumbs.db
 desktop.ini
+
+# ── 로컬 미리보기 설정 (개인 경로 포함) ──
+.claude/

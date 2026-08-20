@@ -75,8 +75,16 @@ function openStyleManager(editId) {
         S.prompt = ''; S.secText = {}; S.uc = ''; S.activeStyle = newId;
         if (typeof renderSections === 'function') renderSections();
         if (typeof syncUI === 'function') syncUI();
+        // 씬 화면에도 같은 프롬프트 칸이 떠 있다. 여기를 안 지우면 옛 글자가 남아 있다가
+        // 한 글자만 건드리는 순간 지운 프롬프트가 그대로 되살아난다.
+        for (const t of document.querySelectorAll('#scMainSecs textarea, #scMainU')) {
+          t.value = ''; if (t._hlSync) t._hlSync();
+        }
+        if (typeof refreshHighlights === 'function') refreshHighlights();
       }
-      save(); draw(); renderStyleSelects();
+      // 비운 것은 사용자의 뜻이므로 서버 보호를 넘어 그대로 저장한다 (안 그러면 되살아난다)
+      if (moved && typeof saveCleared === 'function') saveCleared(); else save();
+      draw(); renderStyleSelects();
       toast(moved ? '스타일로 옮기고 바로 적용했습니다 — 프롬프트 칸은 비웠습니다' : '스타일로 복사했습니다 — 칸에 남은 내용과 겹치면 두 번 들어갑니다');
     };
     body.querySelector('#stExport').onclick = () => downloadBlob(new Blob([JSON.stringify(S.styles, null, 2)], { type: 'application/json' }), 'nai-styles.json');
@@ -130,6 +138,7 @@ function openCharLibrary() {
         n.onchange = () => {
           const oldName = n.dataset.orig;
           if (oldName && oldName.trim() && oldName !== ch.name) tomb('char', oldName);
+    untomb('char', ch.name);   // 예전에 지웠던 이름으로 되돌리는 경우 — 그 기록에 걸려 사라지면 안 된다
           n.dataset.orig = ch.name || ''; save();
         }; p.oninput = () => { ch.prompt = p.value; save(); }; u.oninput = () => { ch.uc = u.value; save(); };
         d.querySelector('[data-a="main"]').onclick = () => { S.chars.push({ prompt: ch.prompt, uc: ch.uc || '', x: null, y: null, libId: ch.id }); save(); renderChars(); toast('메인 캐릭터에 추가'); };

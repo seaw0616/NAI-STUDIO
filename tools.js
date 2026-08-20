@@ -103,6 +103,7 @@ function renameCat(cat) {
   if (nv === cat) return;
   // 옛 이름을 지워진 것으로 남기지 않으면, 서버가 목록을 합칠 때 옛 분류가 빈 채로 되살아난다
   tomb('cat', cat);
+  untomb('cat', nv);      // 예전에 지웠던 이름으로 바꾸는 경우 — 그 기록에 걸려 또 사라지면 안 된다
   S.chunks.forEach(c => { if ((c.cat || '기본') === cat) c.cat = nv; });
   S.chunkCats = (S.chunkCats || []).map(k => k === cat ? nv : k).filter((k, i, a) => a.indexOf(k) === i); if (!S.chunkCats.includes(nv)) S.chunkCats.push(nv);
   save(); renderChunkBar();
@@ -219,7 +220,7 @@ function openChunkManager(focus, onlyCat) {
           d.innerHTML = `<input type="text" placeholder="이름"><textarea rows="1" placeholder="내용" class="ac"></textarea>${catSelectHtml('ckc_' + i, c.cat)}<button class="ic" title="삭제">✕</button>`;
           const [n, t] = [d.children[0], d.children[1]];
           n.value = c.name; t.value = c.text;
-          n.onchange = () => { const nv = n.value.trim().replace(/\s+/g, '_'); const dup = S.chunks.find(x => x !== c && normKey(x.name) === normKey(nv)); if (dup) { toast('같은 이름의 청크가 이미 있습니다: ' + dup.name, 'err'); n.value = c.name; return; } const oldName = c.name; c.name = nv; if (oldName && normKey(oldName) !== normKey(nv)) tomb('chunk', oldName); save(); renderChunkBar(); };
+          n.onchange = () => { const nv = n.value.trim().replace(/\s+/g, '_'); const dup = S.chunks.find(x => x !== c && normKey(x.name) === normKey(nv)); if (dup) { toast('같은 이름의 청크가 이미 있습니다: ' + dup.name, 'err'); n.value = c.name; return; } const oldName = c.name; c.name = nv; if (oldName && normKey(oldName) !== normKey(nv)) tomb('chunk', oldName); untomb('chunk', nv); save(); renderChunkBar(); };
           t.oninput = () => { c.text = t.value; save(); renderChunkBar(); };
           bindCatSelect(d.querySelector('#ckc_' + i), v => { c.cat = v; save(); renderChunkBar(); draw(); });
           d.querySelector('button.ic').onclick = () => { tomb('chunk', c.name); S.chunks.splice(i, 1); save(); renderChunkBar(); draw(); };
@@ -1210,8 +1211,19 @@ function applyMeta(meta) {
      예전엔 이 경우 자동붙이기를 그대로 켜 둬서, 노출 있는 그림을 불러오면
      앱은 nsfw 를 네거티브에 넣어 옷 입은 그림을 만들었다. */
   const hadNsfw = /^nsfw(,\s*|$)/i.test(uc);
-  if (!(prompt || '').toLowerCase().includes('nsfw')) S.autoNsfw = hadNsfw;
-  if (hadNsfw && !(prompt || '').toLowerCase().includes('nsfw')) { uc = uc.replace(/^nsfw(,\s*|$)/i, ''); }
+  const promptHasNsfw = (prompt || '').toLowerCase().includes('nsfw');
+  if (hadNsfw && !promptHasNsfw) uc = uc.replace(/^nsfw(,\s*|$)/i, '');
+  /* S.autoNsfw 는 이 이미지 하나가 아니라 앱 전체에 남는 설정이다.
+     "원본에 nsfw 가 없다" 를 곧바로 "자동 붙이기를 끈다" 로 읽으면 안 된다 —
+     Curated 모델이나 UC 프리셋 "없음" 은 애초에 NAI 도 안 붙이기 때문이다.
+     그런 이미지를 한 장 불러왔다고 설정이 뒤집히면, 이후 모든 생성이 조용히 달라진다.
+     → 앱이 "붙였을 상황" 일 때만 원본과 맞춘다. 판단은 프리셋을 정한 뒤(아래)로 미룬다. */
+  const nsfwDecide = () => {
+    if (promptHasNsfw) return;                                   // 프롬프트에 있으면 애초에 안 붙는다
+    if (NSFW_EXEMPT.includes(S.model)) return;                   // Curated 등 — 원래 대상이 아니다
+    if (!getUcText(S.model, ucIdx(S.model))) return;             // UC 프리셋 "없음" — 원래 대상이 아니다
+    S.autoNsfw = hadNsfw;
+  };
   let presetIdx = -1;
   if (p.ucPreset != null) presetIdx = info.ucs.findIndex(u => u.id === p.ucPreset);
   // 텍스트가 일치하는 프리셋 중 가장 긴 것 (Heavy가 Human Focus의 접두어라서).
@@ -1231,6 +1243,7 @@ function applyMeta(meta) {
   }
   else S.ucPreset = info.ucs.length - 1; // 없음
   S.uc = uc;
+  nsfwDecide();     // 프리셋이 정해진 뒤에 판단한다 (프리셋이 "없음" 이면 건드리지 않는다)
   if (p.width) S.w = p.width; if (p.height) S.h = p.height;
   if (p.steps) S.steps = p.steps; if (p.scale != null) S.scale = p.scale;
   if (p.cfg_rescale != null) S.rescale = p.cfg_rescale;
@@ -1306,6 +1319,15 @@ async function runRepro(file) {
   const cmt = chunks.find(c => c.key === 'Comment');
   if (!cmt) { toast('NAI 메타데이터가 없는 파일입니다', 'err'); return; }
   let orig = {}; try { orig = JSON.parse(cmt.text); } catch (e) { toast('메타데이터 파싱 실패', 'err'); return; }
+  /* 재현 검증은 "원본과 같은 조건" 이어야 하므로 붙어 있는 것들을 떼야 한다.
+     그런데 그중엔 손으로 칠한 마스크나 Anlas 를 써서 만든 바이브 인코딩도 있다.
+     말없이 버리면 다시 만들어야 하고, 유료 인코딩은 돈이 또 든다 → 먼저 알린다. */
+  const attached = [];
+  if (R.i2iBlob) attached.push('불러온 이미지(i2i)');
+  if (R.maskCanvas) attached.push('칠해 둔 마스크');
+  if ((R.vibes || []).length) attached.push(`바이브 ${R.vibes.length}개`);
+  if ((R.prefs || []).length) attached.push(`레퍼런스 ${R.prefs.length}개`);
+  if (attached.length && !confirm(`재현 검증은 원본과 같은 조건으로 만들어야 해서 지금 붙어 있는 것을 뗍니다.\n\n· ${attached.join('\n· ')}\n\n계속할까요? (바이브는 라이브러리에 저장해 두셨다면 다시 넣을 수 있습니다)`)) return;
   await importFromPng(file);      // 설정·시드 복원 (모달 닫힘)
   R.i2iBlob = null; R.maskCanvas = null; updateI2IUI(); R.vibes = []; renderVibes(); R.prefs = []; renderPrefs();
   /* 앱이 "평소대로" 보냈을 payload — 생성하지 않고 계산만 한다.
@@ -1317,7 +1339,8 @@ async function runRepro(file) {
   const cap = o => (o && o.caption && o.caption.base_caption) || '';
   const rprompt = orig.prompt || cap(orig.v4_prompt);
   const ruc = orig.uc != null ? orig.uc : cap(orig.v4_negative_prompt);
-  const savedN = S.n; S.n = 1;
+  /* 예전엔 S.n 을 1 로 바꿨다가 되돌렸는데, 그 사이 디바운스된 save() 가 돌면
+     "장수 1" 이 설정으로 굳어 버렸다. ov.n 으로만 1장을 요청하면 설정을 건드릴 일이 없다. */
   let item = null;
   const raw = reproParams(orig), dropped = [];
   /* NAI 가 안 받는 필드가 또 있으면 이름을 대 주므로, 그것만 빼고 다시 보낸다.
@@ -1338,10 +1361,9 @@ async function runRepro(file) {
         $('#genStatus').textContent = `재현 검증 — NAI 가 안 받는 항목(${key}) 빼고 다시 시도…`;
         continue;
       }
-      S.n = savedN; return;
+      return;
     }
   }
-  S.n = savedN;
   if (dropped.length) toast('NAI 가 안 받는 항목은 빼고 보냈습니다: ' + dropped.join(', '));
   if (!item) return;
   const a = await blobToImage(file), b = await blobToImage(item.blob);
@@ -1384,6 +1406,129 @@ async function runRepro(file) {
       body.querySelector('#rpDiff').innerHTML = `<div class="hint">위 그림은 <b>원본 설정을 그대로</b> 보내 만든 것입니다. 아래 표는 <b>평소처럼 ▶생성을 눌렀을 때</b> 무엇이 달라지는지 보여줍니다${nDiff ? ` — 다른 필드 ${nDiff}개` : ' — 다른 필드 없음'}.</div>
         <div style="max-height:44vh;overflow:auto"><table class="metatbl"><tr><th>필드</th><th>NAI 웹 PNG</th><th>앱이 평소 보내는 값</th></tr>${rows}</table></div>
         <div class="hint">빨간 줄 = 값이 다른 필드, 노란 강조 = 처음 갈라지는 지점부터. 한쪽만 undefined 인 건 NAI 가 메타에 안 적거나 앱이 아직 안 쓰는 필드라 차이로 세지 않습니다.</div>`;
+    };
+  }, true);
+}
+
+/* ─────────────── 오류 기록 · 자체 점검 · 보고 ───────────────
+   앱이 오류를 만나면 서버가 data/errors.jsonl 에 남긴다(토큰·경로 등은 지운 뒤).
+   여기서 그걸 보고, 깃헙으로 보낼 수 있다.
+   보내는 방법은 두 가지:
+     ① 깃헙 이슈 페이지를 내용이 채워진 채로 연다 — 토큰이 필요 없다. 누구나 쓸 수 있다.
+     ② ⚙설정에 깃헙 토큰을 넣어 두면 버튼 하나로 바로 올라간다 — 토큰은 그 PC 에만 남는다.
+   배포하는 exe 에는 토큰이 들어 있지 않다(들어가면 누구나 꺼내 쓸 수 있으므로). */
+function openHealth() {
+  openModal('🩺 점검 · 오류 기록', body => {
+    body.innerHTML = `<div class="hint" id="hcHint">불러오는 중…</div>
+      <div class="mtitle">자체 점검 <span class="hint">— 앱이 켜져 있는 동안 10분마다 스스로 확인합니다</span></div>
+      <div id="hcList"></div>
+      <div class="row"><button class="btn sm" id="hcNow">지금 다시 점검</button><span class="hint" id="hcWhen"></span></div>
+      <div class="mtitle">오류 기록 <span class="hint" id="hcN"></span></div>
+      <div class="errbox" id="hcErrs"></div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn primary" id="hcReport">🐞 이 내용으로 보고 보내기</button>
+        <button class="btn sm" id="hcCopy">복사</button>
+        <button class="btn sm danger" id="hcClear">기록 지우기</button>
+      </div>
+      <label class="ck"><input type="checkbox" id="hcWithPrompt"> 프롬프트 내용도 함께 보내기
+        <span class="hint">(끄면 오류 메시지와 설정만 갑니다. 공개 저장소로 가니 기본은 꺼둡니다)</span></label>
+      <div class="hint" id="hcSt"></div>`;
+    const $$$ = id => body.querySelector(id);
+    let snap = null, errs = [];
+
+    const drawChecks = () => {
+      const el = $$$('#hcList'); el.innerHTML = '';
+      for (const c of (snap && snap.checks) || []) {
+        const d = document.createElement('div'); d.className = 'chk-row';
+        const cls = c.ok ? 'chk-ok' : (c.level === 'err' ? 'chk-bad' : 'chk-warn');
+        d.innerHTML = `<span class="nm">${esc(c.name)}</span><span class="${cls}">${c.ok ? '정상' : (c.level === 'err' ? '문제' : '확인')}</span><span class="dt">${esc(c.detail || '')}</span>`;
+        el.appendChild(d);
+      }
+      $$$('#hcWhen').textContent = snap && snap.t ? '마지막 점검 ' + new Date(snap.t).toLocaleTimeString() : '';
+    };
+    const drawErrs = () => {
+      const el = $$$('#hcErrs'); el.innerHTML = '';
+      $$$('#hcN').textContent = errs.length ? `— ${errs.length}건` : '— 없음 (좋은 신호입니다)';
+      for (const e of errs.slice().reverse()) {
+        const d = document.createElement('div'); d.className = 'e';
+        d.innerHTML = `<span class="when">${new Date(e.t || 0).toLocaleString()}</span>[${esc(e.kind || '?')}] ${esc(e.msg || '')}${e.where ? ' <span class="when">@' + esc(e.where) + '</span>' : ''}`;
+        el.appendChild(d);
+      }
+    };
+    const load = async () => {
+      try {
+        snap = await (await apiFetch('/selfcheck')).json();
+        errs = ((await (await apiFetch('/errors?limit=200')).json()) || {}).items || [];
+        $$$('#hcHint').textContent = '';
+        drawChecks(); drawErrs();
+      } catch (e) { $$$('#hcHint').textContent = '불러오지 못했습니다: ' + e.message; }
+    };
+    load();
+
+    $$$('#hcNow').onclick = async () => {
+      $$$('#hcWhen').textContent = '점검 중…';
+      try { snap = await (await apiFetch('/selfcheck', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json(); drawChecks(); }
+      catch (e) { $$$('#hcWhen').textContent = '실패: ' + e.message; }
+    };
+    $$$('#hcClear').onclick = async () => {
+      if (!confirm('오류 기록을 모두 지울까요?')) return;
+      try { await apiFetch('/errors?clear=1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); errs = []; drawErrs(); }
+      catch (e) { $$$('#hcSt').textContent = '실패: ' + e.message; }
+    };
+
+    const buildReport = () => {
+      const info = R.srvInfo || {};
+      const L = [];
+      L.push('## 무슨 일이 있었나요?', '', '(여기에 적어 주세요 — 무엇을 하다가 났는지 한 줄이면 충분합니다)', '');
+      L.push('## 환경', '');
+      L.push(`- 버전: ${info.release || '?'} (앱 ${typeof APP_VERSION !== 'undefined' ? APP_VERSION : '?'}${info.frozen ? ' · exe' : ' · 소스'})`);
+      L.push(`- 브라우저: ${navigator.userAgent}`);
+      L.push(`- 모델: ${S.model} · ${S.w}×${S.h} · 스텝 ${S.steps} · 스케일 ${S.scale} · ${S.sampler} / ${S.schedule}`);
+      if ($$$('#hcWithPrompt').checked) {
+        L.push('', '## 프롬프트', '', '```', (typeof previewFinal === 'function' ? previewFinal() : (S.prompt || '')).slice(0, 1500), '```');
+      }
+      const bad = ((snap && snap.checks) || []).filter(c => !c.ok);
+      if (bad.length) { L.push('', '## 점검에서 걸린 것', ''); for (const c of bad) L.push(`- **${c.name}** — ${c.detail || ''}`); }
+      if (errs.length) {
+        L.push('', '## 오류 기록 (최근 20건)', '', '```');
+        for (const e of errs.slice(-20)) L.push(`${new Date(e.t || 0).toISOString()} [${e.kind || '?'}] ${e.msg || ''}${e.where ? ' @' + e.where : ''}`);
+        L.push('```');
+      }
+      L.push('', '<sub>NAI Studio 앱에서 자동으로 만든 보고입니다. 토큰·키·개인 경로는 보내기 전에 지워집니다.</sub>');
+      return L.join('\n');
+    };
+    const reportTitle = () => {
+      const last = errs.length ? errs[errs.length - 1] : null;
+      return '[오류] ' + (last ? String(last.msg).slice(0, 80) : '문제 보고');
+    };
+
+    $$$('#hcCopy').onclick = () => {
+      navigator.clipboard.writeText(buildReport()).then(() => toast('복사했습니다 — 아무 데나 붙여넣어 보내주세요'))
+        .catch(() => toast('복사하지 못했습니다', 'err'));
+    };
+
+    $$$('#hcReport').onclick = async () => {
+      const st = $$$('#hcSt'); const title = reportTitle(), text = buildReport();
+      const info = R.srvInfo || {};
+      // 토큰이 있으면 바로 올린다 (본인 PC 에만 있는 토큰). 없으면 깃헙 이슈 페이지를 채워서 연다.
+      if (info.hasGhToken) {
+        st.textContent = '보내는 중…';
+        try {
+          const r = await apiFetch('/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, body: text }) });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(j.message || ('HTTP ' + r.status));
+          st.innerHTML = `✔ 올렸습니다 — <a href="${esc(j.url || '#')}" target="_blank" rel="noopener">#${j.number}</a>`;
+          return;
+        } catch (e) { st.textContent = '자동 보고 실패: ' + e.message + ' — 아래 방법으로 보내주세요'; }
+      }
+      // 서버의 _upd_repo 와 같은 규칙으로 "사용자명/저장소" 만 뽑는다 (주소를 통째로 붙여넣는 경우가 많다)
+      const repo = (info.updateRepo || '').trim()
+        .replace(/^(https?:\/\/)?(www\.)?github\.com\//i, '').replace(/^\/+|\/+$/g, '')
+        .replace(/\.git$/i, '').split('/').filter(Boolean).slice(0, 2).join('/');
+      if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { st.textContent = '보고할 저장소를 알 수 없습니다 — ⚙설정의 "업데이트 저장소" 를 먼저 채워주세요'; return; }
+      const url = `https://github.com/${repo}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(text.slice(0, 6000))}`;
+      window.open(url, '_blank', 'noopener');
+      st.textContent = '깃헙 이슈 작성 창을 열었습니다 — 내용을 확인하고 초록 버튼을 누르면 접수됩니다';
     };
   }, true);
 }
@@ -1659,6 +1804,7 @@ function initTools() {
   $('#btnExif').onclick = openExifTool;
   $('#btnNaiImport').onclick = openNaiImport;
   $('#btnBackup').onclick = openBackup;
+  { const hb = $('#btnHealth'); if (hb) hb.onclick = openHealth; }
   $('#tEnhance').onclick = toolEnhance; $('#tUpscale').onclick = toolUpscale; $('#tVary').onclick = toolVary;
   $('#tInpaint').onclick = toolInpaint; $('#tDirector').onclick = openDirector;
   initYouTube();
@@ -2185,7 +2331,17 @@ async function startSourceUpdate(j, body) {
         const go = document.createElement('button'); go.className = 'btn go'; go.textContent = '✔ 지금 재시작';
         go.onclick = async () => {
           go.disabled = true; msg.textContent = '재시작 중… 잠시 후 새 창이 열립니다.';
-          try { await apiFetch('/update/restart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch (e) {}
+          // 결과를 안 읽으면 실패해도 "재시작 중…" 인 채로 멈춰 있어, 사용자는 기다리기만 한다
+          try {
+            const rr = await apiFetch('/update/restart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+            if (!rr.ok) {
+              const jj = await rr.json().catch(() => ({}));
+              throw new Error(jj.message || ('HTTP ' + rr.status));
+            }
+          } catch (e) {
+            go.disabled = false;
+            msg.textContent = '✖ 재시작하지 못했습니다: ' + e.message + ' — 검은 창을 닫고 start.bat 을 다시 실행해 주세요';
+          }
         };
         row.innerHTML = ''; row.appendChild(go);
       } else if (st.state === 'error') {
