@@ -38,7 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 VERSION = 17
-RELEASE = "11.16"            # 배포 버전. GitHub 릴리스 태그 "v11.16" 과 짝을 이룬다.
+RELEASE = "11.17"            # 배포 버전. GitHub 릴리스 태그 "v11.17" 과 짝을 이룬다.
 UPDATE_REPO = ""            # "사용자명/저장소" — 비어 있으면 설정에서 넣는다 (config.json 의 updateRepo)
 FROZEN = getattr(sys, "frozen", False)          # PyInstaller 로 묶인 단일 exe 인가
 if FROZEN:
@@ -247,7 +247,21 @@ def _ver_tuple(v):
 
 
 def _upd_repo():
-    return (load_cfg().get("updateRepo") or UPDATE_REPO or "").strip().strip("/")
+    """설정에 적힌 업데이트 저장소를 "사용자명/저장소" 형태로 정규화한다.
+
+    사용자는 보통 주소창에서 통째로 복사해 붙여넣는다
+    (https://github.com/owner/repo, .../releases, 끝에 .git 등).
+    예전엔 그걸 그대로 받아 형식 검사에서 떨어뜨렸고, 화면에는
+    "저장소를 먼저 지정하세요" 라고만 떠서 안 넣은 것처럼 보였다.
+    """
+    v = (load_cfg().get("updateRepo") or UPDATE_REPO or "").strip()
+    if not v:
+        return ""
+    v = re.sub(r"^(https?://)?(www\.)?github\.com/", "", v, flags=re.I)
+    v = v.strip().strip("/")
+    v = re.sub(r"\.git$", "", v, flags=re.I)
+    parts = [p for p in v.split("/") if p]
+    return (parts[0] + "/" + parts[1]) if len(parts) >= 2 else v
 
 
 def _gh(url):

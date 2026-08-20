@@ -1457,9 +1457,24 @@ function initTools() {
   seedCensorChunks(); seedArtistPack(); initSmartTools();
   const ai = $('#btnAiPrompt'); if (ai) ai.onclick = () => openAiPrompt();
   const ub = $('#btnUpdate'); if (ub) ub.onclick = () => openUpdate();
-  // 시작할 때 한 번, 이후 6시간마다 조용히 확인 (새 버전일 때만 알림)
-  setTimeout(() => updateCheck(true), 4000);
-  setInterval(() => updateCheck(true), 6 * 3600 * 1000);
+  /* 새 버전 확인. 서버는 매번 GitHub 에 직접 물어보므로 조회 자체는 실시간인데,
+     예전엔 앱이 6시간에 한 번만 물어봐서 켜 둔 채로는 반나절 뒤에야 표시가 떴다.
+     → 30분마다, 그리고 창으로 돌아올 때(5분 이상 지났으면) 확인한다.
+     GitHub 익명 조회 한도는 시간당 60회라 이 빈도로는 여유가 크다. */
+  let updLast = 0;   // UPD 는 파일 아래에서 선언되므로 여기서는 지역 변수로 둔다
+  const updTick = (force) => {
+    const now = Date.now();
+    if (!force && now - updLast < 5 * 60 * 1000) return;
+    updLast = now;
+    updateCheck(true);
+  };
+  setTimeout(() => updTick(true), 4000);
+  setInterval(() => updTick(true), 30 * 60 * 1000);
+  addEventListener('focus', () => updTick(false));
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) updTick(false); });
+  // 4초 초기 확인은 서버가 아직 안 붙었으면 조용히 실패한다. 그때는 30분을 기다리게 되므로
+  // 서버가 붙는 순간에도 한 번 확인한다.
+  window.onServerUp = (orig => () => { if (orig) orig(); updTick(false); })(window.onServerUp);
   renderChunkBar(); initChunkFloat();
   document.body.classList.toggle('show-chunks', !!S.showChunkBars);
   $('#btnChunks').onclick = () => openChunkManager();
