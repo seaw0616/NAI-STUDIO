@@ -187,30 +187,27 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
     const r = await fetch(R.api + '/state', { cache: 'no-store' }); if (!r.ok) { R.booted = true; return false; }
     const srv = await r.json();
     if (!srv || !srv.savedAt) { R.booted = true; pushStateToServer(); return false; }
-    /* 로컬이 서버보다 시각이 늦다고 무조건 이기게 하면 안 된다.
-       서버가 아직 안 떴을 때(start.bat 재시작 직후 등) 앱은 '로컬 전용'으로 넘어가는데,
-       그 상태에서 뭐라도 건드리면 낡은 로컬 상태에 '지금' 시각이 찍힌다. 서버가 뜨는 순간
-       그 낡은 상태가 최신으로 판정돼 서버의 설정을 통째로 덮어썼다. 목록은 합집합과
-       개수 보호 덕에 살아남지만, 스칼라 설정(해상도·샘플러·CFG·테마·저장 옵션…)은
-       아무 보호가 없어서 전부 날아간다. 실제로 그렇게 24개 설정이 뒤바뀐 적이 있다.
-       → 로컬이 이기려면 '지금 서버 버전을 보고 만들어진 것'이어야 한다. */
+    /* 어느 쪽이 이길지 정하는 규칙.
+
+       원칙: 이 판정은 절대로 사용자의 설정을 없애는 쪽으로 기울면 안 된다.
+       한때 "로컬이 지금 서버 버전을 보고 만들어진 것일 때만 이긴다"로 조였는데,
+       그러면 서버 쪽이 뒤처져 있는 사람(저장이 막혀 있었거나, 서버를 늦게 띄웠거나,
+       예전 버전의 state.json 이 남아 있는 경우)은 앱을 껐다 켜는 순간
+       브라우저에 있던 최신 설정이 서버의 낡은 값으로 통째로 바뀌어 버렸다.
+       실제로 그렇게 설정을 전부 잃은 사용자가 나왔다.
+
+       그래서 판정은 예전 그대로 "시각이 늦은 쪽이 이긴다"로 두고,
+       아래 nst_base 는 '갈라진 것 같다'고 알려주는 용도로만 쓴다.
+       서버 쪽 값은 서버 백업(data/backups)에 남으므로 되찾을 수 있다. */
     const rawBase = localStorage.getItem('nst_base');
     const seenBase = +(rawBase || 0);
-    // 이 키는 이 버전에서 처음 생긴다. 없으면 '갈라졌다'가 아니라 '판단할 근거가 없다'는 뜻이다.
-    // 근거 없이 갈라짐으로 처리하면 업데이트 직후 모든 사용자에게 헛경보가 뜨고,
-    // 진짜 복구용 백업(nst_state_prev)까지 덮어써 버린다. 이때는 서버를 따르면 그만이다
-    // (정상 사용 중이라면 서버 값 = 이 브라우저가 마지막에 올린 값이라 잃는 것이 없다).
-    const firstRun = rawBase == null;
-    /* nst_base 는 localStorage 라 같은 주소의 모든 탭이 공유한다. 탭 A 가 저장하면 그 값이
-       탭 B 에게도 '내가 본 서버 버전'처럼 보여서, B 의 낡은 상태가 가드를 그냥 통과한다.
-       그래서 이 탭이 직접 확인한 값(R.seenBase, 메모리라 탭마다 따로)도 함께 본다.
-       새로고침 직후에는 R.seenBase 가 없으므로 예전처럼 localStorage 만으로 판단한다
-       — 서버가 꺼진 동안 편집한 내용을 살리기 위해서다. */
     const tabBase = R.seenBase;
-    const basedOnCurrent = !firstRun && seenBase > 0 && seenBase === srv.savedAt
+    const basedOnCurrent = rawBase != null && seenBase > 0 && seenBase === srv.savedAt
       && (tabBase == null || tabBase === srv.savedAt);
-    const localNewer = (S.savedAt || 0) >= srv.savedAt && basedOnCurrent && !forceMerge;
-    const diverged = !firstRun && (S.savedAt || 0) >= srv.savedAt && !basedOnCurrent && !forceMerge;
+    const localNewer = (S.savedAt || 0) >= srv.savedAt && !forceMerge;
+    // 로컬이 이기는데 그 로컬이 지금 서버 버전을 보고 만든 게 아니면, 서버 쪽 설정이
+    // 이 저장으로 덮인다 → 조용히 넘어가지 않고 알린다 (덮어쓰기는 그대로 진행).
+    const diverged = localNewer && rawBase != null && !basedOnCurrent;
     const base = localNewer ? { ...S } : { ...DEFAULTS, ...srv }, other = localNewer ? srv : S;
     // 대기열·기록은 합치지 않는다. 톰스톤이 없어서 합집합이 곧 '절대 못 지움'이 되기 때문에
     // 대기열에서 뺀 곡이 서버/다른 탭에서 그대로 되살아났다. 이 둘은 최신 쪽(base)을 그대로 쓴다.
@@ -233,7 +230,7 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
     if (typeof renderYtQueue === 'function') renderYtQueue();
     setMode(S.mode || 'main');
     R.booted = true; save();
-    toast(diverged ? '이 브라우저에 남아 있던 설정이 서버와 달라 서버 쪽을 따랐습니다 — 청크·스타일·씬은 합쳐져 그대로입니다'
+    toast(diverged ? '이 브라우저 설정으로 서버를 갱신했습니다 — 다른 창/기기에서 바꾼 설정이 있었다면 📦백업에서 되돌릴 수 있습니다'
       : '서버에 저장된 설정(청크·스타일·씬)을 불러와 합쳤습니다');
     return true;
   } catch (e) { R.booted = true; return false; }
@@ -552,7 +549,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '11.15';   // 화면 표시용 앱 버전 (상단)
+const APP_VERSION = '11.16';   // 화면 표시용 앱 버전 (상단)
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 async function tryHealth(base) {
   try {
