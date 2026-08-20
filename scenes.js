@@ -286,6 +286,7 @@ function renderSceneEditor() {
   $('#scName').value = sc.name;
   const sz = $('#scSize'); SCENE_SIZES.forEach(z => { const o = document.createElement('option'); o.value = z[0]; o.textContent = z[1]; sz.appendChild(o); }); sz.value = sc.size || 'p';
   $('#scCount').value = sc.count; $('#scPrompt').value = sc.prompt || ''; $('#scUc').value = sc.uc || '';
+  if (typeof refreshHighlights === 'function') refreshHighlights();   // 이미 붙어 있던 칸이면 색칠이 안 따라온다
   renderStyleSelects();
   sc.chars = sc.chars || [];
   const drawChars = () => { const l = $('#scCharList'); l.innerHTML = ''; sc.chars.forEach((c, i) => l.appendChild(charCard(c, i, () => { sc.chars.splice(i, 1); save(); drawChars(); }, () => save()))); };
@@ -308,7 +309,8 @@ function renderSceneEditor() {
       const l = document.createElement('label'); l.className = 'fld';
       l.innerHTML = '기본 프롬프트<textarea class="ta ac" rows="3" spellcheck="false"></textarea>';
       const t = l.querySelector('textarea'); t.value = S.prompt || '';
-      t.addEventListener('input', () => { S.prompt = t.value; const m = $('#prompt'); if (m) m.value = t.value; save(); drawMainPv(); });
+      // 값을 코드로 바꿔치면 input 이 안 나서 뒤에 깔린 색칠 레이어가 옛 글자를 그대로 들고 있는다
+      t.addEventListener('input', () => { S.prompt = t.value; const m = $('#prompt'); if (m) { m.value = t.value; if (m._hlSync) m._hlSync(); } save(); drawMainPv(); });
       secs.appendChild(l); attachHighlight(t);
       return;
     }
@@ -335,7 +337,7 @@ function renderSceneEditor() {
   };
   buildMainSecs();
   mu.value = S.uc || '';
-  mu.addEventListener('input', () => { S.uc = mu.value; const u = $('#uc'); if (u) u.value = mu.value; save(); });
+  mu.addEventListener('input', () => { S.uc = mu.value; const u = $('#uc'); if (u) { u.value = mu.value; if (u._hlSync) u._hlSync(); } save(); });
   drawMainPv();
   um.onchange = () => { S.sceneUseMain = um.checked; save(); drawMainPv(); };
   $('#scPrompt').addEventListener('input', () => { sc.prompt = $('#scPrompt').value; save(); });

@@ -628,7 +628,7 @@ def _url_ok(url, headers):
         return False
 
 
-def yt_stream(vid, mode, fresh=False):
+def yt_stream(vid, mode, fresh=False, itag=None):
     y = yt_engine()
     if not y:
         raise RuntimeError("engine not installed")
@@ -636,14 +636,24 @@ def yt_stream(vid, mode, fresh=False):
     now = time.time()
     with _yt_lock:
         c = _yt_cache.get(key)
-        if c and c[0] > now and not fresh:
+        if c and c[0] > now and not fresh and not itag:
             return c[1]
     # audio: 브라우저가 바로 읽는 webm/opus 우선 (m4a 140은 DASH 조각 mp4라 Chrome이 Format error)
     # video: protocol=https(progressive) 로 제한해야 한다. 안 그러면 화질이 높은 HLS 를 골라
     #        info["url"] 이 m3u8 매니페스트가 되는데, Chrome/Firefox 의 <video> 는 HLS 를 못 읽는다.
-    fmt = ("bestaudio[ext=webm][acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best" if mode == "audio"
-           else "best[protocol=https][ext=mp4][acodec!=none][vcodec!=none][height<=720]/"
-                "best[protocol=https][acodec!=none][vcodec!=none]/best[protocol=https][ext=mp4]/best[protocol=https]/best")
+    # 재생 중 403 이 나서 다시 뽑는 경우엔 처음 쓰던 itag 을 그대로 지정한다.
+    # 포맷이 바뀌면 앞부분과 이어붙지 않아 재생이 끊긴다.
+    if itag:
+        fmt = str(itag)
+    else:
+        fmt = ("bestaudio[ext=webm][acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best" if mode == "audio"
+               # 영상 모드는 반드시 "음성+영상이 함께 든" 것만 고른다.
+               # 예전엔 마지막 후보가 음성 없는 DASH 조각이나 m3u8 까지 골라서,
+               # <video> 가 못 읽고 Format error(코드 4)로 죽었다. 하나도 없으면
+               # 여기서 깨끗이 실패해야 앱이 오디오 모드로 넘어간다.
+               else "best[protocol=https][ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=720]/"
+                    "best[protocol=https][ext=mp4][acodec!=none][vcodec!=none][height<=720]/"
+                    "best[protocol=https][acodec!=none][vcodec!=none]")
     last_err = None
     info = None
     url = None
@@ -668,6 +678,7 @@ def yt_stream(vid, mode, fresh=False):
         raise RuntimeError("no playable stream" + (" (%s)" % str(last_err)[-120:] if last_err else " — 403"))
     res = {"id": vid, "url": url, "title": info.get("title"), "duration": info.get("duration"),
            "thumb": info.get("thumbnail"), "ext": info.get("ext"), "height": info.get("height"),
+           "itag": str(info.get("format_id") or ""),
            "acodec": info.get("acodec"), "vcodec": info.get("vcodec"), "channel": info.get("uploader"),
            "mode": mode, "headers": {k: v for k, v in hdrs.items() if k.lower() in ("user-agent", "referer", "origin", "cookie")},
            "expires": now + 5 * 3600}
@@ -1383,11 +1394,13 @@ class Handler(BaseHTTPRequestHandler):
             has_range = bool(m)
 
             up_hdr = {"User-Agent": UA}
+            pin_itag = None      # 재추출할 때 같은 포맷으로 다시 뽑기 위한 itag
             if re.fullmatch(r"[\w-]{6,20}", vid or ""):   # 추출 시 쓰던 헤더(클라이언트별 UA 등) 재사용
                 with _yt_lock:
                     c = _yt_cache.get((vid, mode))
                 if c and c[1].get("headers"):
                     up_hdr.update(c[1]["headers"])
+                pin_itag = (c[1].get("itag") if c else "") or None
 
             _yt_opener = urllib.request.build_opener(_CheckRedir)
 
@@ -1431,9 +1444,11 @@ class Handler(BaseHTTPRequestHandler):
                         # 그래서 요청마다 fresh=True 로 뽑으면 매번 yt-dlp 전체 추출이 돌고,
                         # 그때그때 다른 포맷이 걸려 앞뒤가 섞인다. 먼저 캐시를 보고,
                         # 캐시가 이미 새 것이면(=다른 요청이 방금 갱신) 그것을 쓴다.
+                        # 처음에 쓰던 itag 을 그대로 다시 뽑는다 — 포맷이 바뀌면 앞뒤가 안 이어진다
                         _r = yt_stream(vid, mode)
                         if _r.get("url") == url:
-                            _r = yt_stream(vid, mode, fresh=True)
+                            _r = yt_stream(vid, mode, fresh=True, itag=pin_itag)
+                        pin_itag = _r.get("itag") or pin_itag
                         url = _r["url"]
                         # 재추출은 다른 클라이언트를 고를 수 있다 — URL 과 헤더는 한 쌍이라 함께 갈아야 또 403 이 안 난다
                         up_hdr.clear(); up_hdr["User-Agent"] = UA
@@ -1520,7 +1535,9 @@ class Handler(BaseHTTPRequestHandler):
                     except urllib.error.HTTPError as ex:
                         if ex.code in (403, 410) and re.fullmatch(r"[\w-]{6,20}", vid or ""):
                             try:
-                                _r = yt_stream(vid, mode, fresh=True)
+                                # 반드시 같은 itag 으로 — 다른 포맷이 걸리면 이어붙지 않아
+                                # 여기서 연결이 끊기고 브라우저엔 "코드 2(네트워크)" 로 보인다
+                                _r = yt_stream(vid, mode, fresh=True, itag=pin_itag)
                                 url = _r["url"]
                                 up_hdr.clear(); up_hdr["User-Agent"] = UA
                                 up_hdr.update(_r.get("headers") or {})

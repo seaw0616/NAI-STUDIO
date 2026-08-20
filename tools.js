@@ -100,6 +100,9 @@ function catMenu(e, cat) {
 function renameCat(cat) {
   const v = prompt('분류 이름 변경', cat); if (v == null) return;
   const nv = v.trim() || '기본';
+  if (nv === cat) return;
+  // 옛 이름을 지워진 것으로 남기지 않으면, 서버가 목록을 합칠 때 옛 분류가 빈 채로 되살아난다
+  tomb('cat', cat);
   S.chunks.forEach(c => { if ((c.cat || '기본') === cat) c.cat = nv; });
   S.chunkCats = (S.chunkCats || []).map(k => k === cat ? nv : k).filter((k, i, a) => a.indexOf(k) === i); if (!S.chunkCats.includes(nv)) S.chunkCats.push(nv);
   save(); renderChunkBar();
@@ -229,11 +232,14 @@ function openChunkManager(focus, onlyCat) {
     };
     filt.onchange = () => { curCat = filt.value; draw(); };
     draw();
-    body.querySelector('#ckAdd').onclick = () => { const cat = curCat === 'all' ? '기본' : curCat; let n = 1; while (S.chunks.some(c => c.name === '청크' + n)) n++; S.chunks.push({ name: '청크' + n, text: '', cat, createdAt: Date.now() }); addChunkCat(cat); save(); draw(); renderChunkBar(); };
+    body.querySelector('#ckAdd').onclick = () => { const cat = curCat === 'all' ? '기본' : curCat; let n = 1; while (S.chunks.some(c => normKey(c.name) === normKey('청크' + n))) n++; S.chunks.push({ name: '청크' + n, text: '', cat, createdAt: Date.now() }); addChunkCat(cat); save(); draw(); renderChunkBar(); };
     body.querySelector('#ckAddCat').onclick = () => { const v = prompt('새 분류 이름'); const n = addChunkCat(v); if (!n) return; curCat = n; draw(); renderChunkBar(); };
     body.querySelector('#ckExport').onclick = () => downloadBlob(new Blob([JSON.stringify(S.chunks, null, 2)], { type: 'application/json' }), 'nai-chunks.json');
     body.querySelector('#ckImport').onclick = () => pickFiles(false, async f => {
-      try { const arr = JSON.parse(await f.text()); if (!Array.isArray(arr)) throw 0; for (const c of arr) if (c.name) { const ex = S.chunks.find(x => x.name === c.name); if (ex) Object.assign(ex, c); else S.chunks.push({ name: c.name, text: c.text || '', cat: c.cat || '', createdAt: Date.now() }); } save(); draw(); renderChunkBar(); toast('청크 ' + arr.length + '개 가져옴'); }
+      // 이름 비교는 프롬프트에서 청크를 찾을 때와 같은 기준이어야 한다 (대소문자·밑줄 무시).
+      // 그냥 === 로 보면 "MyChunk" 와 "mychunk" 가 둘 다 들어가고, 실제로는 하나만 쓰인다.
+      try { const arr = JSON.parse(await f.text()); if (!Array.isArray(arr)) throw 0;
+        for (const c of arr) if (c.name) { const ex = S.chunks.find(x => normKey(x.name) === normKey(c.name)); if (ex) Object.assign(ex, c); else S.chunks.push({ name: c.name, text: c.text || '', cat: c.cat || '', createdAt: Date.now() }); } save(); draw(); renderChunkBar(); toast('청크 ' + arr.length + '개 가져옴'); }
       catch (e) { toast('청크 파일이 아닙니다', 'err'); }
     }, '.json');
   }, true);
@@ -496,6 +502,16 @@ async function ytPlayDirect(item) {
     const proxyOf = u => R.api + '/yt/media?u=' + b64url(new TextEncoder().encode(u)) + '&id=' + encodeURIComponent(item.id) + '&mode=' + (YT._forceModeUsed || 'video');
     const cands = [['서버 경유', proxyOf(j.url)], ['직접 URL', j.url]];
     const diag = YT._diag = YT._diag || []; if (!YT._audioRetry) diag.length = 0;
+    /* 어떤 포맷을 받았는지, 이 브라우저가 읽을 수 있다고 하는지 먼저 적어 둔다.
+       "코드 4" 만 보여 주면 왜 안 되는지 알 수가 없다. 코덱 이름이 그대로 답이 되는 경우가 많다
+       (예: av01 = AV1, 브라우저·그래픽 드라이버에 따라 못 읽음). */
+    const cod = [j.vcodec, j.acodec].filter(x => x && x !== 'none');
+    const fmtDesc = [j.ext, cod.join('+') || null, j.height ? j.height + 'p' : null].filter(Boolean).join(' ');
+    const mime = (j.ext === 'webm' ? 'video/webm' : 'video/mp4') + (cod.length ? `; codecs="${cod.join(', ')}"` : '');
+    let canPlay = '';
+    try { canPlay = v.canPlayType(mime) || ''; } catch (e) {}
+    YT._fmtDesc = fmtDesc; YT._canPlay = canPlay;
+    diag.push(`포맷 ${fmtDesc || '?'}${canPlay ? '' : ' · 이 브라우저가 못 읽는 형식'}`);
     let ci = 0;
     const preflight = async (label, src) => { // 프록시만 검사 (직접 URL은 CORS로 fetch 불가 → 검사 생략)
       if (!src.startsWith(R.api + '/yt/media')) return true;
@@ -512,10 +528,19 @@ async function ytPlayDirect(item) {
         YT._audioRetry = false; YT.directFail = YT.directFail || {}; YT.directFail[item.id] = true;
         load.hidden = true; const er = $('#ytErr'); er.hidden = false;
         const me = v.error ? `코드 ${v.error.code}${v.error.message ? ' · ' + v.error.message : ''}` : '알 수 없음';
-        er.innerHTML = `<div>이 영상은 직접 재생이 안 됩니다 (${esc(me)})</div><div class="hint" style="color:#ccc">${esc(diag.join(' · ') || '진단 정보 없음')}</div><div class="row" style="justify-content:center;margin-top:6px">
+        // 원인을 문장으로 — 코덱을 못 읽는 것과 도중에 끊긴 것은 대처가 다르다
+        const why = !YT._canPlay && YT._fmtDesc ? `이 브라우저가 ${YT._fmtDesc} 형식을 못 읽습니다`
+          : (v.error && v.error.code === 2) ? '받는 도중 연결이 끊겼습니다 (유튜브 주소 만료·차단)'
+          : (v.error && v.error.code === 4) ? '받은 스트림을 브라우저가 읽지 못했습니다'
+          : '';
+        er.innerHTML = `<div>이 영상은 직접 재생이 안 됩니다 (${esc(me)})</div>${why ? `<div class="hint" style="color:#eee">${esc(why)}</div>` : ''}<div class="hint" style="color:#ccc">${esc(diag.join(' · ') || '진단 정보 없음')}</div><div class="row" style="justify-content:center;margin-top:6px">
           <button class="btn sm primary" id="ytDrRetry">↻ 다시 시도</button><button class="btn sm" id="ytDrEmbed">임베드로 재생</button><button class="btn sm" id="ytDrTab">🡕 유튜브 탭</button>${S.ytQueue.length ? '<button class="btn sm" id="ytDrNext">⏭ 다음 곡</button>' : ''}<button class="btn sm" id="ytDrUpd">엔진 업데이트</button></div>`;
         er.querySelector('#ytDrRetry').onclick = () => { YT.directFail[item.id] = false; YT._noHls = null; ytPlayDirect(item); };
-        er.querySelector('#ytDrEmbed').onclick = () => { setYtMode('embed'); YT._embedTry = 0; YT._embedList = null; ytPlay(item, true); };
+        er.querySelector('#ytDrEmbed').onclick = () => {
+          // 이 버튼은 이 곡만이 아니라 재생 방식 기본값 자체를 바꾼다 — 말없이 바꾸면 안 된다
+          setYtMode('embed'); toast('재생 방식을 임베드로 바꿨습니다 (설정에서 되돌릴 수 있어요)');
+          YT._embedTry = 0; YT._embedList = null; ytPlay(item, true);
+        };
         er.querySelector('#ytDrTab').onclick = () => ytPopup(item);
         const nb = er.querySelector('#ytDrNext'); if (nb) nb.onclick = ytNext;
         er.querySelector('#ytDrUpd').onclick = async () => { toast('엔진 업데이트 중…'); const r = await apiFetch('/yt/engine', { method: 'POST' }); const jj = await r.json(); toast(jj.installed ? '업데이트 완료 ' + jj.version : '실패'); YT.directFail[item.id] = false; ytPlayDirect(item); };
@@ -840,7 +865,12 @@ async function ytaLinkStart() {
   if (IS_FILE || !location.origin.startsWith('http')) { toast('계정 연결은 start.bat으로 연 주소(http://127.0.0.1:…)에서만 가능합니다', 'err'); return; }
   const redirect = location.origin + '/';
   const useCode = !!(R.srvInfo && R.srvInfo.ytHasSecret);
-  const p = new URLSearchParams({ client_id: cid, redirect_uri: redirect, scope: 'https://www.googleapis.com/auth/youtube.readonly', include_granted_scopes: 'true', state: 'nst' });
+  /* state 는 "내가 시작한 연결이 맞는지" 확인하는 값이라 매번 새로 만들어야 한다.
+     'nst' 로 고정해 두고 확인도 안 하면, 남이 만든 콜백 주소를 열었을 때
+     그 사람 계정 코드를 내 앱이 그대로 받아 넣게 된다. */
+  const nonce = b64url(crypto.getRandomValues(new Uint8Array(16)));
+  sessionStorage.setItem('yt_state', nonce);
+  const p = new URLSearchParams({ client_id: cid, redirect_uri: redirect, scope: 'https://www.googleapis.com/auth/youtube.readonly', include_granted_scopes: 'true', state: nonce });
   if (useCode) {
     const arr = new Uint8Array(48); crypto.getRandomValues(arr); const verifier = b64url(arr);
     const chal = b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
@@ -851,6 +881,18 @@ async function ytaLinkStart() {
 }
 async function ytaLinkFinish() { // 리디렉션으로 돌아왔을 때
   const qp = new URLSearchParams(location.search), hp = new URLSearchParams(location.hash.replace(/^#/, ''));
+  // 돌아온 state 가 내가 보낸 것과 같을 때만 받는다 (아래 두 흐름 모두)
+  const back = qp.get('code') || hp.get('access_token') || qp.get('error');
+  if (back) {
+    const want = sessionStorage.getItem('yt_state') || '';
+    const got = qp.get('state') || hp.get('state') || '';
+    sessionStorage.removeItem('yt_state');
+    if (!want || got !== want) {
+      toast('YouTube 연결을 확인하지 못했습니다 — 앱에서 다시 연결해 주세요', 'err');
+      history.replaceState({}, '', location.pathname);
+      return;
+    }
+  }
   if (qp.get('code')) {
     try {
       const r = await apiFetch('/yt/oauth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: qp.get('code'), verifier: sessionStorage.getItem('yt_pkce') || '', redirect: location.origin + '/' }) });
@@ -1162,8 +1204,14 @@ function applyMeta(meta) {
   else S.quality = false;
   setPromptText(prompt); S.activeStyle = null;
   let uc = p.negative_prompt != null ? p.negative_prompt : (p.v4_negative_prompt ? p.v4_negative_prompt.caption.base_caption : '');
-  // NAI 웹이 자동으로 붙인 "nsfw, " 는 떼어내고(앱이 같은 규칙으로 다시 붙임), 사용자가 직접 쓴 경우(프롬프트에 nsfw 있음)는 유지
-  if (/^nsfw(,\s*|$)/i.test(uc) && !(prompt || '').toLowerCase().includes('nsfw')) { uc = uc.replace(/^nsfw(,\s*|$)/i, ''); S.autoNsfw = true; }
+  /* NAI 웹이 자동으로 붙인 "nsfw, " 는 떼어내고(앱이 같은 규칙으로 다시 붙임),
+     사용자가 직접 쓴 경우(프롬프트에 nsfw 있음)는 유지.
+     반대쪽도 맞춰야 한다 — 원본 네거티브에 nsfw 가 "없으면" 앱도 붙이면 안 된다.
+     예전엔 이 경우 자동붙이기를 그대로 켜 둬서, 노출 있는 그림을 불러오면
+     앱은 nsfw 를 네거티브에 넣어 옷 입은 그림을 만들었다. */
+  const hadNsfw = /^nsfw(,\s*|$)/i.test(uc);
+  if (!(prompt || '').toLowerCase().includes('nsfw')) S.autoNsfw = hadNsfw;
+  if (hadNsfw && !(prompt || '').toLowerCase().includes('nsfw')) { uc = uc.replace(/^nsfw(,\s*|$)/i, ''); }
   let presetIdx = -1;
   if (p.ucPreset != null) presetIdx = info.ucs.findIndex(u => u.id === p.ucPreset);
   // 텍스트가 일치하는 프리셋 중 가장 긴 것 (Heavy가 Human Focus의 접두어라서).
@@ -1239,14 +1287,40 @@ function openNaiImport() {
     const r = body.querySelector('#niRepro'); bindDrop(r, f => runRepro(f)); r.onclick = () => pickFiles(false, f => runRepro(f), 'image/png');
   });
 }
+/* 원본 PNG 의 Comment 를 NAI 가 받는 parameters 모양으로 되돌린다.
+   메타에만 있는 키와 이미지 계열은 빼고, uc 는 API 이름(negative_prompt)으로 바꾼다. */
+function reproParams(j) {
+  const raw = { ...j };
+  for (const k of Object.keys(raw)) {
+    if (/^(image|mask|reference_|director_reference)/.test(k)) delete raw[k];
+  }
+  if (raw.uc != null && raw.negative_prompt == null) raw.negative_prompt = raw.uc;
+  // prompt/uc 는 parameters 가 아니라 본문 쪽 값이고, 장수·요청종류는 이 검증에서 우리가 정한다
+  delete raw.prompt; delete raw.uc; delete raw.request_type; delete raw.signed_hash; delete raw.n_samples;
+  return raw;
+}
 async function runRepro(file) {
   const chunks = await pngTextChunks(new Uint8Array(await file.arrayBuffer()));
-  if (!chunks.find(c => c.key === 'Comment')) { toast('NAI 메타데이터가 없는 파일입니다', 'err'); return; }
+  const cmt = chunks.find(c => c.key === 'Comment');
+  if (!cmt) { toast('NAI 메타데이터가 없는 파일입니다', 'err'); return; }
+  let orig = {}; try { orig = JSON.parse(cmt.text); } catch (e) { toast('메타데이터 파싱 실패', 'err'); return; }
   await importFromPng(file);      // 설정·시드 복원 (모달 닫힘)
   R.i2iBlob = null; R.maskCanvas = null; updateI2IUI(); R.vibes = []; renderVibes(); R.prefs = []; renderPrefs();
+  /* 앱이 "평소대로" 보냈을 payload — 생성하지 않고 계산만 한다.
+     아래 표에서 원본과 이걸 비교해야 어디서 갈라지는지가 보인다.
+     (예전엔 방금 만든 결과의 메타와 비교해서, 늘 같다고 나오거나 무의미한 차이만 떴다) */
+  let normal = null;
+  try { normal = buildPayload({ seed: orig.seed }).parameters; } catch (e) { normal = null; }
+  // 생성은 원본 메타를 그대로 태워 보낸다 — 청크 치환·퀄리티 태그·UC 프리셋·자동 nsfw 전부 우회
+  const cap = o => (o && o.caption && o.caption.base_caption) || '';
+  const rprompt = orig.prompt || cap(orig.v4_prompt);
+  const ruc = orig.uc != null ? orig.uc : cap(orig.v4_negative_prompt);
   const savedN = S.n; S.n = 1;
   let item = null;
-  try { item = await doGenerate(undefined, '재현 검증'); } catch (e) { S.n = savedN; return; }
+  try {
+    item = await doGenerate({ prompt: rprompt, uc: ruc, seed: orig.seed, n: 1, noQuality: true,
+      w: orig.width || S.w, h: orig.height || S.h, rawParams: reproParams(orig) }, '재현 검증');
+  } catch (e) { S.n = savedN; return; }
   S.n = savedN;
   if (!item) return;
   const a = await blobToImage(file), b = await blobToImage(item.blob);
@@ -1258,25 +1332,36 @@ async function runRepro(file) {
   const mean = sum / n, pct = Math.round(same / n * 1000) / 10;
   const sizeSame = a.width === b.width && a.height === b.height;
   const verdict = !sizeSame ? '크기가 다릅니다 — 원본 PNG가 업스케일/편집된 파일일 수 있습니다' :
-    mean < 3 ? '✔ 사실상 동일 — 앱이 NAI 웹과 같은 결과를 냅니다. 평소 차이는 설정/시드 차이입니다' :
-    mean < 12 ? '△ 거의 같음 (미세 차이) — 원본이 재저장/리사이즈됐거나 NAI 서버 측 비결정성. 파라미터는 동일합니다' :
-    '✖ 다름 — 파라미터 차이가 있습니다. 아래 두 메타를 비교해서 알려주세요';
+    mean < 3 ? '✔ 사실상 동일 — 원본 설정을 그대로 보내면 NAI 웹과 같은 그림이 나옵니다' :
+    mean < 12 ? '△ 거의 같음 (미세 차이) — 원본이 재저장/리사이즈됐거나 NAI 서버 측 비결정성' :
+    '✖ 다름 — 원본 그대로 보냈는데도 다릅니다. NAI 쪽 사양이 바뀌었을 수 있습니다';
   openModal('재현 검증 결과', body => {
     body.innerHTML = `<div class="repro"><div><img src="${URL.createObjectURL(file)}"><div class="cap">NAI 웹 원본 ${a.width}×${a.height}</div></div><div><img src="${item.url}"><div class="cap">이 앱 생성 ${b.width}×${b.height}</div></div></div>
       <div><b>일치 픽셀 ${pct}%</b> · 평균 색차 ${mean.toFixed(1)}/255 · seed ${item.seed}</div><div class="hint">${verdict}</div>
       <div class="row"><button class="btn sm" id="rpMeta">두 메타데이터 비교 보기</button></div><div id="rpDiff"></div>`;
     body.querySelector('#rpMeta').onclick = async () => {
-      const cm = chunks.find(c => c.key === 'Comment'); let j = {}; try { j = JSON.parse(cm.text); } catch (e) {}
-      const mine = item.meta.parameters || {};
+      const j = orig;
+      // 비교 대상은 "방금 보낸 것"(원본 그대로라 당연히 같다)이 아니라
+      // "앱이 평소대로 보냈을 것" 이어야 어디서 갈라지는지가 보인다
+      const mine = normal || item.meta.parameters || {};
       const keys = [...new Set([...Object.keys(j), ...Object.keys(mine)])].filter(k => !/^(image|mask|reference_|director_|signed_hash|request_type)/.test(k)).sort();
       const cell = (s, i, isDiff) => { s = String(s); if (!isDiff || i < 0) return esc(s.length > 400 ? s.slice(0, 400) + '…' : s); const a = s.slice(Math.max(0, i - 60), i), b = s.slice(i, i + 160); return (i > 60 ? '…' : '') + esc(a) + '<mark class="dmark">' + esc(b) + (s.length > i + 160 ? '…' : '') + '</mark>'; };
+      // 한쪽에만 있는 키는 NAI 가 메타에 안 적는 것/앱이 아직 모르는 것이라 "차이" 로 세지 않는다.
+      // 다만 프롬프트·네거티브처럼 그림을 바꾸는 필드는 없어도 눈에 띄게 위로 올린다.
+      const KEY_FIELDS = ['prompt', 'uc', 'negative_prompt', 'v4_prompt', 'v4_negative_prompt', 'steps', 'scale',
+        'cfg_rescale', 'sampler', 'noise_schedule', 'seed', 'width', 'height', 'skip_cfg_above_sigma', 'characterPrompts'];
+      const rank = k => { const i = KEY_FIELDS.indexOf(k); return i < 0 ? 999 : i; };
+      keys.sort((a, b) => (rank(a) - rank(b)) || a.localeCompare(b));
       const rows = keys.map(k => {
         const A = JSON.stringify(j[k]), B = JSON.stringify(mine[k]);
         const diff = A !== B && !(A === undefined || B === undefined);
         let i = -1; if (diff) { const a = String(A), b = String(B); i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++; }
         return `<tr class="${diff ? 'diff' : ''}"><td>${esc(k)}</td><td>${cell(A, i, diff)}</td><td>${cell(B, i, diff)}</td></tr>`;
       }).join('');
-      body.querySelector('#rpDiff').innerHTML = `<div style="max-height:44vh;overflow:auto"><table class="metatbl"><tr><th>필드</th><th>NAI 웹 PNG</th><th>이 앱</th></tr>${rows}</table></div><div class="hint">빨간 줄 = 값이 다른 필드이고, 노란 강조 = 처음으로 달라지는 지점부터. 한쪽이 undefined인 건 NAI 서버가 메타에만 넣는 필드라 정상. 픽셀이 100% 같으면 표기 순서 차이일 뿐입니다.</div>`;
+      const nDiff = keys.filter(k => { const A = JSON.stringify(j[k]), B = JSON.stringify(mine[k]); return A !== B && A !== undefined && B !== undefined; }).length;
+      body.querySelector('#rpDiff').innerHTML = `<div class="hint">위 그림은 <b>원본 설정을 그대로</b> 보내 만든 것입니다. 아래 표는 <b>평소처럼 ▶생성을 눌렀을 때</b> 무엇이 달라지는지 보여줍니다${nDiff ? ` — 다른 필드 ${nDiff}개` : ' — 다른 필드 없음'}.</div>
+        <div style="max-height:44vh;overflow:auto"><table class="metatbl"><tr><th>필드</th><th>NAI 웹 PNG</th><th>앱이 평소 보내는 값</th></tr>${rows}</table></div>
+        <div class="hint">빨간 줄 = 값이 다른 필드, 노란 강조 = 처음 갈라지는 지점부터. 한쪽만 undefined 인 건 NAI 가 메타에 안 적거나 앱이 아직 안 쓰는 필드라 차이로 세지 않습니다.</div>`;
     };
   }, true);
 }
@@ -1285,6 +1370,10 @@ async function runRepro(file) {
 const CRC_T = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
 function crc32(u8, crc) { crc = (crc == null ? 0xFFFFFFFF : crc); for (let i = 0; i < u8.length; i++) crc = CRC_T[(crc ^ u8[i]) & 0xFF] ^ (crc >>> 8); return crc; }
 async function zipBuild(files) { // files: [{name, blob|u8}] → Blob (STORE, ZIP64 미사용 → 4GB 미만)
+  /* ZIP64 를 안 쓰므로 오프셋·크기는 4바이트, 파일 수는 2바이트가 한계다.
+     넘으면 값이 잘려 나가는데, 그래도 파일은 만들어지고 "완료" 로 보인다 —
+     정작 풀 때 깨져서 백업이 통째로 날아간다. 만들기 전에 막는다. */
+  if (files.length > 65535) throw new Error(`파일이 너무 많습니다 (${files.length}개 · 65535개까지) — 이미지 없이 설정만 백업하거나 즐겨찾기만 담아 주세요`);
   const parts = [], cds = []; let off = 0; const enc = new TextEncoder();
   const u16 = v => [v & 255, (v >> 8) & 255], u32 = v => [v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >>> 24) & 255];
   const dt = new Date(); const dosT = (dt.getHours() << 11) | (dt.getMinutes() << 5) | (dt.getSeconds() >> 1), dosD = ((dt.getFullYear() - 1980) << 9) | ((dt.getMonth() + 1) << 5) | dt.getDate();
@@ -1292,6 +1381,7 @@ async function zipBuild(files) { // files: [{name, blob|u8}] → Blob (STORE, ZI
     const name = enc.encode(f.name); const data = f.u8 || new Uint8Array(await f.blob.arrayBuffer());
     const crc = (crc32(data) ^ 0xFFFFFFFF) >>> 0, size = data.length;
     const lh = new Uint8Array([0x50, 0x4b, 3, 4, ...u16(20), ...u16(0x800), ...u16(0), ...u16(dosT), ...u16(dosD), ...u32(crc), ...u32(size), ...u32(size), ...u16(name.length), ...u16(0), ...name]);
+    if (off + lh.length + size > 0xFFFFFFFF) throw new Error('백업이 4GB를 넘습니다 — 즐겨찾기만 담거나 이미지를 빼고 만들어 주세요');
     parts.push(lh, data);
     cds.push(new Uint8Array([0x50, 0x4b, 1, 2, ...u16(20), ...u16(20), ...u16(0x800), ...u16(0), ...u16(dosT), ...u16(dosD), ...u32(crc), ...u32(size), ...u32(size), ...u16(name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(off), ...name]));
     off += lh.length + size;
@@ -1323,9 +1413,11 @@ function openBackup() {
       try {
         const files = [];
         const meta = { app: 'NAI Studio', version: 9, at: new Date().toISOString(), state: S };
-        try { meta.vibelib = await vibeLibAll(); } catch (e) {}   // 유료 인코딩이 든 바이브 라이브러리도 함께
+        const warn = [];   // 조용히 빠뜨리면 "백업 있음" 이라 믿고 지우게 된다 → 빠진 건 반드시 알린다
+        try { meta.vibelib = await vibeLibAll(); } catch (e) { warn.push('바이브 라이브러리'); }   // 유료 인코딩이 든 바이브 라이브러리도 함께
         if (body.querySelector('#bkTok').checked) {
-          try { const r = await apiFetch('/config?full=1'); if (r.ok) meta.config = await r.json(); } catch (e) {}
+          try { const r = await apiFetch('/config?full=1'); if (r.ok) meta.config = await r.json(); else warn.push('토큰·연결정보'); }
+          catch (e) { warn.push('토큰·연결정보'); }
         }
         files.push({ name: 'nai-studio-backup.json', u8: new TextEncoder().encode(JSON.stringify(meta, null, 1)) });
         const withHist = bkHist.checked || bkFav.checked;
@@ -1344,7 +1436,8 @@ function openBackup() {
         st.textContent = 'ZIP 생성 중…';
         const zip = await zipBuild(files);
         downloadBlob(zip, `nai-studio-backup_${ts()}.zip`);
-        st.textContent = `✔ 완료 (${(zip.size / 1048576).toFixed(1)}MB, 파일 ${files.length}개)`;
+        st.textContent = `✔ 완료 (${(zip.size / 1048576).toFixed(1)}MB, 파일 ${files.length}개)`
+          + (warn.length ? ` · ⚠ 못 담은 것: ${warn.join(', ')}` : '');
       } catch (e) { st.textContent = '✖ ' + e.message; }
     };
     const drop = body.querySelector('#bkDrop');
@@ -1382,22 +1475,30 @@ function openBackup() {
             S.scenes = mergeBy(S.scenes, state.scenes, 'id'); S.chunkCats = [...new Set([...(S.chunkCats || []), ...(state.chunkCats || [])])];
             S.ytQueue = mergeBy(S.ytQueue, state.ytQueue, 'id'); S.ytHistory = mergeBy(S.ytHistory, state.ytHistory, 'id');
             if (!S.prompt && !Object.keys(S.secText || {}).length) { S.secText = state.secText || {}; S.prompt = state.prompt || ''; S.sections = state.sections || S.sections; }
+            // 캐릭터 칸과 네거티브도 같은 규칙으로 — 지금 비어 있을 때만 백업 것을 가져온다.
+            // 예전엔 아예 손대지 않아서 "합치기" 로 복원해도 이 둘은 영영 안 돌아왔다.
+            if (!(S.chars || []).some(c => (c.prompt || '').trim()) && (state.chars || []).length) S.chars = state.chars;
+            if (!(S.uc || '').trim() && (state.uc || '').trim()) S.uc = state.uc;
             for (const k of ['ov', 'model', 'w', 'h', 'steps', 'scale', 'rescale', 'sampler', 'schedule', 'quality', 'ucPreset', 'variety', 'decrisper', 'autoNsfw', 'theme', 'autoMode', 'autoCount', 'autoDelay']) if (state[k] !== undefined && S[k] === DEFAULTS[k]) S[k] = state[k];
           }
           S.savedAt = Date.now(); save();
           /* '덮어쓰기' 는 말 그대로 교체여야 한다. 평소 저장은 서버가 합집합으로 합치므로
              지운 항목이 되살아나고, 개수가 줄면 보호 규칙에 걸려 아예 저장되지 않는다.
              → 이 경우에만 force 로 밀어 넣는다. */
+          const rwarn = [];
           if (replace && typeof pushStateToServer === 'function') {
-            try { await pushStateToServer(true); } catch (e) {}
+            try { await pushStateToServer(true); } catch (e) { rwarn.push('서버 반영'); }
           }
           if (config) {
             // 값이 있는 키만 보낸다 — 빈 문자열을 보내면 서버가 "지우기"로 해석해
             // 백업에 없던 NAI 토큰·유튜브 연결이 날아간다
             const cfgSend = Object.fromEntries(Object.entries(config).filter(([, v]) => v && String(v).trim()));
-            if (Object.keys(cfgSend).length) { try { await apiFetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfgSend) }); } catch (e) {} }
+            if (Object.keys(cfgSend).length) {
+              try { const cr = await apiFetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfgSend) }); if (!cr.ok) rwarn.push('토큰·연결정보'); }
+              catch (e) { rwarn.push('토큰·연결정보'); }
+            }
           }
-          if (vibelib && vibelib.length) { try { const cur = await vibeLibAll(); const names = new Set(cur.map(x => x.name)); const add = vibelib.filter(x => replace || !names.has(x.name)); await vibeLibSave(replace ? vibelib : cur.concat(add)); } catch (e) {} }
+          if (vibelib && vibelib.length) { try { const cur = await vibeLibAll(); const names = new Set(cur.map(x => x.name)); const add = vibelib.filter(x => replace || !names.has(x.name)); await vibeLibSave(replace ? vibelib : cur.concat(add)); } catch (e) { rwarn.push('바이브 라이브러리'); } }
           let n = 0, failed = 0;
           for (const it of histIdx) {
             const data = histFiles[it.file]; if (!data) continue;
@@ -1409,10 +1510,13 @@ function openBackup() {
             if (n % 20 === 0) rst.textContent = `이미지 복원 중… ${n}/${histIdx.length}`;
           }
           R.hist.sort((a, b) => a.t - b.t); renderHist(); if (R.hist.length) showImage(R.hist.length - 1);
+          // S.mode 만 바꾸면 화면은 그대로다 — 탭 전환까지 실제로 시켜야 한다
+          if (replace && typeof setMode === 'function') { try { setMode(S.mode || 'gen'); } catch (e) {} }
           syncUI(); renderChars(); renderChunkBar(); applyTheme(); if (typeof renderStyleSelects === 'function') renderStyleSelects(); if (typeof renderYtQueue === 'function') renderYtQueue(); if (window.onHistChanged) window.onHistChanged();
           // 저장 실패를 조용히 삼키지 않는다 — 새로고침하면 사라질 이미지이므로 알려야 한다
-          rst.textContent = `✔ 복원 완료 (이미지 ${n}장${failed ? `, ${failed}장은 저장 실패 — 새로고침하면 사라집니다` : ''})`;
-          toast(failed ? `백업 복원 완료 — ${failed}장 저장 실패(용량 부족 가능)` : '백업 복원 완료', failed ? 'err' : '');
+          rst.textContent = `✔ 복원 완료 (이미지 ${n}장${failed ? `, ${failed}장은 저장 실패 — 새로고침하면 사라집니다` : ''})`
+            + (rwarn.length ? ` · ⚠ 복원 못한 것: ${rwarn.join(', ')}` : '');
+          toast(failed || rwarn.length ? `백업 복원 완료 — ${[failed ? failed + '장 저장 실패' : '', ...rwarn].filter(Boolean).join(', ')}` : '백업 복원 완료', (failed || rwarn.length) ? 'err' : '');
         };
         pv.querySelector('#bkMerge').onclick = () => restore(false);
         pv.querySelector('#bkReplace').onclick = () => { if (confirm('현재 설정을 전부 백업 내용으로 교체합니다. 계속할까요?')) restore(true); };
@@ -1736,8 +1840,13 @@ function openAiPrompt(targetTA) {
         out.value = j.tags || '';
         // 실제로 존재하는 태그인지 표시 (AI가 없는 태그를 만들어 낼 수 있음)
         const parts = out.value.split(',').map(x => x.trim()).filter(Boolean);
-        const bad = TAGDB.map ? parts.filter(p => !TAGDB.map.get(p.replace(/ /g, '_')) && !TAGDB.map.get(p)) : [];
-        msg.textContent = `태그 ${parts.length}개` + (bad.length ? ` · 사전에 없는 것 ${bad.length}개: ${bad.slice(0, 4).join(', ')}` : ' · 전부 실존');
+        // 사전이 아직 안 읽혔으면 검사를 못 한 것이다 — 그걸 "전부 실존" 이라고 하면 안 된다
+        const checked = !!TAGDB.map;
+        const bad = checked ? parts.filter(p => !TAGDB.map.get(p.replace(/ /g, '_')) && !TAGDB.map.get(p)) : [];
+        msg.textContent = `태그 ${parts.length}개`
+          + (!checked ? ' · 사전을 아직 못 읽어 실존 확인 안 됨'
+            : bad.length ? ` · 사전에 없는 것 ${bad.length}개: ${bad.slice(0, 4).join(', ')}` : ' · 전부 실존');
+        if (!checked && typeof loadTagDb === 'function') loadTagDb();
       } catch (e) { msg.textContent = '✖ ' + e.message; toast(e.message, 'err'); }
       finally { body.querySelector('#aiGo').disabled = false; }
     };
@@ -2001,10 +2110,17 @@ function openUpdate() {
          → 저장소 압축본을 받아 앱 파일(js/html/css/py)만 갈아끼운다.
          사용자 데이터(data/)와 설치분(vendor/ 등)은 건드리지 않고,
          갈아끼우기 전 지금 파일을 data/backups/src-<시각>/ 에 넣어 되돌릴 수 있게 한다. */
-      if (j.zip) {
+      /* 서버가 zip 주소를 안 주는 경우가 있다(예전 버전으로 떠 있을 때).
+         릴리스 페이지 주소가 .../releases/tag/<태그> 라서 압축본 주소는 그걸로 만들 수 있다.
+         굳이 "주소를 확인할 수 없습니다" 로 막다른 길을 만들 이유가 없다. */
+      const zip = j.zip || (() => {
+        const m = /^(https:\/\/github\.com\/[\w.\-]+\/[\w.\-]+)\/releases\/tag\/(.+)$/.exec(j.page || '');
+        return m ? `${m[1]}/archive/refs/tags/${m[2]}.zip` : null;
+      })();
+      if (zip) {
         const dl = document.createElement('button'); dl.className = 'btn primary';
         dl.textContent = `⬇ ${j.latest} 받아서 적용`;
-        dl.onclick = () => startSourceUpdate(j, body);
+        dl.onclick = () => startSourceUpdate({ ...j, zip }, body);
         row.appendChild(dl);
         msg.innerHTML = '<span class="hint">소스로 실행 중입니다 — 앱 파일만 갈아끼웁니다. '
           + '설정·이미지(data 폴더)는 그대로이고, 바꾸기 전 파일은 백업해 둡니다.</span>';
@@ -2027,6 +2143,9 @@ async function startSourceUpdate(j, body) {
   try {
     const r = await apiFetch('/update/source', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url: j.zip, ver: j.latest }) });
+    // 파일은 새것인데 파이썬 서버가 예전 채로 떠 있으면 이 주소 자체가 없다 →
+    // "HTTP 404" 만 보여 주면 뭘 해야 할지 알 수 없으니 할 일을 알려준다
+    if (r.status === 404) throw new Error('서버가 예전 버전으로 켜져 있습니다 — 앱을 완전히 껐다가 다시 켠 뒤 시도하세요.');
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).message || 'HTTP ' + r.status);
   } catch (e) { msg.textContent = '✖ ' + e.message; bar.hidden = true; return; }
   const poll = setInterval(async () => {
