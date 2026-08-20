@@ -41,6 +41,7 @@ async function loadTagDb() {
     TAGDB.rows = rows; TAGDB.map = map; TAGDB.state = 'ready';
     console.log('[tags] loaded', rows.length);
     buildTagIndex();
+    tagDbNotify();
     loadExtraTags();     // 영문 보강 사전(작가·캐릭터 위주)은 뒤이어 비동기로 덧붙인다
   } catch (e) {
     TAGDB.state = 'error'; TAGDB.msg = e.message;
@@ -92,8 +93,12 @@ async function loadExtraTags() {
       prepRow(r); TAGDB.rows.push(r); TAGDB.map.set(r[0], r); added++;
     }
     if (added) { buildTagIndex(); console.log('[tags] +extra', added, '→', TAGDB.rows.length); }
-  } catch (e) { /* 보강 사전은 없어도 동작 */ }
-  finally { loadKoAlias(); }
+  } catch (e) {
+    // 서버가 아직 안 떴을 뿐일 수 있다. 표시를 되돌려 다음에 다시 받아오게 한다
+    // (안 그러면 작가·캐릭터 태그가 그 세션 내내 통째로 빠진다)
+    TAGDB.extraLoaded = false;
+  }
+  finally { loadKoAlias(); tagDbNotify(); }
 }
 /* 한글 표현 별칭 — "얼굴이 작다" 처럼 문장으로 검색해도 태그가 나오게 (출처: novelai.app 태그생성기).
    실제로 단부루에 존재하는 태그에만 붙인다. */
@@ -114,15 +119,26 @@ async function loadKoAlias() {
     }
     TAGDB.nsfw = new Set(j.nsfw || []);
     if (n) { buildTagIndex(); console.log('[tags] +한글표현', n); }
-  } catch (e) { /* 없어도 동작 */ }
+  } catch (e) { TAGDB.koLoaded = false; /* 다음에 다시 시도 */ }
+  finally { tagDbNotify(); }
+}
+
+/* 사전이 (보강분까지) 새로 들어오면 열려 있는 창에 알려 다시 그리게 한다.
+   창을 열 때 아직 로딩 중이면 "결과 없음" 이 그대로 굳어 버렸다. */
+function tagDbNotify() {
+  const w = TAGDB.waiters || [];
+  TAGDB.waiters = w.filter(f => { try { return f() !== false; } catch (e) { return false; } });
 }
 async function loadTagGroups() {
   if (TAGDB.groups) return TAGDB.groups;
+  /* 실패를 {} 로 캐시해 버리면 (서버가 늦게 뜬 것뿐인데도) 세션 내내 그룹 탐색이 빈 채로
+     남는다 → 실패는 캐시하지 않고, 다음에 부를 때 다시 시도한다. */
   try {
     const res = await apiFetch('/tags/groups.json');
-    if (res.status === 204 || !res.ok) { TAGDB.groups = {}; return TAGDB.groups; }
+    if (res.status === 204) { TAGDB.groups = {}; return TAGDB.groups; }   // 서버가 "없음" 이라고 확답한 경우만 캐시
+    if (!res.ok) return {};
     TAGDB.groups = await res.json();
-  } catch (e) { TAGDB.groups = {}; }
+  } catch (e) { return {}; }
   return TAGDB.groups;
 }
 window.onServerUp = () => { loadTagDb(); loadT5().then(() => { if (typeof updatePreview === 'function') updatePreview(); }); };
@@ -381,8 +397,12 @@ function openArtistBrowser(initial) {
         save(); renderChunkBar(); toast('작가랜덤 조각에 추가 — <작가랜덤> 으로 매번 다른 작가가 뽑힙니다');
       };
       grid.innerHTML = '<div class="hint">단부루에서 그림 가져오는 중…</div>'; rel.innerHTML = '';
+      // 작가를 빠르게 여러 번 누르면 늦게 온 응답이 지금 보고 있는 작가의 그림을 덮어쓴다.
+      // 지금 요청이 마지막인지 확인하고 나서만 화면을 건드린다.
+      const myReq = (ART.seq = (ART.seq || 0) + 1);
       try {
         const j = await danFetch(`/dan/posts?tag=${encodeURIComponent(name)}&limit=12&safe=${ART.safe ? 1 : 0}`);
+        if (myReq !== ART.seq) return;
         grid.innerHTML = '';
         if (!j.posts.length) { grid.innerHTML = `<div class="hint">샘플이 없습니다${ART.safe ? ' — 전연령만 체크를 꺼보세요' : ''}</div>`; }
         for (const p of j.posts) {
@@ -507,7 +527,12 @@ function openTagSearch(initial) {
     q.onkeydown = e => { if (e.key === 'Enter') { const first = list.querySelector('.tsrow'); if (first) first.click(); } };
     if (initial) { q.value = initial; run(); }
     setTimeout(() => q.focus(), 50);
-    if (!TAGDB.rows) loadTagDb();
+    if (!TAGDB.rows) {
+      loadTagDb();
+      body.querySelector('#tsN').textContent = '사전 읽는 중…';
+      // 다 읽히면 한 번 더 그린다. 창이 이미 닫혔으면 false 를 돌려 목록에서 빠진다.
+      (TAGDB.waiters = TAGDB.waiters || []).push(() => body.isConnected && (run(), true));
+    }
   }, true);
 }
 
@@ -632,7 +657,12 @@ function initTags() {
   $('#btnTagSearch').onclick = () => openTagSearch();
   const ab = $('#btnArtist'); if (ab) ab.onclick = () => openArtistBrowser();
   document.addEventListener('keydown', e => {
-    if (e.ctrlKey && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); openTagSearch(); }
+    // 다른 창이 떠 있으면 그 창의 일이다 — 통째로 태그 검색으로 갈아치우면 하던 작업이 날아간다
+    if (e.ctrlKey && (e.key === 'k' || e.key === 'K')) {
+      const ov = document.getElementById('modalOverlay');
+      if (ov && !ov.hidden) return;
+      e.preventDefault(); openTagSearch();
+    }
   });
   loadTagDb();
 }

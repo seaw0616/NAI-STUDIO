@@ -706,7 +706,14 @@ async function apiError(res) {
   let msg = res.status + ' ' + res.statusText, raw = '';
   try { raw = await res.text(); const j = JSON.parse(raw); msg = j.message || j.error || msg; } catch (e) {}
   R.lastErr = `${res.status} ${msg}`;
-  if (res.status === 401) msg = '토큰이 유효하지 않습니다 (' + msg + ') — ⚙설정에서 새 토큰 저장';
+  /* 401 은 NAI 만 내는 게 아니다 — 구글(유튜브 계정) 쪽도 낸다.
+     전부 "NAI 토큰을 새로 저장하세요" 로 안내하면 엉뚱한 데를 고치게 된다. */
+  if (res.status === 401) {
+    const u = res.url || '';
+    const isNai = !u || /\/(img|api)\//.test(u);   // 주소를 모르면 흔한 쪽(NAI)으로 안내
+    msg = isNai ? '토큰이 유효하지 않습니다 (' + msg + ') — ⚙설정에서 새 토큰 저장'
+                : '인증이 만료됐습니다 (' + msg + ') — 해당 계정 연결을 다시 해주세요';
+  }
   if (res.status === 400 && /refresh NovelAI|image URL/i.test(msg)) msg = 'NAI 서버 주소가 바뀌었습니다 (' + msg + ') — 앱 업데이트가 필요합니다. 어떤 기능에서 났는지 알려주세요';
   if (res.status === 402) msg = 'Anlas 부족 또는 구독 필요';
   if (res.status === 429) msg = '동시 생성 제한(429) — 잠시 후 다시 시도';
@@ -770,7 +777,7 @@ function buildPayload(ov) {
   const p = {
     params_version: 3, width: w, height: h,
     scale: S.scale, sampler: S.sampler, steps: S.steps, n_samples: ov.n || S.n || 1,
-    ucPreset: (info.ucs[ucIdx()] || {}).id != null ? info.ucs[ucIdx()].id : 0, qualityToggle: S.quality, autoSmea: false,
+    ucPreset: (info.ucs[ucIdx(m)] || {}).id != null ? info.ucs[ucIdx(m)].id : 0, qualityToggle: S.quality, autoSmea: false,
     dynamic_thresholding: S.decrisper, controlnet_strength: 1, legacy: false, add_original_image: true,
     cfg_rescale: S.rescale, noise_schedule: S.schedule, legacy_v3_extend: false,
     skip_cfg_above_sigma: S.variety ? varietySigma(m, w, h) : null, use_coords: useCoords, seed,
@@ -796,6 +803,10 @@ function buildPayload(ov) {
       'normalize_reference_strength_multiple', 'inpaintImg2ImgStrength', 'image_format'].forEach(k => delete p[k]);
     if (S.variety) p.skip_cfg_above_sigma = varietySigma(m, w, h);
   }
+  /* 재현 검증용 — 원본 PNG 에 적힌 파라미터를 마지막에 그대로 덮는다.
+     NAI 가 새로 추가한 필드(cfg_sched_eligibility 등)처럼 앱이 아직 모르는 것까지
+     빠짐없이 보내야 "같은 씨앗에 같은 그림" 인지 진짜로 확인할 수 있다. */
+  if (ov.rawParams) for (const k in ov.rawParams) { if (ov.rawParams[k] !== undefined) p[k] = ov.rawParams[k]; }
   return body;
 }
 async function attachImages(body, ov) {
