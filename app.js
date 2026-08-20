@@ -549,7 +549,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '11.16';   // 화면 표시용 앱 버전 (상단)
+const APP_VERSION = '11.17';   // 화면 표시용 앱 버전 (상단)
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 async function tryHealth(base) {
   try {
@@ -1686,7 +1686,7 @@ function openSettings() {
     body.querySelector('#mUpdNow').onclick = async () => {
       updSt.textContent = '확인 중…';
       const j = typeof updateCheck === 'function' ? await updateCheck(false) : null;
-      updSt.textContent = !j ? '확인 실패' : (!j.configured ? '저장소를 먼저 지정하세요' : (j.available ? '새 버전 ' + j.latest : '최신입니다'));
+      updSt.textContent = !j ? '확인 실패' : (!j.configured ? (j.error || '저장소를 먼저 지정하세요') : (j.available ? '새 버전 ' + j.latest : '최신입니다'));
     };
     const gemSt = body.querySelector('#mGemState');
     if (R.srvInfo && R.srvInfo.hasGemini) gemSt.textContent = '저장됨';
