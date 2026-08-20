@@ -38,7 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 VERSION = 17
-RELEASE = "11.17"            # 배포 버전. GitHub 릴리스 태그 "v11.17" 과 짝을 이룬다.
+RELEASE = "11.18"            # 배포 버전. GitHub 릴리스 태그 "v11.18" 과 짝을 이룬다.
 UPDATE_REPO = ""            # "사용자명/저장소" — 비어 있으면 설정에서 넣는다 (config.json 의 updateRepo)
 FROZEN = getattr(sys, "frozen", False)          # PyInstaller 로 묶인 단일 exe 인가
 if FROZEN:
@@ -270,6 +270,40 @@ def _gh(url):
         return json.loads(r.read())
 
 
+_upd_cache = {"t": 0.0, "data": None, "busy": False}
+
+
+def update_check_cached(max_age=600):
+    """/health 에 실어 보내기 위한 캐시본.
+
+    앱은 이미 15초마다 /health 를 물어보므로, 서버가 10분에 한 번만 GitHub 를 보고
+    그 결과를 실어 주면 새 버전이 나온 뒤 몇 초 안에 표시가 뜬다.
+    GitHub 익명 한도(시간당 60회)도 기기당 6회로 지켜진다.
+    /health 는 절대 막히면 안 되므로, 캐시가 낡았으면 백그라운드로 갱신하고
+    지금 있는 값을 그대로 돌려준다."""
+    now = time.time()
+    stale = (now - _upd_cache["t"]) > max_age
+    if stale and not _upd_cache["busy"]:
+        _upd_cache["busy"] = True
+
+        def refresh():
+            try:
+                d = update_check()
+                _upd_cache["data"] = d
+                _upd_cache["t"] = time.time()
+            except Exception:
+                _upd_cache["t"] = time.time() - max_age + 60   # 실패하면 1분 뒤 재시도
+            finally:
+                _upd_cache["busy"] = False
+
+        threading.Thread(target=refresh, daemon=True).start()
+    d = _upd_cache["data"]
+    if not d:
+        return None
+    return {"latest": d.get("latest"), "available": bool(d.get("available")),
+            "current": d.get("current"), "configured": bool(d.get("configured"))}
+
+
 def update_check():
     """최신 릴리스 조회 → 지금 버전과 비교"""
     repo = _upd_repo()
@@ -298,10 +332,18 @@ def _upd_set(**kw):
 
 
 def update_download(url, expect_size, ver):
-    """새 exe 를 exe 옆에 내려받는다 (덮어쓰기는 종료 후에 해야 한다)"""
+    """새 exe 를 exe 옆에 내려받는다 (덮어쓰기는 종료 후에 해야 한다).
+
+    같은 .part 파일에 두 번 이상 동시에 쓰면 바이트가 섞인 채 크기 검사만 통과해
+    '받기 완료' 로 표시되고, 그 깨진 exe 가 그대로 적용된다.
+    → 이미 받는 중이면 새 요청은 무시한다."""
+    with _upd_lock:
+        if _upd.get("state") == "downloading":
+            return False
+        _upd.update(state="downloading", got=0, total=expect_size or 0, msg="", ver=ver)
+
     def work():
         try:
-            _upd_set(state="downloading", got=0, total=expect_size or 0, msg="", ver=ver)
             dest = HOME / "NAI-Studio.new.exe"
             tmp = HOME / "NAI-Studio.new.part"
             req = urllib.request.Request(url, headers={"User-Agent": "NAI-Studio"})
@@ -325,6 +367,7 @@ def update_download(url, expect_size, ver):
         except Exception as e:
             _upd_set(state="error", msg=str(e)[:200])
     threading.Thread(target=work, daemon=True).start()
+    return True
 
 
 def update_apply():
@@ -851,6 +894,7 @@ class Handler(BaseHTTPRequestHandler):
             cfg = load_cfg()
             tok = cfg.get("token", "")
             self._json(200, {"ok": True, "version": VERSION, "tags": _tag_status,
+                             "upd": update_check_cached(),
                              "hasToken": bool(tok), "tokenHint": ("…" + tok[-4:]) if tok else "",
                              "ytClientId": cfg.get("ytClientId", ""), "ytHasSecret": bool(cfg.get("ytClientSecret")),
                              "ytLinked": bool(cfg.get("ytRefresh")), "ytEngine": bool(yt_engine()),

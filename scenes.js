@@ -64,13 +64,20 @@ function openStyleManager(editId) {
          → 옮긴 것인지 복사한 것인지 그 자리에서 정하게 한다. */
       const p = S.prompt.trim(), u = S.uc.trim();
       if (!p && !u) { toast('프롬프트가 비어 있습니다', 'err'); return; }
-      S.styles.push({ id: uid(), name: '내 스타일 ' + (S.styles.length + 1), prefix: p, suffix: '', uc: u, createdAt: Date.now() });
+      const newId = uid();
+      S.styles.push({ id: newId, name: '내 스타일 ' + (S.styles.length + 1), prefix: p, suffix: '', uc: u, createdAt: Date.now() });
       const moved = confirm('현재 프롬프트를 스타일에 담았습니다.\n\n프롬프트 칸을 비울까요?\n\n'
         + '[확인] 비우기 — 스타일이 그 내용을 넣어줍니다 (권장)\n'
         + '[취소] 그대로 두기 — 이 스타일을 고르면 같은 내용이 두 번 들어갑니다');
-      if (moved) { S.prompt = ''; S.secText = {}; S.uc = ''; if (typeof renderSections === 'function') renderSections(); if (typeof syncUI === 'function') syncUI(); }
+      // 칸을 비웠으면 방금 만든 스타일을 곧바로 적용해야 한다.
+      // 안 그러면 프롬프트만 사라지고 아무것도 안 들어가 "다 날아갔다" 가 된다.
+      if (moved) {
+        S.prompt = ''; S.secText = {}; S.uc = ''; S.activeStyle = newId;
+        if (typeof renderSections === 'function') renderSections();
+        if (typeof syncUI === 'function') syncUI();
+      }
       save(); draw(); renderStyleSelects();
-      toast(moved ? '스타일로 옮겼습니다 — 프롬프트 칸은 비웠습니다' : '스타일로 복사했습니다 — 칸에 남은 내용과 겹치면 두 번 들어갑니다');
+      toast(moved ? '스타일로 옮기고 바로 적용했습니다 — 프롬프트 칸은 비웠습니다' : '스타일로 복사했습니다 — 칸에 남은 내용과 겹치면 두 번 들어갑니다');
     };
     body.querySelector('#stExport').onclick = () => downloadBlob(new Blob([JSON.stringify(S.styles, null, 2)], { type: 'application/json' }), 'nai-styles.json');
     body.querySelector('#stImport').onclick = () => pickFiles(false, async f => {
@@ -500,5 +507,6 @@ function initScenes() {
     if (S.mode === 'library') renderLibrary();
   };
   window.onHistChanged = softRefresh;
-  window.onImageGenerated = softRefresh;
+  // 이 훅은 스마트 툴도 쓴다. 통째로 덮어쓰면 스마트 툴 탭이 새 이미지를 못 받는다.
+  window.onImageGenerated = (prev => it => { if (prev) prev(it); softRefresh(it); })(window.onImageGenerated);
 }

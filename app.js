@@ -220,7 +220,7 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
     if (contentCount(base) < contentCount(S) || diverged) { try { localStorage.setItem('nst_state_prev', JSON.stringify(S)); } catch (e) {} }
     R.seenBase = srv.savedAt || 0;
     try { localStorage.setItem('nst_base', String(srv.savedAt || 0)); } catch (e) {}   // 용량 초과로 pull 전체가 중단되면 안 된다
-    if (localNewer) { S = base; R.booted = true; save(); if (typeof renderChunkBar === 'function') renderChunkBar(); if (typeof renderStyleSelects === 'function') renderStyleSelects(); return false; }
+    if (localNewer) { S = base; R.booted = true; save(); if (diverged) toast('이 브라우저 설정으로 서버를 갱신했습니다 — 다른 창/기기에서 바꾼 설정이 있었다면 📦백업에서 되돌릴 수 있습니다'); if (typeof renderChunkBar === 'function') renderChunkBar(); if (typeof renderStyleSelects === 'function') renderStyleSelects(); return false; }
     S = base;
     localStorage.setItem('nst_state', JSON.stringify(S));
     if (!MODELS[S.model]) S.model = DEFAULTS.model;
@@ -230,8 +230,7 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
     if (typeof renderYtQueue === 'function') renderYtQueue();
     setMode(S.mode || 'main');
     R.booted = true; save();
-    toast(diverged ? '이 브라우저 설정으로 서버를 갱신했습니다 — 다른 창/기기에서 바꾼 설정이 있었다면 📦백업에서 되돌릴 수 있습니다'
-      : '서버에 저장된 설정(청크·스타일·씬)을 불러와 합쳤습니다');
+    toast('서버에 저장된 설정(청크·스타일·씬)을 불러와 합쳤습니다');
     return true;
   } catch (e) { R.booted = true; return false; }
 }
@@ -504,6 +503,19 @@ async function pngTextChunks(u8) {
   pngWalk(u8, (type, ds, len) => {
     const data = u8.subarray(ds, ds + len);
     if (type === 'tEXt') { const z = data.indexOf(0); out.push({ key: new TextDecoder('latin1').decode(data.subarray(0, z)), text: new TextDecoder('latin1').decode(data.subarray(z + 1)) }); }
+    else if (type === 'zTXt') {
+      // 키워드  + 압축방식(1바이트) + zlib(deflate) 본문.
+      // 이 분기가 없어서, 프롬프트가 zTXt 에 든 파일을 "청크 0개"(=깨끗함)로 보고했다.
+      const z = data.indexOf(0);
+      if (z > 0) {
+        const key = new TextDecoder('latin1').decode(data.subarray(0, z));
+        const body = data.subarray(z + 2);
+        jobs.push((async () => {
+          try { const st = new Response(body).body.pipeThrough(new DecompressionStream('deflate')); out.push({ key, text: await new Response(st).text() }); }
+          catch (e) { out.push({ key, text: '(압축 해제 실패)' }); }
+        })());
+      }
+    }
     else if (type === 'iTXt') {
       const z = data.indexOf(0); const key = new TextDecoder().decode(data.subarray(0, z)); const compFlag = data[z + 1];
       let p = z + 3; p = data.indexOf(0, p) + 1; p = data.indexOf(0, p) + 1;
@@ -537,7 +549,10 @@ async function stripBlob(blob) { // 완전 제거: 텍스트 청크 제거 + 픽
   const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
   const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0);
   const id = x.getImageData(0, 0, c.width, c.height); const d = id.data;
-  for (let i = 3; i < d.length; i += 4) d[i] = d[i] | 1;
+  // 알파 최하위 비트를 1로 만들어 숨은 stealth 메타를 깬다.
+  // 다만 완전 투명(alpha 0)은 건드리면 안 된다 — 0|1 = 1 이 되어 배경 제거 결과의
+  // 투명 영역이 옅은 검정으로 남는다. alpha 0 에는 애초에 숨길 비트도 없다.
+  for (let i = 3; i < d.length; i += 4) if (d[i] !== 0) d[i] |= 1;
   x.putImageData(id, 0, 0);
   const out = await new Promise(res => c.toBlob(res, 'image/png'));
   return new Blob([pngStrip(new Uint8Array(await out.arrayBuffer()))], { type: 'image/png' });
@@ -549,7 +564,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '11.17';   // 화면 표시용 앱 버전 (상단)
+const APP_VERSION = '11.18';   // 화면 표시용 앱 버전 (상단)
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 async function tryHealth(base) {
   try {
@@ -618,8 +633,23 @@ async function srvLoop() {
   setSrvUI(R.srvOk, info);
   if (R.srvOk && !was) { await pullStateFromServer(); refreshAnlas().catch(() => {}); if (window.onServerUp) window.onServerUp(); }
   if (!R.srvOk && !R.booted && (R.probeFails = (R.probeFails || 0) + 1) >= 3) R.booted = true; // 서버가 없으면 로컬만 사용
+  // 서버가 10분마다 GitHub 를 확인해 /health 에 실어 준다. srvLoop 는 15초마다 도므로
+  // 새 버전이 올라오면 몇 초 안에 버튼이 뜬다 (예전엔 앱이 6시간에 한 번만 물어봤다).
+  if (info && info.upd) applyUpdInfo(info.upd);
   R.srvOkPrev = R.srvOk;
   setTimeout(srvLoop, R.srvOk ? 15000 : 3000);
+}
+/* /health 가 알려준 업데이트 상태를 화면에 반영한다.
+   updateCheck() 와 같은 표시를 쓰되, 여기서는 GitHub 를 직접 부르지 않는다. */
+function applyUpdInfo(u) {
+  const b = document.getElementById('btnUpdate');
+  if (!b || !u || !u.configured) return;
+  b.hidden = !u.available;
+  b.textContent = u.available ? `⬆ 업데이트 ${u.latest}` : '';
+  if (u.available && S.updSeen !== u.latest) {
+    S.updSeen = u.latest; save();
+    if (typeof toast === 'function') toast(`새 버전 ${u.latest} 이 나왔습니다 — 상단 ⬆ 버튼으로 받으세요`);
+  }
 }
 function authHeaders(json) {
   const h = {};
@@ -1145,7 +1175,12 @@ async function autoSave(item) {
   try {
     let blob = item.blob; if (S.stripOnSave) blob = await stripBlob(blob);
     const sub = item.meta && item.meta.sceneName ? item.meta.sceneName : null;
-    if (R.dirHandle) await writeToDir(blob, item.name, sub); else downloadBlob(blob, item.name);
+    // 폴더 쓰기가 실패해도(새로고침 뒤 권한이 'prompt' 로 돌아가는 경우가 흔하다)
+    // 그냥 넘어가면 이미지가 디스크에 한 장도 안 남는다. 수동 저장처럼 다운로드로 대체한다.
+    if (R.dirHandle) {
+      try { await writeToDir(blob, item.name, sub); }
+      catch (e) { toast('폴더 저장 실패 — 다운로드로 대체합니다'); downloadBlob(blob, item.name); }
+    } else downloadBlob(blob, item.name);
     markSaved(item, 'auto');
   } catch (e) { toast('자동 저장 실패: ' + e.message, 'err'); }
 }
