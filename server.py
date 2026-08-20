@@ -488,11 +488,29 @@ def update_source(url, ver):
 
 
 def restart_self():
-    """소스 실행을 새 프로세스로 다시 띄우고 지금 것은 끝낸다."""
+    """소스 실행을 새 프로세스로 다시 띄우고 지금 것은 끝낸다.
+
+    두 가지를 지켜야 한다.
+      - 실행 인자(--data, --app, --port …)를 그대로 넘긴다. 예전엔 버려서
+        테스트용 데이터 폴더나 앱 모드가 재시작하면 사라졌다.
+      - 옛 프로세스가 포트를 놓은 뒤에 새 것을 띄운다. 겹치면 새 프로세스가
+        8765 를 못 잡고 8766 으로 뜨는데, 사용자가 보던 탭은 8765 를 가리킨 채
+        조용히 서버 저장이 끊긴다.
+    """
     import subprocess
-    subprocess.Popen([sys.executable, str(ROOT / "server.py")], cwd=str(ROOT),
-                     creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
-    threading.Timer(1.0, lambda: os._exit(0)).start()
+    args = [a for a in sys.argv[1:] if a != "--no-browser"]
+    cmd = [sys.executable, str(ROOT / "server.py")] + args
+
+    def go():
+        try:
+            subprocess.Popen(cmd, cwd=str(ROOT),
+                             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+        except Exception:
+            pass
+        os._exit(0)
+
+    # 먼저 죽고 나서(=포트를 놓고) 새로 띄운다 → 같은 포트로 다시 뜬다
+    threading.Timer(0.6, go).start()
     return True, "재시작합니다"
 
 
@@ -601,6 +619,27 @@ def _dan_get(path_q, ttl=600):
             for k in sorted(_dan_cache, key=lambda k: _dan_cache[k][0])[:100]:
                 _dan_cache.pop(k, None)
     return data
+
+
+def _dan_img_trim(cap=80 * 1024 * 1024):
+    """이미지 캐시 총량을 제한한다 (호출자가 _dan_lock 을 쥔 상태로 부른다)."""
+    items = [(k, v) for k, v in _dan_cache.items() if k.startswith("img|")]
+    total = 0
+    for _, v in items:
+        try:
+            total += len(v[1][0])
+        except Exception:
+            pass
+    if total <= cap:
+        return
+    for k, _v in sorted(items, key=lambda kv: kv[1][0]):     # 만료가 이른 것부터
+        try:
+            total -= len(_dan_cache[k][1][0])
+        except Exception:
+            pass
+        _dan_cache.pop(k, None)
+        if total <= cap * 0.7:
+            break
 
 
 def _yt_hls_variants(vid):
@@ -2305,7 +2344,11 @@ class Handler(BaseHTTPRequestHandler):
                             body = r.read()
                             ctype = r.headers.get("Content-Type", "image/jpeg")
                         with _dan_lock:
-                            _dan_cache["img|" + u] = (time.time() + 86400, (body, ctype))
+                            # 원본 이미지는 한 장에 5~20MB 다. 예전엔 상한도 축출도 없이
+                            # 24시간 물고 있어서, 몇십 장만 열어봐도 서버가 수백 MB 를 잡았다.
+                            # → 이미지 캐시는 총량을 세고, 넘으면 오래된 것부터 버린다.
+                            _dan_cache["img|" + u] = (time.time() + 3600, (body, ctype))
+                            _dan_img_trim()
                     self._send(200, body, ctype, {"Cache-Control": "max-age=86400"})
                     return True
             except urllib.error.HTTPError as e:
