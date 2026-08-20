@@ -323,7 +323,9 @@ def update_check():
             break
     return {"configured": True, "current": RELEASE, "latest": tag, "available": bool(newer),
             "notes": (j.get("body") or "")[:4000], "published": (j.get("published_at") or "")[:10],
-            "page": j.get("html_url"), "asset": asset, "frozen": FROZEN}
+            "page": j.get("html_url"), "asset": asset, "frozen": FROZEN,
+            # 소스로 실행 중일 때 버튼 하나로 받게 하려고 저장소 압축본 주소도 함께 준다
+            "zip": j.get("zipball_url") or ("https://github.com/%s/archive/refs/tags/%s.zip" % (repo, tag) if tag else None)}
 
 
 def _upd_set(**kw):
@@ -368,6 +370,83 @@ def update_download(url, expect_size, ver):
             _upd_set(state="error", msg=str(e)[:200])
     threading.Thread(target=work, daemon=True).start()
     return True
+
+
+def update_source(url, ver):
+    """소스로 실행 중일 때의 업데이트.
+
+    exe 가 아니라 앱 파일(js/html/css/py)을 저장소 압축본으로 갈아끼운다.
+    깃헙에 들어가 받아 덮어쓰라고 안내만 하던 것을 버튼 하나로 끝내기 위한 것.
+
+    사용자 데이터(data/), 설치분(vendor/, .build-venv/, dist/, build/)은 건드리지 않는다.
+    갈아끼우기 전 지금 파일을 data/backups/src-<시각>/ 에 넣어 되돌릴 수 있게 한다.
+    """
+    import zipfile, shutil, io as _io
+
+    KEEP_EXT = (".js", ".py", ".html", ".css", ".bat", ".txt", ".spec", ".md")
+    KEEP_NAME = ("LICENSE",)
+    SKIP_TOP = {"data", "vendor", "dist", "build", ".build-venv", ".git", ".github"}
+
+    def work():
+        try:
+            with _upd_lock:
+                _upd.update(state="downloading", got=0, total=0, msg="", ver=ver)
+            req = urllib.request.Request(url, headers={"User-Agent": "NAI-Studio"})
+            buf = _io.BytesIO()
+            with urllib.request.urlopen(req, timeout=180) as r:
+                total = int(r.headers.get("Content-Length") or 0)
+                _upd_set(total=total)
+                while True:
+                    chunk = r.read(262144)
+                    if not chunk:
+                        break
+                    buf.write(chunk)
+                    _upd_set(got=buf.tell())
+            buf.seek(0)
+            z = zipfile.ZipFile(buf)
+            names = z.namelist()
+            root = names[0].split("/")[0] + "/" if names else ""
+            # 받은 것이 정말 이 앱인지 확인하고 나서 손댄다
+            need = {"server.py", "app.js", "index.html"}
+            got_names = {n[len(root):] for n in names if n.startswith(root)}
+            if not need.issubset(got_names):
+                raise IOError("받은 압축본이 NAI Studio 소스가 아닙니다")
+
+            bdir = DATA / "backups" / ("src-%s" % time.strftime("%Y%m%d-%H%M%S"))
+            bdir.mkdir(parents=True, exist_ok=True)
+            n = 0
+            for name in names:
+                if not name.startswith(root) or name.endswith("/"):
+                    continue
+                rel = name[len(root):]
+                if not rel or rel.split("/")[0] in SKIP_TOP:
+                    continue
+                base = rel.split("/")[-1]
+                if not (rel.endswith(KEEP_EXT) or base in KEEP_NAME):
+                    continue
+                dest = ROOT / rel
+                if dest.exists():                       # 되돌릴 수 있게 먼저 보관
+                    b = bdir / rel
+                    b.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(dest, b)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(z.read(name))
+                n += 1
+            _upd_set(state="ready", file=str(bdir), msg="소스 %d개 파일을 갈아끼웠습니다" % n)
+        except Exception as e:
+            _upd_set(state="error", msg=str(e)[:200])
+
+    threading.Thread(target=work, daemon=True).start()
+    return True
+
+
+def restart_self():
+    """소스 실행을 새 프로세스로 다시 띄우고 지금 것은 끝낸다."""
+    import subprocess
+    subprocess.Popen([sys.executable, str(ROOT / "server.py")], cwd=str(ROOT),
+                     creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+    threading.Timer(1.0, lambda: os._exit(0)).start()
+    return True, "재시작합니다"
 
 
 def update_apply():
@@ -973,7 +1052,19 @@ class Handler(BaseHTTPRequestHandler):
                 with urllib.request.urlopen(req, timeout=30) as r:
                     j = json.loads(r.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
-                self._send(e.code, e.read() or b'{"message":"oauth error"}', "application/json")
+                body = e.read() or b'{"message":"oauth error"}'
+                # refresh token 이 폐기됐는데도 계속 들고 있으면 앱은 영원히 "연결됨" 으로
+                # 보이고 매번 조용히 실패한다. 되살릴 수 없는 응답이면 연결을 풀어준다.
+                if e.code in (400, 401) and form.get("grant_type") == "refresh_token":
+                    try:
+                        cfg.pop("ytRefresh", None)
+                        save_cfg(cfg)
+                    except Exception:
+                        pass
+                    self._json(401, {"message": "YouTube 연결이 만료됐습니다 — 다시 연결해 주세요",
+                                     "relink": True})
+                    return True
+                self._send(e.code, body, "application/json")
                 return True
             except Exception as e:
                 self._json(502, {"message": "oauth error: %s" % e})
@@ -1601,7 +1692,9 @@ class Handler(BaseHTTPRequestHandler):
             payload = {
                 "systemInstruction": {"parts": [{"text": sysmsg}]},
                 "contents": [{"role": "user", "parts": [{"text": desc}]}],
-                "generationConfig": {"temperature": 0.8, "maxOutputTokens": 800},
+                # 2.5/3 계열은 "생각(thinking)" 토큰이 maxOutputTokens 를 같이 먹는다.
+                # 800 이면 생각만 하다 끝나 본문이 비어 "빈 응답" 이 된다 (판정 쪽과 같은 사고).
+                "generationConfig": {"temperature": 0.8, "maxOutputTokens": 4096},
             }
             url = ("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % model)
             req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
@@ -1645,6 +1738,29 @@ class Handler(BaseHTTPRequestHandler):
                         return True
                     update_download(u, sz, ver)
                     self._json(200, {"ok": True})
+                    return True
+                if path == "/update/source" and self.command == "POST":
+                    # 소스로 실행 중일 때: 저장소 압축본을 받아 앱 파일을 갈아끼운다
+                    if FROZEN:
+                        self._json(400, {"message": "exe 실행 중에는 소스 교체를 하지 않습니다"})
+                        return True
+                    length = int(self.headers.get("Content-Length") or 0)
+                    b = json.loads(self.rfile.read(length) or b"{}")
+                    u, ver = b.get("url") or "", b.get("ver") or ""
+                    host = (urllib.parse.urlparse(u).hostname or "").lower()
+                    if not (u.startswith("https://") and (host == "github.com" or host.endswith(".github.com")
+                                                          or host.endswith(".githubusercontent.com"))):
+                        self._json(400, {"message": "bad url"})
+                        return True
+                    update_source(u, ver)
+                    self._json(200, {"ok": True})
+                    return True
+                if path == "/update/restart" and self.command == "POST":
+                    if FROZEN:
+                        self._json(400, {"message": "exe 는 /update/apply 를 씁니다"})
+                        return True
+                    ok, msg = restart_self()
+                    self._json(200, {"ok": ok, "message": msg})
                     return True
                 if path == "/update/status":
                     with _upd_lock:
