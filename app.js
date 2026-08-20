@@ -544,7 +544,23 @@ function idb() {
 }
 async function idbSet(k, v) { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(v, k); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
 async function idbGet(k) { const db = await idb(); return new Promise((res, rej) => { const rq = db.transaction('kv').objectStore('kv').get(k); rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error); }); }
-async function histPut(rec) { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction('hist', 'readwrite'); const rq = tx.objectStore('hist').put(rec); rq.onsuccess = () => res(rq.result); tx.onerror = () => rej(tx.error); }); }
+/* put 요청이 받아들여진 것과 실제로 저장된 것은 다르다. 공간이 모자라면 커밋 단계에서
+   트랜잭션이 abort 되는데, 예전엔 rq.onsuccess 에서 이미 성공으로 처리해 버려
+   그 실패가 통째로 삼켜졌다("저장됨" 이라고 표시된 뒤 새로고침하면 이미지가 없다).
+   → 커밋(oncomplete)까지 기다리고, abort 도 실패로 본다. */
+async function histPut(rec) {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const tx = db.transaction('hist', 'readwrite');
+    const rq = tx.objectStore('hist').put(rec);
+    let key = null;
+    rq.onsuccess = () => { key = rq.result; };
+    rq.onerror = () => { /* tx.onerror 가 받아서 처리한다 */ };
+    tx.oncomplete = () => res(key);
+    tx.onerror = () => rej(tx.error || new Error('저장 실패'));
+    tx.onabort = () => rej(tx.error || new Error('저장 공간이 부족합니다'));
+  });
+}
 async function histDel(id) { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction('hist', 'readwrite'); tx.objectStore('hist').delete(id); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
 async function histAll() { const db = await idb(); return new Promise((res, rej) => { const rq = db.transaction('hist').objectStore('hist').getAll(); rq.onsuccess = () => res(rq.result || []); rq.onerror = () => rej(rq.error); }); }
 async function histClearDb() { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction('hist', 'readwrite'); tx.objectStore('hist').clear(); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
@@ -1063,6 +1079,7 @@ async function doGenerate(ov, label) {
       item = await addToHistory(blobs[k], m, label + (blobs.length > 1 ? ` (${k + 1}/${blobs.length})` : ''));
       if (S.autoSaveOn) await autoSave(item);
     }
+    if (R._cancelledWith) { const k = R._cancelledWith; R._cancelledWith = 0; toast(`취소했지만 이미 나온 ${k}장은 남겼습니다 (Anlas 는 이미 빠진 뒤입니다)`); }
     if (window.onImageGenerated) window.onImageGenerated(item);
     const sec = ((Date.now() - t0) / 1000).toFixed(1);
     if (typeof recordGenTime === 'function') recordGenTime(+sec, { ...body.parameters, __model: body.model });
@@ -1071,8 +1088,14 @@ async function doGenerate(ov, label) {
     refreshAnlas().catch(() => {});
     return item;
   } catch (e) {
-    if (e.name === 'AbortError') { $('#genStatus').textContent = '취소됨'; hidePreview(); return null; }
+    if (e.name === 'AbortError') {
+      $('#genStatus').textContent = '취소됨'; hidePreview();
+      // 요청이 이미 나갔으면 Anlas 는 빠진 뒤다 — 잔액을 갱신해 화면과 실제를 맞춘다
+      refreshAnlas().catch(() => {});
+      return null;
+    }
     if (typeof recordGenFail === 'function') recordGenFail(e.message);
+    refreshAnlas().catch(() => {});   // 요청이 나간 뒤 끊긴 경우가 많다 — 잔액을 실제와 맞춘다
     $('#genStatus').textContent = '오류: ' + e.message; toast(e.message, 'err'); throw e;
   } finally { R.gen = false; R.abort = null; btn.disabled = false; btn.classList.remove('busy'); hidePreview(); $('#btnCancel').hidden = true; }
 }
@@ -1148,9 +1171,12 @@ async function generateStreaming(body) {
       if (done) { finished = true; break; }
     }
   } catch (e) {
-    // 사용자가 취소한 건 그대로 올린다. 그 외의 연결 끊김은 이미 받은 최종 이미지가 있으면 살린다
-    // (프록시가 도중에 끊겨도 완성된 장을 버리지 않도록)
-    if (e.name === 'AbortError' || !finals.length) throw e;
+    /* 이미 완성된 장이 있으면 취소했더라도 버리지 않는다.
+       NAI 는 요청을 받아들인 시점에 배치 전체분 Anlas 를 빼기 때문에, 여기서 버리면
+       돈은 나갔는데 남는 게 하나도 없다. 취소는 "더 이상 기다리지 않겠다" 는 뜻이지
+       "이미 나온 것도 버리라" 는 뜻이 아니다. */
+    if (!finals.length) throw e;
+    if (e.name === 'AbortError') R._cancelledWith = finals.length;
     logErr('스트림 중단(받은 ' + finals.length + '장 사용): ' + e.message);
   } finally {
     // 중단·오류로 빠져나갈 땐 스트림을 닫아야 프록시 연결이 바로 정리된다
@@ -1174,14 +1200,31 @@ async function addToHistory(blob, meta, label) {
   await pruneHistory(); renderHist(); showImage(R.hist.length - 1);
   return item;
 }
+/* 히스토리 상한. 넘으면 즐겨찾기가 아닌 것 중 오래된 것부터 지운다.
+   예전엔 아무 말 없이 지웠는데, 자동 저장이 꺼져 있으면 디스크에도 없어 그대로 사라진다.
+   상한이 있다는 사실 자체가 어디에도 안 적혀 있었다 → 지웠으면 알린다. */
 async function pruneHistory() {
   const MAX = 400;
+  let n = 0, savedAll = true;
   while (R.hist.length > MAX) {
     const idx = R.hist.findIndex(h => !h.fav); if (idx < 0) break;
     const [old] = R.hist.splice(idx, 1); URL.revokeObjectURL(old.url);
     if (typeof LIB !== 'undefined' && LIB.sel) LIB.sel.delete(old);
     if (old.id != null) histDel(old.id).catch(() => {});
+    if (!old.saved) savedAll = false;      // 디스크에 남긴 적 없는 이미지
     if (R.cur > idx) R.cur--;
+    n++;
+  }
+  if (n) {
+    R._pruned = (R._pruned || 0) + n;
+    // 연속 생성 중이면 매 장마다 띄우지 않도록 한 번만 모아서 알린다
+    clearTimeout(R._pruneT);
+    R._pruneT = setTimeout(() => {
+      const k = R._pruned; R._pruned = 0;
+      toast(`히스토리가 ${MAX}장을 넘어 오래된 ${k}장을 지웠습니다` +
+        (savedAll ? ' (⭐즐겨찾기는 안 지웁니다)' : ' — 자동 저장이 꺼져 있어 디스크에도 남지 않았습니다'),
+        savedAll ? '' : 'err');
+    }, 1500);
   }
 }
 async function loadHistory() {
@@ -1201,7 +1244,7 @@ function renderHist() {
     const img = document.createElement('img'); img.src = it.url; img.loading = 'lazy'; img.title = (it.label ? it.label + ' · ' : '') + `seed ${it.seed}` + (it.saved ? ' · 💾 저장됨' : '');
     d.appendChild(img);
     if (it.fav) { const f = document.createElement('span'); f.className = 'fav'; f.textContent = '★'; d.appendChild(f); }
-    if (it.saved) { const s = document.createElement('span'); s.className = 'svd'; s.textContent = '💾'; s.title = '저장됨'; d.appendChild(s); }
+    if (it.saved) { const s = document.createElement('span'); s.className = 'svd'; s.textContent = '💾'; s.title = it.saved.how === 'download' ? '다운로드로 넘김 (받았는지는 확인 불가)' : '저장됨'; d.appendChild(s); }
     d.onclick = () => showImage(i);
     g.appendChild(d);
   }
@@ -1219,7 +1262,7 @@ function showImage(i) {
   $('#tFav').textContent = it.fav ? '★' : '☆'; $('#tFav').classList.toggle('on', !!it.fav);
   $('#tSeedV').textContent = it.seed != null ? String(it.seed).slice(0, 10) : '';
   paintSavedUI(it);
-  if (it.saved) { const s = document.createElement('span'); s.textContent = '💾 저장됨'; s.style.color = 'var(--green)'; $('#viewerMeta').appendChild(s); }
+  if (it.saved) { const s = document.createElement('span'); s.textContent = it.saved.how === 'download' ? '💾 다운로드함' : '💾 저장됨'; s.title = it.saved.how === 'download' ? '브라우저 다운로드로 넘겼습니다 — 실제로 받아졌는지는 앱이 알 수 없습니다' : ''; s.style.color = 'var(--green)'; $('#viewerMeta').appendChild(s); }
   renderHist();
 }
 const curItem = () => (R.cur >= 0 && R.cur < R.hist.length) ? R.hist[R.cur] : null;
@@ -1235,6 +1278,10 @@ function clearViewer() {
   if (typeof paintSavedUI === 'function') paintSavedUI(null);
 }
 function persistItem(it) { if (it.id != null) histPut({ id: it.id, blob: it.blob, meta: it.meta, seed: it.seed, model: it.model, w: it.w, h: it.h, fav: it.fav, t: it.t, name: it.name, label: it.label, sceneId: it.sceneId || null, saved: it.saved || null }).catch(() => {}); }
+/* 저장 표시.
+   how='save'/'auto' 는 폴더에 실제로 쓴 경우, how='download' 는 브라우저에 넘긴 경우다.
+   다운로드는 사용자가 취소하거나 브라우저가 막아도 앱이 알 방법이 없다
+   (여러 파일 다운로드를 차단하면 조용히 안 받아진다) → "저장됨" 이라고 단정하지 않는다. */
 function markSaved(it, how, silent) { // 저장됨 표시 (히스토리 배지·뷰어 아이콘)
   it.saved = { t: Date.now(), how: how || 'save' }; persistItem(it);
   if (silent) return;
@@ -1248,7 +1295,7 @@ function markSaved(it, how, silent) { // 저장됨 표시 (히스토리 배지·
 function paintSavedUI(it) {
   const b = $('#tSave'); if (!b) return;
   b.textContent = it && it.saved ? '✔' : '💾'; b.classList.toggle('on', !!(it && it.saved));
-  b.title = it && it.saved ? '저장됨 (' + new Date(it.saved.t).toLocaleTimeString() + (it.saved.how === 'auto' ? ' · 자동 저장' : '') + ') — 다시 저장' : '저장';
+  b.title = it && it.saved ? (it.saved.how === 'download' ? '다운로드로 넘김 — 브라우저가 받았는지는 확인할 수 없습니다 (' : '저장됨 (') + new Date(it.saved.t).toLocaleTimeString() + (it.saved.how === 'auto' ? ' · 자동 저장' : '') + ') — 다시 저장' : '저장';
 }
 async function toggleFav(item) {
   const it = item || curItem(); if (!it) return;
@@ -1291,7 +1338,9 @@ async function saveItem(item, strip, silent) {
   const name = (strip ? 'clean_' : '') + item.name;
   if (R.dirHandle) { try { await writeToDir(blob, name, item.meta && item.meta.sceneName); if (!silent) toast((strip ? '메타데이터 제거 후 ' : '') + '저장됨: ' + name); markSaved(item, 'save', silent); return; } catch (e) { toast('폴더 저장 실패, 다운로드로 대체: ' + e.message, 'err'); } }
   if (strip && !silent) toast('메타데이터(청크+숨은 stealth) 제거 후 저장: ' + name);
-  downloadBlob(blob, name); markSaved(item, 'save', silent);
+  // 폴더가 지정돼 있지 않으면 브라우저 다운로드로 넘긴다. 받았는지는 확인할 수 없으므로
+  // 'download' 로 남겨 배지·설명이 "저장 완료" 라고 단정하지 않게 한다.
+  downloadBlob(blob, name); markSaved(item, 'download', silent);
 }
 async function bulkSave(items, strip) {   // 일괄 저장 — 진행 표시 + 마지막에 한 번만 갱신
   let n = 0;
@@ -1304,11 +1353,12 @@ async function autoSave(item) {
     const sub = item.meta && item.meta.sceneName ? item.meta.sceneName : null;
     // 폴더 쓰기가 실패해도(새로고침 뒤 권한이 'prompt' 로 돌아가는 경우가 흔하다)
     // 그냥 넘어가면 이미지가 디스크에 한 장도 안 남는다. 수동 저장처럼 다운로드로 대체한다.
+    let how = 'auto';
     if (R.dirHandle) {
       try { await writeToDir(blob, item.name, sub); }
-      catch (e) { toast('폴더 저장 실패 — 다운로드로 대체합니다'); downloadBlob(blob, item.name); }
-    } else downloadBlob(blob, item.name);
-    markSaved(item, 'auto');
+      catch (e) { toast('폴더 저장 실패 — 다운로드로 대체합니다'); downloadBlob(blob, item.name); how = 'download'; }
+    } else { downloadBlob(blob, item.name); how = 'download'; }
+    markSaved(item, how);
   } catch (e) { toast('자동 저장 실패: ' + e.message, 'err'); }
 }
 
@@ -1411,6 +1461,7 @@ function openPosPicker(c, after) {
 function setI2I(blob) { R.i2iBlob = blob; R.maskCanvas = null; updateI2IUI(); switchRefTab('i2i'); }
 function clearI2I() { R.i2iBlob = null; R.maskCanvas = null; updateI2IUI(); }
 function updateI2IUI() {
+  refreshCost();     // i2i 를 붙이면 strength 만큼 값이 줄어든다 — 표시도 따라가야 한다
   const drop = $('#i2iDrop'), badge = $('#modeBadge');
   if (R.i2iBlob) { drop.style.backgroundImage = `url(${URL.createObjectURL(R.i2iBlob)})`; drop.classList.add('has'); badge.hidden = false; badge.textContent = R.maskCanvas ? '인페인트 모드' : 'img2img 모드'; }
   else { drop.style.backgroundImage = ''; drop.classList.remove('has'); badge.hidden = true; }
@@ -1488,6 +1539,7 @@ async function openMaskEditor() {
   });
 }
 function renderVibes() {
+  refreshCost();     // 바이브 수가 바뀌면 예상 비용도 달라진다
   const list = $('#vibeList'); list.innerHTML = '';
   R.vibes.forEach((v, i) => {
     const d = document.createElement('div'); d.className = 'vibe-slot';
@@ -1604,6 +1656,7 @@ async function openVibeLib() {
   }, true);
 }
 function renderPrefs() {
+  refreshCost();     // 레퍼런스 수가 바뀌면 예상 비용도 달라진다 (장당·장수만큼 곱해진다)
   const list = $('#prefList'); list.innerHTML = '';
   R.prefs.forEach((v, i) => {
     const d = document.createElement('div'); d.className = 'vibe-slot';

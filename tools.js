@@ -685,7 +685,16 @@ function ytCmd(func, args) {
   }
   const fr = $('#ytFrame'); if (!fr) return; try { fr.contentWindow.postMessage(JSON.stringify({ event: 'command', func, args: args || [] }), '*'); } catch (e) {}
 }
-function ytToggle() { if (!YT.cur) { ytOpen(true); return; } if (YT.pop) { ytPopup(YT.cur); return; } if (YT.playing) { ytCmd('pauseVideo'); YT.playing = false; } else { ytCmd('playVideo'); YT.playing = true; } ytSetPlayIcon(YT.playing); }
+function ytToggle() {
+  if (!YT.cur) { ytOpen(true); return; }
+  /* 탭·팝업 모드에서는 그 창을 우리가 조작할 수 없다. 예전엔 여기서 ytPopup 을 다시 불러
+     같은 주소를 재대입했는데, 그러면 일시정지가 아니라 곡이 0초부터 다시 시작했다.
+     → 창을 앞으로 불러오기만 하고, 재생 조작은 그 창에서 하도록 알린다. */
+  if (YT.pop) {
+    if (YT.popWin && !YT.popWin.closed) { try { YT.popWin.focus(); } catch (e) {} toast('재생·정지는 열린 유튜브 창에서 해주세요'); }
+    else ytPopup(YT.cur);
+    return;
+  } if (YT.playing) { ytCmd('pauseVideo'); YT.playing = false; } else { ytCmd('playVideo'); YT.playing = true; } ytSetPlayIcon(YT.playing); }
 async function ytNext() {
   if (!S.ytQueue.length) {
     if (S.ytAutoRelated !== false && YT.cur && YT.cur.id && R.srvInfo && R.srvInfo.ytEngine) { // 알고리즘 이어듣기: 유튜브 믹스에서 연관 곡을 채움
@@ -974,7 +983,12 @@ async function renderYtMine() {
       const head = document.createElement('div'); head.className = 'row'; head.style.padding = '2px 4px 6px';
       head.innerHTML = `<button class="btn xs">‹ 목록</button><b style="font-size:12px;flex:1">${esc(YTA.view === 'liked' ? '👍 좋아요' : YTA.pl.title)}</b><button class="btn xs" id="ytPlAll">▶ 전부 재생</button><button class="btn xs" id="ytPlQ">＋ 전부 대기열</button>`;
       head.querySelector('button').onclick = () => { YTA.pl = null; YTA.view = 'lists'; renderYtMine(); };
-      head.querySelector('#ytPlAll').onclick = () => { if (!items.length) return; S.ytQueue = items.slice(1); save(); renderYtQueue(); ytPlay(items[0]); };
+      head.querySelector('#ytPlAll').onclick = () => {
+      if (!items.length) return;
+      // 대기열을 통째로 갈아치운다. 수백 곡을 쌓아둔 경우 되돌릴 방법이 사실상 없다 → 먼저 묻는다
+      if (S.ytQueue.length && !confirm(`지금 대기열에 있는 ${S.ytQueue.length}곡을 버리고 이 목록(${items.length}곡)으로 바꿉니다.\n\n계속할까요? (이어서 넣으려면 옆의 "대기열에 추가" 를 쓰세요)`)) return;
+      S.ytQueue = items.slice(1); save(); renderYtQueue(); ytPlay(items[0]);
+    };
       head.querySelector('#ytPlQ').onclick = () => ytAddMany(items);
       list.appendChild(head);
       items.forEach(it => list.appendChild(ytItemEl(it, {})));
@@ -1637,7 +1651,14 @@ function openBackup() {
           untomb('cat', state.chunkCats || []);
           if (replace) { const del = S.deleted; S = { ...DEFAULTS, ...state }; S.deleted = { ...(state.deleted || {}), ...del }; }
           else {
-            const mergeBy = (a, b, key) => { const out = [...(a || [])]; (b || []).forEach(x => { if (!out.some(y => (y[key] || '').toString().toLowerCase() === (x[key] || '').toString().toLowerCase())) out.push(x); }); return out; };
+            /* 이름 비교는 프롬프트에서 청크를 찾을 때와 같은 기준(normKey)이어야 한다.
+               toLowerCase 만 보면 "작가 랜덤" 과 "작가_랜덤" 이 서로 다른 것으로 남아
+               둘 다 들어가고, 정작 프롬프트에서는 나중 것 하나만 쓰인다
+               (화면에 보이는 칩과 실제로 나가는 내용이 달라진다). */
+            const sameKey = (a, b) => (typeof normKey === 'function'
+              ? normKey(a) === normKey(b)
+              : String(a || '').toLowerCase() === String(b || '').toLowerCase());
+            const mergeBy = (a, b, key) => { const out = [...(a || [])]; (b || []).forEach(x => { if (!out.some(y => sameKey(y[key], x[key]))) out.push(x); }); return out; };
             S.chunks = mergeBy(S.chunks, state.chunks, 'name'); S.styles = mergeBy(S.styles, state.styles, 'name'); S.characters = mergeBy(S.characters, state.characters, 'name');
             S.scenes = mergeBy(S.scenes, state.scenes, 'id'); S.chunkCats = [...new Set([...(S.chunkCats || []), ...(state.chunkCats || [])])];
             S.ytQueue = mergeBy(S.ytQueue, state.ytQueue, 'id'); S.ytHistory = mergeBy(S.ytHistory, state.ytHistory, 'id');
@@ -1815,13 +1836,19 @@ const ST = { blob: null, url: null, w: 0, h: 0, meta: null };
 function stSet(blob, meta) {
   if (ST.url) URL.revokeObjectURL(ST.url);
   ST.blob = blob; ST.meta = meta || null;
+  /* 크기를 먼저 지운다. 예전엔 새 이미지를 올려도 디코딩이 끝날 때까지 앞 이미지의
+     크기가 남아 있었고, 그 사이에 툴을 누르면 엉뚱한 크기로 유료 요청이 나갔다.
+     (디코딩이 실패하면 앞 크기가 영원히 남았다 — onerror 도 없었다) */
+  ST.w = 0; ST.h = 0;
   ST.url = blob ? URL.createObjectURL(blob) : null;
   const img = $('#stImg'), em = $('#stEmpty');
   if (!img) return;
   if (!blob) { img.hidden = true; em.hidden = false; $('#stMeta').textContent = ''; renderSmartTools(); return; }
   img.src = ST.url; img.hidden = false; em.hidden = true;
+  $('#stMeta').textContent = '크기 확인 중…'; renderSmartTools();   // 크기를 모르는 동안은 툴을 잠근다
   const probe = new Image();
   probe.onload = () => { ST.w = probe.naturalWidth; ST.h = probe.naturalHeight; $('#stMeta').textContent = `${ST.w}×${ST.h}`; renderSmartTools(); };
+  probe.onerror = () => { ST.w = 0; ST.h = 0; $('#stMeta').textContent = '이미지를 읽지 못했습니다'; renderSmartTools(); toast('이미지를 읽지 못했습니다 — 다른 파일로 시도해 주세요', 'err'); };
   probe.src = ST.url;
 }
 const ST_TOOLS = [
@@ -2373,7 +2400,16 @@ async function startUpdate(j, body) {
         const go = document.createElement('button'); go.className = 'btn go'; go.textContent = '✔ 지금 적용하고 재시작';
         go.onclick = async () => {
           go.disabled = true; msg.textContent = '교체 중… 잠시 후 새 창이 열립니다.';
-          try { await apiFetch('/update/apply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch (e) {}
+          /* 결과를 안 읽으면 실패해도 이 문구인 채로 멈춰 있다. 실제로 백신이 받아둔 파일을
+             격리해 버리는 일이 있어서, 그때 사용자는 영문도 모른 채 기다리게 된다. */
+          try {
+            const rr = await apiFetch('/update/apply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+            const jj = await rr.json().catch(() => ({}));
+            if (!rr.ok || jj.ok === false) throw new Error(jj.message || ('HTTP ' + rr.status));
+          } catch (e) {
+            go.disabled = false;
+            msg.textContent = '✖ 교체하지 못했습니다: ' + e.message + ' — 릴리스 페이지에서 직접 받아 덮어써 주세요';
+          }
         };
         row.innerHTML = ''; row.appendChild(go);
       } else if (st.state === 'error') {

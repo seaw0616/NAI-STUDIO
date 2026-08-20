@@ -108,6 +108,8 @@ function saveCharToLibrary(c) {
     body.querySelector('#clSave').onclick = () => {
       const name = n.value.trim(); if (!name) { toast('이름을 입력하세요', 'err'); return; }
       const ex = S.characters.find(x => x.name === name);
+    // 같은 이름이 이미 있으면 통째로 덮어쓴다 — 비워 둔 네거티브까지 덮여 지워지므로 먼저 묻는다
+    if (ex && !confirm(`"${name}" 캐릭터가 이미 있습니다.\n\n지금 내용으로 덮어쓸까요? (기존 프롬프트·네거티브는 사라집니다)`)) return;
       const rec = { id: ex ? ex.id : uid(), name, prompt: body.querySelector('#clPrompt').value.trim(), uc: body.querySelector('#clUc').value.trim() };
       if (ex) Object.assign(ex, rec); else S.characters.push({ ...rec, createdAt: rec.createdAt || Date.now() });
       c.libId = rec.id; save(); closeModal(); toast('캐릭터 저장: ' + name); renderChars(); if (S.mode === 'scene') renderSceneEditor();
@@ -142,7 +144,12 @@ function openCharLibrary() {
           n.dataset.orig = ch.name || ''; save();
         }; p.oninput = () => { ch.prompt = p.value; save(); }; u.oninput = () => { ch.uc = u.value; save(); };
         d.querySelector('[data-a="main"]').onclick = () => { S.chars.push({ prompt: ch.prompt, uc: ch.uc || '', x: null, y: null, libId: ch.id }); save(); renderChars(); toast('메인 캐릭터에 추가'); };
-        d.querySelector('[data-a="chunk"]').onclick = () => { const name = ch.name.replace(/\s+/g, '_'); const ex = S.chunks.find(c => c.name === name); if (ex) ex.text = ch.prompt; else S.chunks.push({ name, text: ch.prompt, cat: '캐릭터', createdAt: Date.now() }); save(); renderChunkBar(); toast('청크 @' + name + ' 저장'); };
+        d.querySelector('[data-a="chunk"]').onclick = () => { const name = ch.name.replace(/\s+/g, '_');
+    const ex = S.chunks.find(c => normKey(c.name) === normKey(name));
+    // 여러 줄 조각을 한 줄로 덮으면 되돌릴 수 없다 → 그럴 때만 묻는다
+    if (ex && (ex.text || '').split('\n').filter(x => x.trim()).length > 1
+        && !confirm(`청크 "${name}" 은 여러 줄 조각입니다 (${(ex.text || '').split('\n').filter(x => x.trim()).length}줄).\n\n한 줄로 덮어쓸까요? 되돌릴 수 없습니다.`)) return;
+    if (ex) ex.text = ch.prompt; else S.chunks.push({ name, text: ch.prompt, cat: '캐릭터', createdAt: Date.now() }); save(); renderChunkBar(); toast('청크 @' + name + ' 저장'); };
         d.querySelector('[data-a="del"]').onclick = () => { tomb('char', ch.name); S.characters.splice(i, 1); save(); draw(); };
         rows.appendChild(d);
       });
@@ -190,7 +197,15 @@ function sceneOv(sc) { // 씬 → 생성 오버라이드
     sceneId: sc.id, sceneName: sc.name, n: 1, style: st || null,
     // NAI 는 캐릭터를 6명까지만 받는다. 메인 캐릭터와 씬 캐릭터를 그냥 더하면 넘어가서
     // 요청 자체가 거절된다 → 앞에서부터 6명까지만 보낸다.
-    chars: mainChars.concat((sc.chars || []).filter(c => c.prompt && c.prompt.trim())).slice(0, 6),
+    // 잘리는 건 항상 "방금 씬에 넣은" 쪽이라, 말없이 자르면 왜 안 그려지는지 알 수가 없다.
+    chars: (() => {
+      const all = mainChars.concat((sc.chars || []).filter(c => c.prompt && c.prompt.trim()));
+      if (all.length > 6) {
+        const cut = all.length - 6;
+        if (typeof toast === 'function') toast(`캐릭터는 6명까지만 보낼 수 있어 뒤쪽 ${cut}명은 빠졌습니다 (메인 ${mainChars.length}명 + 씬 ${all.length - mainChars.length}명)`, 'err');
+      }
+      return all.slice(0, 6);
+    })(),
     // 씬 모드에선 왼쪽 패널이 숨겨져 i2i/마스크가 보이지도, 해제되지도 않는다.
     // 이걸 막지 않으면 메인에 남아 있던 이미지 때문에 모든 씬이 img2img·인페인트로 나간다.
     noRef: true,
