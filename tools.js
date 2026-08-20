@@ -689,14 +689,21 @@ function ytPlayRelatedNow(item) { S.ytQueue = []; ytFillRelated(item).then(ok =>
 function ytAddMany(items, label) {
   if (!items || !items.length) { toast('넣을 곡이 없습니다', 'err'); return; }
   const ahead = S.ytQueue.length;
-  let front = false;
-  if (ahead > 3) {
-    front = confirm(`${label || ''}${items.length}곡을 대기열에 넣습니다.\n\n앞에 이미 ${ahead}곡이 있습니다.\n\n`
-      + `[확인] 맨 앞에 넣어 바로 듣기\n[취소] 맨 뒤에 붙이기 (${ahead}곡이 먼저 재생됩니다)`);
-  }
-  if (front) S.ytQueue = items.concat(S.ytQueue); else S.ytQueue = S.ytQueue.concat(items);
-  save(); renderYtQueue();
-  toast(front ? `${items.length}곡을 대기열 맨 앞에 넣었습니다` : `${items.length}곡을 대기열 맨 뒤(${ahead + 1}번째부터)에 넣었습니다`);
+  const put = front => {
+    if (front) S.ytQueue = items.concat(S.ytQueue); else S.ytQueue = S.ytQueue.concat(items);
+    save(); renderYtQueue();
+    toast(front ? `${items.length}곡을 대기열 맨 앞에 넣었습니다` : `${items.length}곡을 대기열 맨 뒤(${ahead + 1}번째부터)에 넣었습니다`);
+  };
+  if (ahead <= 3) { put(false); return; }
+  // confirm 은 선택지가 둘뿐이라 '그만두기' 를 만들 수 없었다 → 앱 모달로 세 갈래를 준다
+  openModal('대기열에 넣기', body => {
+    body.innerHTML = `<div class="hint">${esc(label || '')}<b>${items.length}곡</b>을 대기열에 넣습니다. 앞에 이미 <b>${ahead}곡</b>이 있습니다.</div>
+      <div class="row" style="margin-top:8px"><button class="btn primary" id="qFront">맨 앞에 넣어 바로 듣기</button>
+      <button class="btn" id="qBack">맨 뒤에 붙이기</button><button class="btn ghost" id="qNo">그만두기</button></div>`;
+    body.querySelector('#qFront').onclick = () => { closeModal(); put(true); };
+    body.querySelector('#qBack').onclick = () => { closeModal(); put(false); };
+    body.querySelector('#qNo').onclick = () => closeModal();
+  });
 }
 function ytEnqueue(item) { S.ytQueue.push(item); save(); renderYtQueue(); toast(`대기열 ${S.ytQueue.length}번째에 추가: ` + (item.title || '')); }
 function ytRemember(item) { // 최근 재생 기록 (최대 200곡) — 대기열에서 빠져도 여기 남음
@@ -982,7 +989,13 @@ function initYouTube() {
     const r = f.getBoundingClientRect(); drag = { dx: e.clientX - r.left, dy: e.clientY - r.top }; head.setPointerCapture(e.pointerId);
     f.style.right = 'auto'; f.style.bottom = 'auto';
   });
-  head.addEventListener('pointermove', e => { if (!drag) return; f.style.left = Math.max(0, e.clientX - drag.dx) + 'px'; f.style.top = Math.max(0, e.clientY - drag.dy) + 'px'; });
+  head.addEventListener('pointermove', e => {
+    if (!drag) return;
+    // 창 밖으로 끌고 나가면 헤더(유일한 손잡이)까지 사라져 되돌릴 수가 없다 → 안쪽으로 제한
+    const w = f.offsetWidth || 380, h = f.offsetHeight || 200;
+    f.style.left = Math.max(4, Math.min(innerWidth - w - 4, e.clientX - drag.dx)) + 'px';
+    f.style.top = Math.max(4, Math.min(innerHeight - h - 4, e.clientY - drag.dy)) + 'px';
+  });
   head.addEventListener('pointerup', () => { if (!drag) return; drag = null; const r = f.getBoundingClientRect(); S.ytPos = { x: r.left, y: r.top }; save(); });
   window.addEventListener('message', e => {
     if (typeof e.data !== 'string' || !e.origin.includes('youtube')) return;
@@ -1047,17 +1060,27 @@ function toolUpscale() {   // 배율 선택 후 실행 (NAI 웹과 동일하게 
     }
   });
 }
+/* 진행·완료 표시. 메인 화면의 #genStatus 는 스마트 툴 탭에서는 숨겨져 있어
+   툴을 돌려도 화면상 아무 일도 안 일어난 것처럼 보였다 → 스마트 툴 쪽에도 같이 쓴다. */
+function setGenStatus(t) {
+  const a = $('#genStatus'); if (a) a.textContent = t;
+  const b = $('#stCost'); if (b && S.mode === 'tools') b.textContent = t;
+}
 async function runUpscale(it, scale) {
   // 배율을 고르는 동안 생성이 시작됐을 수 있다 → 실행 시점에 다시 검사 (runDirector 와 동일)
   if (R.gen) { toast('이미 작업 중'); return; }
-  R.gen = true; $('#genStatus').textContent = `업스케일 ${scale}× 중… (Anlas 소모)`; $('#btnGen').disabled = true;
+  if (!it || !it.blob) { toast('업스케일할 이미지가 없습니다', 'err'); return; }
+  // 크기 제한은 여기서 봐야 한다. toolUpscale() 안에만 있어서 스마트 툴 경로는 그냥 통과했고,
+  // 큰 이미지를 보내면 Anlas 만 쓰고 서버에서 거절당했다.
+  if (it.w * it.h > 1024 * 1024 + 1) { toast(`업스케일은 1024×1024 이하만 가능합니다 (지금 ${it.w}×${it.h})`, 'err'); return; }
+  R.gen = true; setGenStatus(`업스케일 ${scale}× 중… (Anlas 소모)`); $('#btnGen').disabled = true;
   try {
     // NAI 프론트엔드 기준 업스케일은 api.novelai.net (BackendUrl) 에 남아 있음
     const res = await apiFetch('/api/ai/upscale', { method: 'POST', headers: authHeaders(true), body: JSON.stringify({ image: await blobToB64(it.blob), width: it.w, height: it.h, scale }) });
     if (!res.ok) throw await apiError(res);
     for (const b of await respImages(res)) { const item = await addToHistory(b, it.meta, `업스케일 ${scale}×`); if (S.autoSaveOn) autoSave(item); }
-    $('#genStatus').textContent = '업스케일 완료'; refreshAnlas().catch(() => {});
-  } catch (e) { $('#genStatus').textContent = '오류: ' + e.message; toast(e.message, 'err'); }
+    setGenStatus('업스케일 완료'); refreshAnlas().catch(() => {});
+  } catch (e) { setGenStatus('오류: ' + e.message); toast(e.message, 'err'); }
   finally { R.gen = false; $('#btnGen').disabled = false; }
 }
 async function toolInpaint() { const it = curItem(); if (!it) return; setI2I(it.blob); await openMaskEditor(); }
@@ -1100,7 +1123,7 @@ function openDirector() {
 }
 async function runDirector(req, label, srcItem) {
   if (R.gen) { toast('이미 작업 중'); return; }
-  R.gen = true; $('#genStatus').textContent = label + ' 처리 중…'; $('#btnGen').disabled = true;
+  R.gen = true; setGenStatus(label + ' 처리 중…'); $('#btnGen').disabled = true;
   try {
     const res = await apiFetch('/img/ai/augment-image', { method: 'POST', headers: authHeaders(true), body: JSON.stringify(req) });
     if (!res.ok) throw await apiError(res);
@@ -1109,8 +1132,8 @@ async function runDirector(req, label, srcItem) {
        다른 이미지를 올려두면 엉뚱한 이미지의 프롬프트·씬·파일명이 붙었다. */
     const it = srcItem || curItem();
     for (const b of await respImages(res)) { const item = await addToHistory(b, it ? it.meta : { parameters: {} }, label); if (S.autoSaveOn) autoSave(item); }
-    $('#genStatus').textContent = label + ' 완료'; refreshAnlas().catch(() => {});
-  } catch (e) { $('#genStatus').textContent = '오류: ' + e.message; toast(e.message, 'err'); }
+    setGenStatus(label + ' 완료'); refreshAnlas().catch(() => {});
+  } catch (e) { setGenStatus('오류: ' + e.message); toast(e.message, 'err'); }
   finally { R.gen = false; $('#btnGen').disabled = false; }
 }
 
@@ -1646,6 +1669,14 @@ function openMosaicTool(blob) {
         }
         fc.globalCompositeOperation = 'destination-in'; fc.drawImage(mask, 0, 0);
         ox.drawImage(fx, 0, 0);
+        /* 가린 부분 말고 나머지 픽셀은 원본 그대로 옮겨진다. NAI 가 알파 채널에 숨겨 넣는
+           stealth 메타도 같이 따라와서, 가리려고 만든 이미지에 원본 프롬프트가 남는다.
+           → 알파 최하위 비트를 눌러 숨은 정보를 깬다 (완전 투명은 건드리지 않는다). */
+        try {
+          const sd = ox.getImageData(0, 0, W, H);
+          for (let i = 3; i < sd.data.length; i += 4) if (sd.data[i] !== 0) sd.data[i] |= 1;
+          ox.putImageData(sd, 0, 0);
+        } catch (e) {}
         const nb = await new Promise(r => out.toBlob(r, 'image/png'));
         closeModal();
         const item = await addToHistory(nb, ST.meta || { parameters: {} }, '검열 ' + (kind === 'bar' ? '검은바' : kind === 'blur' ? '블러' : '모자이크'));

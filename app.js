@@ -564,7 +564,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '11.18';   // 화면 표시용 앱 버전 (상단)
+const APP_VERSION = '11.19';   // 화면 표시용 앱 버전 (상단)
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 async function tryHealth(base) {
   try {
@@ -702,7 +702,9 @@ async function refreshAnlas() {
 
 /* ─────────────── 프리셋 / 스타일 ─────────────── */
 const getQuality = m => (S.ov[m] && S.ov[m].q != null) ? S.ov[m].q : MODELS[m].quality;
-function ucIdx() { const n = MODELS[S.model].ucs.length; return S.ucPreset < n ? S.ucPreset : 0; }
+// 모델마다 UC 프리셋 개수가 달라, 실제로 생성에 쓰는 모델(m)을 기준으로 잡아야 한다.
+// S.model 로만 보면 인핸스·변형처럼 다른 모델로 돌릴 때 엉뚱한 프리셋이 나갔다.
+function ucIdx(m) { const mm = MODELS[m] ? m : S.model; const n = MODELS[mm].ucs.length; return S.ucPreset < n ? S.ucPreset : 0; }
 function getUcText(m, idx) {
   const o = S.ov[m];
   if (o && o.uc && o.uc[idx] != null) return o.uc[idx];
@@ -723,9 +725,9 @@ function buildPayload(ov) {
   const style = ov.style !== undefined ? ov.style : getStyle(S.activeStyle);
   let prompt = ov.prompt != null ? ov.prompt : expandAll(joinParts(style && style.prefix, getMainPrompt(), style && style.suffix));
   if (S.quality && !ov.noQuality) prompt += getQuality(m);
-  let uc = ov.uc != null ? ov.uc : joinParts(getUcText(m, ucIdx()), ov.ucExtra != null ? ov.ucExtra : joinParts(style && expandAll(style.uc || ''), expandAll(S.uc.trim())));
+  let uc = ov.uc != null ? ov.uc : joinParts(getUcText(m, ucIdx(m)), ov.ucExtra != null ? ov.ucExtra : joinParts(style && expandAll(style.uc || ''), expandAll(S.uc.trim())));
   // NAI 웹 숨은 규칙: 프롬프트에 nsfw 가 없으면 네거티브 맨 앞에 "nsfw, " 자동 추가 (Curated 모델·UC 프리셋 "없음" 제외)
-  if (ov.uc == null && S.autoNsfw !== false && !NSFW_EXEMPT.includes(m) && getUcText(m, ucIdx()) && !prompt.toLowerCase().includes('nsfw') && !/^nsfw\b/i.test(uc)) uc = uc ? 'nsfw, ' + uc : 'nsfw';
+  if (ov.uc == null && S.autoNsfw !== false && !NSFW_EXEMPT.includes(m) && getUcText(m, ucIdx(m)) && !prompt.toLowerCase().includes('nsfw') && !/^nsfw\b/i.test(uc)) uc = uc ? 'nsfw, ' + uc : 'nsfw';
   const chars = (ov.chars || S.chars.filter(c => c.prompt.trim())).map(c => ({ ...c }));
   const useCoords = !S.aiChoice && chars.some(c => c.x != null);
   const w = ov.w || S.w, h = ov.h || S.h;
@@ -792,11 +794,14 @@ async function attachImages(body, ov) {
     if (info.ver < 40) { p.sm = false; p.sm_dyn = false; }
   }
   if (ov.noVibe) return body;
-  const prefs = info.ver >= 45 ? R.prefs.filter(v => v.b64) : [];
+  // noRef 는 i2i 만 막는다. 씬 모드처럼 '메인 화면의 이미지 입력을 쓰지 않는' 경우에는
+  // 바이브·정밀 레퍼런스도 함께 빠져야 한다. 안 그러면 씬 화면에서는 보이지도 지울 수도
+  // 없는 바이브가 모든 씬 이미지에 계속 붙는다.
+  const prefs = (!ov.noRef && info.ver >= 45) ? R.prefs.filter(v => v.b64) : [];
   // V4.5 전용인데 모델을 바꾼 경우 — 조용히 빠지지 않도록 알린다 (배지·비용 표시도 syncUI 에서 함께 정리)
-  if (info.ver < 45 && R.prefs.some(v => v.b64)) toast('Precise Reference는 V4.5 전용이라 이번 생성에서는 제외했습니다');
+  if (!ov.noRef && info.ver < 45 && R.prefs.some(v => v.b64)) toast('Precise Reference는 V4.5 전용이라 이번 생성에서는 제외했습니다');
   // 라이브러리에서 불러온 바이브는 원본 이미지(b64) 없이 인코딩(enc)만 있을 수 있다 — 그것도 포함해야 한다
-  const vibes = R.vibes.filter(v => v.b64 || (info.ver >= 40 && v.enc));
+  const vibes = ov.noRef ? [] : R.vibes.filter(v => v.b64 || (info.ver >= 40 && v.enc));
   if (prefs.length) { // Precise Reference (V4.5) — 바이브와 동시 사용 불가
     p.director_reference_images = prefs.map(v => v.b64);
     p.director_reference_descriptions = prefs.map(v => ({ caption: { base_caption: v.type, char_captions: [] }, legacy_uc: false }));
@@ -894,7 +899,10 @@ function anlasEstimate(o) {
   const base = Math.ceil(2.951823174884865e-6 * px + 5.753298233447344e-7 * px * (o.steps || 0));
   const perImage = Math.max(Math.ceil(base * strength), 2);
   const free = px <= 1048576 && (o.steps || 0) <= 28 && !!o.isOpus;
-  const generation = free ? 0 : perImage * (o.batch || 1);
+  // Opus 무료는 '한 장' 에만 걸린다. 예전엔 장수 전체를 0 으로 표시해서, 4장을 뽑아도
+  // 비용이 0 으로 보이고 실제로는 Anlas 가 빠져나갔다.
+  // 모르는 쪽으로 틀릴 때는 적게 표시하는 것보다 많게 표시하는 편이 낫다.
+  const generation = free ? perImage * Math.max(0, (o.batch || 1) - 1) : perImage * (o.batch || 1);
   const charRef = (o.charRefCount || 0) * 5 * (o.batch || 1);   // 캐릭터 레퍼런스 장당 5
   const vibeEncoding = (o.unencodedVibes || 0) * 2;             // encode-vibe 1회 2 (캐시되면 0)
   return { perImage, generation, charRef, vibeEncoding, total: generation + charRef + vibeEncoding };
@@ -1420,7 +1428,14 @@ async function openVibeLib() {
         d.querySelector('.vl-name').textContent = rec.name;
         d.querySelector('[data-a="use"]').onclick = () => {
           if (R.vibes.length >= 4) { toast('바이브는 최대 4개', 'err'); return; }
-          const ie = 1; const key = S.model + '|' + ie; const enc = (rec.encodings || {})[key] || null;
+          /* 저장된 인코딩의 키는 '모델|IE' 다. IE 를 1 로 고정하면 다른 IE 로 인코딩해 둔 것을
+             못 찾아, 돈 주고 만든 인코딩을 두고 또 인코딩하게 된다.
+             → 현재 모델로 저장된 것 중 하나를 골라 그 IE 를 쓴다. */
+          const encs = rec.encodings || {};
+          const mine = Object.keys(encs).filter(k => k.startsWith(S.model + '|'));
+          const pick = mine.includes(S.model + '|1') ? S.model + '|1' : mine[0];
+          const ie = pick ? +pick.split('|')[1] : 1;
+          const enc = pick ? encs[pick] : null;
           const v = { b64: rec.image || null, thumb: rec.thumb, strength: 0.6, ie, enc, encModel: enc ? S.model : null, encIe: enc ? ie : null, state: enc ? '라이브러리 인코딩 사용 (Anlas 0)' : (rec.image ? '대기 (생성 시 인코딩)' : '이미지 없음 — 이 모델용 인코딩이 없어 사용 불가'), stateCls: enc ? 'ok' : (rec.image ? '' : 'err'), libName: rec.name };
           if (!enc && !rec.image) { toast('이 모델용 인코딩이 없고 원본 이미지도 없어 사용할 수 없습니다', 'err'); return; }
           R.vibes.push(v); renderVibes(); switchRefTab('vibe'); toast('바이브 추가: ' + rec.name); closeModal();
