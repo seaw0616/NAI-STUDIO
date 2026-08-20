@@ -210,7 +210,7 @@ function openChunkManager(focus, onlyCat) {
           d.innerHTML = `<input type="text" placeholder="이름"><textarea rows="1" placeholder="내용" class="ac"></textarea>${catSelectHtml('ckc_' + i, c.cat)}<button class="ic" title="삭제">✕</button>`;
           const [n, t] = [d.children[0], d.children[1]];
           n.value = c.name; t.value = c.text;
-          n.onchange = () => { const nv = n.value.trim().replace(/\s+/g, '_'); const dup = S.chunks.find(x => x !== c && normKey(x.name) === normKey(nv)); if (dup) { toast('같은 이름의 청크가 이미 있습니다: ' + dup.name, 'err'); n.value = c.name; return; } c.name = nv; save(); renderChunkBar(); };
+          n.onchange = () => { const nv = n.value.trim().replace(/\s+/g, '_'); const dup = S.chunks.find(x => x !== c && normKey(x.name) === normKey(nv)); if (dup) { toast('같은 이름의 청크가 이미 있습니다: ' + dup.name, 'err'); n.value = c.name; return; } const oldName = c.name; c.name = nv; if (oldName && normKey(oldName) !== normKey(nv)) tomb('chunk', oldName); save(); renderChunkBar(); };
           t.oninput = () => { c.text = t.value; save(); renderChunkBar(); };
           bindCatSelect(d.querySelector('#ckc_' + i), v => { c.cat = v; save(); renderChunkBar(); draw(); });
           d.querySelector('button.ic').onclick = () => { tomb('chunk', c.name); S.chunks.splice(i, 1); save(); renderChunkBar(); draw(); };
@@ -422,26 +422,29 @@ function ytBindVideoEvents(v, item, cands, getCi, tryNext, load, diag) {
     // 이미 잘 나오던 중에 난 오류는 "이 소스가 틀렸다"가 아니라 "도중에 끊겼다"는 뜻이다.
     // 다음 후보로 넘기면 0초부터 다시 시작하므로, 같은 소스로 보던 위치에서 이어 붙인다.
     const t = v.currentTime;
-    // 재시도 예산은 '재생이 시작될 때마다'가 아니라 '같은 자리에서 반복될 때' 기준이어야 한다.
-    // onplaying 에서 리셋하면 잠깐 재생됐다 또 끊기는 스트림에서 무한히 되돌아온다.
-    // 지난 오류 이후 20초 넘게 실제로 진행했다면 그때만 예산을 회복시킨다.
-    if (v._lastErrT == null || t - v._lastErrT > 20) v._resumeTries = 0;
-    v._lastErrT = t;
-    if (t > 1 && (v._resumeTries = (v._resumeTries || 0) + 1) <= 3) {
-      diag.push(`재생 중 끊김 ${t.toFixed(0)}s — 이어서 재시도 ${v._resumeTries}/3`);
+    /* 재시도 예산은 <video> 요소가 아니라 '이 곡' 에 붙여야 한다.
+       예산을 요소에 두면, 주소를 새로 받으려고 ytPlayDirect 를 부르는 순간
+       플레이어가 새로 만들어지면서 예산이 0 으로 돌아간다 → 같은 자리에서
+       영원히 "재시도 → 새로 열기" 를 반복하고 다음 후보나 오류 패널로 못 간다.
+       예산은 지난 오류 이후 20초 넘게 실제로 진행했을 때만 회복시킨다. */
+    const rt = (YT._retry && YT._retry.id === item.id) ? YT._retry : (YT._retry = { id: item.id, n: 0, lastT: null });
+    if (rt.lastT == null || t - rt.lastT > 20) rt.n = 0;
+    rt.lastT = t;
+    if (t > 1 && ++rt.n <= 3) {
+      diag.push(`재생 중 끊김 ${t.toFixed(0)}s — 이어서 재시도 ${rt.n}/3`);
       ytSetResume(item, t);
       load.hidden = false; load.textContent = `⏳ 끊긴 지점(${fmtDur(t)})부터 이어서…`;
       /* 첫 번째는 같은 주소로 싸게 재시도한다(순간적인 끊김).
          그래도 또 끊기면 주소가 만료된 것이다. 같은 주소로 계속 매달리면 서버가 매번
          새로 추출해 다른 포맷을 이어붙이게 되고, 브라우저는 Format error 로 죽는다.
          → 스트림 주소부터 새로 받아 처음부터 다시 연다(위치는 위에서 기억해 뒀다). */
-      if (v._resumeTries === 1) { const src = v.src; v.src = src; v.load(); ytSeekTo(v, t); v.play().catch(() => {}); }
+      if (rt.n === 1) { const src = v.src; v.src = src; v.load(); ytSeekTo(v, t); v.play().catch(() => {}); }
       else { diag.push('주소를 새로 받아 다시 엽니다'); ytPlayDirect(item); }
       return;
     }
     const ci = getCi(); diag.push(`${cands[ci - 1] ? cands[ci - 1][0] : '?'}: 재생 오류 코드 ${v.error ? v.error.code : '?'}`); tryNext();
   };
-  v.onplaying = () => { load.hidden = true; YT.playing = true; YT._audioRetry = false; if (YT._resume && YT._resume.id === item.id && v.currentTime >= YT._resume.t - 3) YT._resume = null; ytSetPlayIcon(true); if (S.ytNormalize && v.crossOrigin === 'anonymous') agcAttach(v); else if (!AGC.el || AGC.el !== v) { const want = (S.ytVol == null ? 60 : S.ytVol) / 100; if (Math.abs(v.volume - want) > 0.005) { v._progVol = true; v.volume = want; setTimeout(() => { v._progVol = false; }, 50); } } };
+  v.onplaying = () => { load.hidden = true; YT.playing = true; YT._audioRetry = false; if (YT._retry && YT._retry.id !== item.id) YT._retry = null; if (YT._resume && YT._resume.id === item.id && v.currentTime >= YT._resume.t - 3) YT._resume = null; ytSetPlayIcon(true); if (S.ytNormalize && v.crossOrigin === 'anonymous') agcAttach(v); else if (!AGC.el || AGC.el !== v) { const want = (S.ytVol == null ? 60 : S.ytVol) / 100; if (Math.abs(v.volume - want) > 0.005) { v._progVol = true; v.volume = want; setTimeout(() => { v._progVol = false; }, 50); } } };
   v.onpause = () => { YT.playing = false; ytSetPlayIcon(false); };
   v.onended = () => { YT.playing = false; ytSetPlayIcon(false); if (S.ytQueue.length || S.ytAutoRelated !== false) ytNext(); };
 }
@@ -1088,20 +1091,23 @@ function openDirector() {
         opts.querySelector('#dtRun').onclick = async () => {
           const req = { req_type: key, width: it.w, height: it.h, image: await blobToB64(it.blob) };
           if (needPrompt) { req.defry = +opts.querySelector('#dtDefry').value; const pr = opts.querySelector('#dtPrompt').value.trim(); req.prompt = key === 'emotion' ? `${opts.querySelector('#dtEmo').value};;${pr}` : pr; }
-          closeModal(); await runDirector(req, name);
+          closeModal(); await runDirector(req, name, it);
         };
       };
       grid.appendChild(b);
     }
   });
 }
-async function runDirector(req, label) {
+async function runDirector(req, label, srcItem) {
   if (R.gen) { toast('이미 작업 중'); return; }
   R.gen = true; $('#genStatus').textContent = label + ' 처리 중…'; $('#btnGen').disabled = true;
   try {
     const res = await apiFetch('/img/ai/augment-image', { method: 'POST', headers: authHeaders(true), body: JSON.stringify(req) });
     if (!res.ok) throw await apiError(res);
-    const it = curItem();
+    /* 결과에 붙일 메타는 '방금 처리한 그 이미지' 것이어야 한다.
+       예전엔 curItem() 으로 지금 히스토리에서 선택된 것을 집어와서, 스마트 툴에
+       다른 이미지를 올려두면 엉뚱한 이미지의 프롬프트·씬·파일명이 붙었다. */
+    const it = srcItem || curItem();
     for (const b of await respImages(res)) { const item = await addToHistory(b, it ? it.meta : { parameters: {} }, label); if (S.autoSaveOn) autoSave(item); }
     $('#genStatus').textContent = label + ' 완료'; refreshAnlas().catch(() => {});
   } catch (e) { $('#genStatus').textContent = '오류: ' + e.message; toast(e.message, 'err'); }
@@ -1395,6 +1401,12 @@ function openExifTool() {
       list.appendChild(row); files.push({ f, u8 }); body.querySelector('#xAll').hidden = false;
     };
     const drop = body.querySelector('#xDrop'); bindDrop(drop, addFile, true); drop.onclick = () => pickFiles(true, addFile, 'image/png');
+    // 스마트 툴에 이미 이미지를 올려둔 채로 이 도구를 열면 그것부터 넣어준다.
+    // 예전엔 빈 드롭창만 떠서, 히스토리에서 가져온 이미지는 메타를 지울 방법이 아예 없었다.
+    if (typeof ST !== 'undefined' && ST.blob) {
+      const f = new File([ST.blob], (ST.meta && ST.meta.name) || 'image.png', { type: ST.blob.type || 'image/png' });
+      addFile(f);
+    }
     body.querySelector('#xAll').onclick = async () => { for (const { f } of files) downloadBlob(await stripBlob(f), 'clean_' + f.name); };
   });
 }
@@ -1502,15 +1514,15 @@ function stSet(blob, meta) {
   probe.src = ST.url;
 }
 const ST_TOOLS = [
-  { k: 'bg-removal', ic: '🪄', n: '배경 제거', d: '인물만 남기고 배경을 투명하게', run: it => runDirector({ req_type: 'bg-removal', width: it.w, height: it.h, image: it.b64 }, '배경 제거') },
-  { k: 'lineart', ic: '✒', n: '라인아트 추출', d: '선화로 변환', run: it => runDirector({ req_type: 'lineart', width: it.w, height: it.h, image: it.b64 }, '선화 추출') },
-  { k: 'sketch', ic: '✏', n: '스케치 변환', d: '연필 스케치 스타일', run: it => runDirector({ req_type: 'sketch', width: it.w, height: it.h, image: it.b64 }, '스케치') },
-  { k: 'declutter', ic: '🧽', n: '이미지 정리', d: '텍스트·잡동사니 제거', run: it => runDirector({ req_type: 'declutter', width: it.w, height: it.h, image: it.b64 }, '정리') },
-  { k: 'declutter-keep-bubbles', ic: '💬', n: '정리 (말풍선 유지)', d: '잡동사니만 지우고 말풍선은 남김', run: it => runDirector({ req_type: 'declutter-keep-bubbles', width: it.w, height: it.h, image: it.b64 }, '정리(말풍선 유지)') },
+  { k: 'bg-removal', ic: '🪄', n: '배경 제거', d: '인물만 남기고 배경을 투명하게', run: it => runDirector({ req_type: 'bg-removal', width: it.w, height: it.h, image: it.b64 }, '배경 제거', it) },
+  { k: 'lineart', ic: '✒', n: '라인아트 추출', d: '선화로 변환', run: it => runDirector({ req_type: 'lineart', width: it.w, height: it.h, image: it.b64 }, '선화 추출', it) },
+  { k: 'sketch', ic: '✏', n: '스케치 변환', d: '연필 스케치 스타일', run: it => runDirector({ req_type: 'sketch', width: it.w, height: it.h, image: it.b64 }, '스케치', it) },
+  { k: 'declutter', ic: '🧽', n: '이미지 정리', d: '텍스트·잡동사니 제거', run: it => runDirector({ req_type: 'declutter', width: it.w, height: it.h, image: it.b64 }, '정리', it) },
+  { k: 'declutter-keep-bubbles', ic: '💬', n: '정리 (말풍선 유지)', d: '잡동사니만 지우고 말풍선은 남김', run: it => runDirector({ req_type: 'declutter-keep-bubbles', width: it.w, height: it.h, image: it.b64 }, '정리(말풍선 유지)', it) },
   { k: 'colorize', ic: '🎨', n: '색칠하기', d: '선화·흑백에 색을 입힙니다', prompt: '색상 힌트 (예: red hair, blue eyes)', defry: true,
-    run: (it, o) => runDirector({ req_type: 'colorize', width: it.w, height: it.h, image: it.b64, prompt: o.prompt, defry: o.defry }, '채색') },
+    run: (it, o) => runDirector({ req_type: 'colorize', width: it.w, height: it.h, image: it.b64, prompt: o.prompt, defry: o.defry }, '채색', it) },
   { k: 'emotion', ic: '🙂', n: '표정 변경', d: '감정을 골라 표정을 바꿉니다', emo: true, prompt: '추가 프롬프트 (선택)', defry: true,
-    run: (it, o) => runDirector({ req_type: 'emotion', width: it.w, height: it.h, image: it.b64, prompt: o.emo + ';;' + (o.prompt || ''), defry: o.defry }, '표정 변경') },
+    run: (it, o) => runDirector({ req_type: 'emotion', width: it.w, height: it.h, image: it.b64, prompt: o.emo + ';;' + (o.prompt || ''), defry: o.defry }, '표정 변경', it) },
   { k: 'upscale', ic: '⤢', n: '업스케일', d: '2× / 4× 확대 (1024² 이하만)', scale: true, run: (it, o) => runUpscale(it.item, o.scale) },
   { k: 'i2i', ic: '🖼', n: '이미지 투 이미지', d: '이 이미지를 바탕으로 다시 생성', run: it => { setI2I(it.blob); setMode('main'); toast('메인 탭의 i2i 로 넣었습니다'); } },
   { k: 'inpaint', ic: '🖌', n: '인페인팅', d: '칠한 부분만 다시 그리기', run: async it => { setI2I(it.blob); setMode('main'); await openMaskEditor(); } },
