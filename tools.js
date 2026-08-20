@@ -340,12 +340,19 @@ function ytMode() { // direct(직접 재생) | embed | tab | popup
 }
 function setYtMode(m) { S.ytMode = m; S.ytUsePop = (m === 'tab' || m === 'popup'); if (S.ytUsePop) S.ytPopMode = m; save(); const c = $('#ytUsePop'); if (c) c.checked = S.ytUsePop; const dl = $('#ytModeLbl'); if (dl) dl.textContent = ({ direct: '직접', embed: '임베드', tab: '탭', popup: '팝업' })[m]; }
 async function ytEngineEnsure(interactive) {
+  /* 예전엔 아래 catch 가 모든 오류를 삼켜서, 서버가 꺼져 있으면 '⚡ 직접 재생' 을 눌러도
+     아무 반응이 없었다 (호출부는 false 면 조용히 끝낸다). 이유를 알려주고 끝낸다. */
   try {
     const r = await apiFetch('/yt/engine');
     if (r.status === 404) { toast('서버가 예전 버전입니다 — 검은 창을 닫고 start.bat을 다시 실행한 뒤 새로고침하세요', 'err'); return false; }
     const j = await r.json();
     if (j.installed) { if (R.srvInfo) R.srvInfo.ytEngine = true; return true; }
-  } catch (e) { return false; }
+  } catch (e) {
+    // 서버가 꺼져 있거나 포트가 바뀐 경우가 대부분이다 — 이유를 말해주지 않으면
+    // 사용자는 버튼이 고장 난 줄 안다
+    if (interactive) toast('재생 엔진을 확인하지 못했습니다: ' + e.message, 'err');
+    return false;
+  }
   if (!interactive) return false;
   return new Promise(resolve => {
     let settled = false; const done = v => { if (!settled) { settled = true; resolve(v); } };
@@ -1675,7 +1682,10 @@ function openBackup() {
              → 이 경우에만 force 로 밀어 넣는다. */
           const rwarn = [];
           if (replace && typeof pushStateToServer === 'function') {
-            try { await pushStateToServer(true); } catch (e) { rwarn.push('서버 반영'); }
+            // 예외만 보면 안 된다 — 서버가 꺼져 있으면 조용히 false 만 돌아온다
+            let ok = false;
+            try { ok = await pushStateToServer(true); } catch (e) { ok = false; }
+            if (!ok) rwarn.push('서버 반영(다른 창·다음 실행에는 반영 안 됨)');
           }
           if (config) {
             // 값이 있는 키만 보낸다 — 빈 문자열을 보내면 서버가 "지우기"로 해석해
@@ -2113,7 +2123,14 @@ async function ytPlayHls(video, variant, load, item, resumeAt) {
     const finish = ok => {
       if (done) return;
       done = true;
-      if (!ok) { abandoned = true; ytDestroyHls(); }
+      /* 정리는 "그때 만든 그 인스턴스" 만 해야 한다. 전역 ytDestroyHls() 를 부르면,
+         그 사이 사용자가 다른 곡을 튼 경우 새로 만든 인스턴스를 죽인다
+         (20초 타임아웃이 뒤늦게 도착하는 경우가 실제로 있었다). */
+      if (!ok) {
+        abandoned = true;
+        if (YT._hls === h) ytDestroyHls();
+        else { try { h.destroy(); } catch (e) {} }
+      }
       resolve(ok);
     };
     const diag = m => (YT._diag = YT._diag || []).push('HLS ' + variant.h + 'p: ' + m);

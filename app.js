@@ -134,8 +134,10 @@ function save() {
 /* 사용자가 직접 지운 뒤 부르는 저장 — 서버 보호를 넘어 그대로 반영한다 */
 function saveCleared() { R._forcePush = true; save(); }
 const contentCount = s => ['chunks', 'styles', 'characters', 'scenes'].reduce((a, k) => a + ((s && s[k] && s[k].length) || 0), 0);
+/* 서버에 실제로 저장됐으면 true. 백업 복원처럼 "됐다" 를 말해야 하는 쪽에서 쓴다
+   (예전엔 아무것도 안 돌려줘서, 서버가 꺼져 있어도 '✔ 복원 완료' 로 표시됐다). */
 async function pushStateToServer(force) {
-  if (!R.srvOk || !R.booted) return;
+  if (!R.srvOk || !R.booted) return false;
   // 보내는 순간의 savedAt 을 붙잡아 둔다. 왕복 도중 사용자가 한 글자만 쳐도 S.savedAt 이
   // 새로 찍히는데, 그 값을 기준으로 남기면 서버에 없는 버전을 기준 삼게 되어
   // 다음 부팅에서 애먼 '갈라짐' 판정이 난다.
@@ -149,7 +151,7 @@ async function pushStateToServer(force) {
          하지만 빈-프롬프트 보호는 사용자가 방금 지운 것일 수도 있다.
          그때 서버 것을 끌어오면 지운 프롬프트가 눈앞에서 되살아난다 → 물어보고 나서 정한다. */
       if (!emptyPrompt) pullStateFromServer(true).catch(() => {});
-      if (R.protectShown) return; R.protectShown = true;
+      if (R.protectShown) return false; R.protectShown = true;
       openModal(emptyPrompt ? '⚠ 프롬프트가 비어 있습니다' : '⚠ 설정 덮어쓰기 보호', body => {
         body.innerHTML = emptyPrompt
           ? `<div class="hint">이 화면의 프롬프트가 비어 있어서, 서버에 저장돼 있던 프롬프트를 덮어쓰지 않았습니다.<br>
@@ -162,13 +164,14 @@ async function pushStateToServer(force) {
         // ✕/Esc/바깥 클릭으로 닫아도 플래그를 풀어야 한다 — 안 그러면 그 세션 내내 서버 저장이 조용히 막힌다
       }, false, () => { R.protectShown = false; });
       R.stateSynced = false; logErr('서버 저장 보류(' + (emptyPrompt ? '빈 프롬프트' : '덮어쓰기') + ' 보호)');
-      return;
+      return false;
     }
-    if (!r.ok && r.status !== 409) { R.stateSynced = false; logErr('설정 서버 저장 실패 ' + r.status); }
+    if (!r.ok && r.status !== 409) { R.stateSynced = false; logErr('설정 서버 저장 실패 ' + r.status); return false; }
     // 저장이 성공했다면 서버 버전 = 방금 보낸 것이다. 이걸 기준으로 남겨야 다음 부팅에서
     // 이 브라우저가 '지금 서버 버전을 보고 있는 상태'로 인정돼 설정이 그대로 유지된다.
-    else { R.stateSynced = true; R.seenBase = sentAt || 0; try { localStorage.setItem('nst_base', String(sentAt || 0)); } catch (e) {} }
+    else { R.stateSynced = true; R.seenBase = sentAt || 0; try { localStorage.setItem('nst_base', String(sentAt || 0)); } catch (e) {} return true; }
   } catch (e) { R.stateSynced = false; logErr('설정 서버 저장 실패: ' + e.message); }
+  return false;
 }
 /* 삭제 기록(툼스톤) — 지운 항목이 서버 동기화로 되살아나지 않게 */
 function tomb(kind, key) {
@@ -1550,7 +1553,9 @@ function renderVibes() {
     d.querySelector('.vthumb').src = v.thumb;
     const rs = d.querySelector('.rs'), ri = d.querySelector('.ri'); rs.value = v.strength; ri.value = v.ie;
     const upd = () => { d.querySelector('.vs').textContent = v.strength; d.querySelector('.vi').textContent = v.ie; }; upd();
-    rs.oninput = () => { v.strength = +rs.value; upd(); }; ri.oninput = () => { v.ie = +ri.value; upd(); };
+    rs.oninput = () => { v.strength = +rs.value; upd(); };
+    // Info Extracted 를 바꾸면 다음 생성에서 다시 인코딩된다(장당 2 Anlas) → 예상 비용도 따라가야 한다
+    ri.oninput = () => { v.ie = +ri.value; upd(); refreshCost(); };
     const st = d.querySelector('.vibe-state'); st.textContent = v.state || (v.enc ? '인코딩 있음' : ''); st.className = 'vibe-state ' + (v.stateCls || '');
     d.querySelector('.vlib').onclick = () => saveVibeToLib(v);
     d.querySelector('button.ic').onclick = () => { R.vibes.splice(i, 1); renderVibes(); };
@@ -2039,6 +2044,11 @@ function syncUI() {
   // 코드로 value 를 바꾼 textarea 들은 input 이벤트가 안 나므로 하이라이트 미러를 직접 다시 그린다
   if (typeof refreshHighlights === 'function') refreshHighlights();
 }
+/* 첨부(i2i·바이브·레퍼런스)가 바뀌면 예상 비용도 달라진다.
+   예전엔 이 경로에 갱신이 없어서, 레퍼런스 4장을 붙여도 ◈ 숫자가 그대로였다
+   (실제로는 80 Anlas 가 더 나갔다).
+   updateCostHint 는 아래쪽에 정의돼 있고 렌더 도중에도 불리므로 존재 확인 후 부른다. */
+function refreshCost() { if (typeof updateCostHint === 'function') updateCostHint(); }
 function updateRefBadge() {
   const b = $('#refBadge'); if (!b) return;
   const prefOk = MODELS[S.model].ver >= 45;   // Precise Reference 는 V4.5 전용 — 아니면 실제로 안 나가니 배지도 그렇게 표시
@@ -2100,7 +2110,11 @@ function updateCostHint() {
   const est = anlasEstimate({ width: S.w, height: S.h, steps: S.steps, batch: S.n,
     strength: R.i2iBlob ? S.strength : 1, isOpus,
     charRefCount: MODELS[S.model].ver >= 45 ? R.prefs.length : 0,   // V4.5 아니면 실제로 안 나가므로 비용도 0
-    unencodedVibes: R.vibes.filter(v => !v.enc && v.b64).length });
+    /* "인코딩이 있으면 공짜" 가 아니다. ensureVibes 는 모델이나 Info Extracted 가
+       바뀌면 같은 조건(v.encModel === S.model && v.encIe === v.ie)으로 다시 인코딩한다.
+       예전엔 v.enc 만 봐서, 모델을 바꾼 뒤에도 비용이 0 으로 보이다가 실제로는
+       장당 2 Anlas 씩 더 나갔다. 여기도 같은 조건으로 센다. */
+    unencodedVibes: R.vibes.filter(v => v.b64 && !(v.enc && v.encModel === S.model && v.encIe === v.ie)).length });
   const el = $('#genCost');
   if (!hasToken()) { el.textContent = ''; return; }
   el.textContent = est.total === 0 ? 'Opus 무료' : `◈ ${est.total}` + (S.n > 1 ? ` (${S.n}장)` : '');

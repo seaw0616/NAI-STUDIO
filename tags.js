@@ -445,7 +445,7 @@ function openArtistBrowser(initial) {
         }
         msg.textContent = `${j.posts.length}장 · 그림을 누르면 크게 봅니다`
           + (j.source === 'safebooru' ? ' · 단부루가 막혀 있어 safebooru.org 에서 가져왔습니다 (전연령)' : '');
-      } catch (e) { grid.innerHTML = `<div class="hint">✖ ${escHtml(e.message)}</div>`; }
+      } catch (e) { if (myReq === ART.seq) grid.innerHTML = `<div class="hint">✖ ${escHtml(e.message)}</div>`; }   // 늦게 온 실패가 지금 보는 작가를 덮지 않게
       try {
         const r = await danFetch(`/dan/related?tag=${encodeURIComponent(name)}`);
         rel.innerHTML = r.related.length ? '<span class="hint">비슷한 작가:</span>' : '';
