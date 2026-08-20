@@ -495,7 +495,9 @@ function initScenes() {
   $('#btnCharLib').onclick = () => openCharLibrary();
   $('#mainStyle').onchange = () => { S.activeStyle = $('#mainStyle').value || null; save(); };
   $('#libScene').onchange = () => { LIB.scene = $('#libScene').value; LIB.sel.clear(); renderLibrary(); };
-  $('#libFav').onclick = () => { LIB.fav = !LIB.fav; renderLibrary(); };
+  // 필터를 바꾸면 선택을 비운다. 안 그러면 화면에 보이지도 않는 이미지가
+  // '선택 삭제'·'선택 저장' 에 그대로 휩쓸린다.
+  $('#libFav').onclick = () => { LIB.fav = !LIB.fav; LIB.sel.clear(); renderLibrary(); };
   $('#libSelSave').onclick = () => { bulkSave([...LIB.sel], S.stripOnSave); };
   $('#libSelDel').onclick = () => { const n = LIB.sel.size; LIB.sel.forEach(h => deleteItem(h, true)); LIB.sel.clear(); refreshAfterBulk(); renderLibrary(); toast(n + '장 삭제'); };
   $('#libSelAll').onclick = () => { $$('#libGrid .scg-ck').forEach(ck => { if (!ck.checked) ck.click(); }); };

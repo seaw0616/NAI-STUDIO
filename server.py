@@ -38,7 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 VERSION = 17
-RELEASE = "11.18"            # 배포 버전. GitHub 릴리스 태그 "v11.18" 과 짝을 이룬다.
+RELEASE = "11.19"            # 배포 버전. GitHub 릴리스 태그 "v11.19" 과 짝을 이룬다.
 UPDATE_REPO = ""            # "사용자명/저장소" — 비어 있으면 설정에서 넣는다 (config.json 의 updateRepo)
 FROZEN = getattr(sys, "frozen", False)          # PyInstaller 로 묶인 단일 exe 인가
 if FROZEN:
@@ -389,7 +389,7 @@ def update_apply():
         'tasklist /fi "PID eq %d" 2>nul | find "%d" >nul && goto wait\r\n' % (os.getpid(), os.getpid()) +
         'move /y "%s" "%s" >nul\r\n' % (new.name, cur.name) +
         'start "" "%s"\r\n' % cur.name +
-        'del "%%~f0"\r\n',
+        'del "%~f0"\r\n',     # %% 는 배치에서 리터럴 % 가 되어 자기 삭제가 안 됐다
         encoding="utf-8")
     import subprocess
     subprocess.Popen(["cmd", "/c", str(bat)], cwd=str(HOME),
@@ -458,11 +458,14 @@ def _dan_get(path_q, ttl=600):
     url = DAN + path_q
     if not _dan_host_ok(url):
         raise ValueError("bad url")
-    with _dan_lock:                       # 요청 간 최소 간격
-        gap = time.time() - _dan_last[0]
-        if gap < 1.0:
-            time.sleep(1.0 - gap)
-        _dan_last[0] = time.time()
+    # 요청 간 최소 간격(익명 rate limit 존중). 락을 쥔 채로 자면 그 1초 동안
+    # 썸네일 프록시 등 다른 요청까지 통째로 멈춘다 → 내 차례만 예약하고 락은 바로 놓는다.
+    with _dan_lock:
+        now = time.time()
+        wait = max(0.0, 1.0 - (now - _dan_last[0]))
+        _dan_last[0] = now + wait
+    if wait:
+        time.sleep(wait)
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=20) as r:
         data = r.read()
@@ -1049,7 +1052,17 @@ class Handler(BaseHTTPRequestHandler):
                     tmp = DATA / ("state.%d.tmp" % threading.get_ident())
                     with _state_lock:
                         tmp.write_bytes(body)
-                        tmp.replace(sp)
+                        # 윈도우에서는 다른 요청이 state.json 을 읽는 중이면 교체가
+                        # PermissionError 로 튄다. 그대로 400 으로 버리면 그 저장이 사라지고
+                        # state.*.tmp 만 쌓인다 → 잠깐 기다렸다 다시 시도한다.
+                        for attempt in range(6):
+                            try:
+                                tmp.replace(sp)
+                                break
+                            except PermissionError:
+                                if attempt == 5:
+                                    raise
+                                time.sleep(0.05 * (attempt + 1))
                     self._json(200, {"ok": True})
                 except Exception as e:
                     self._json(400, {"message": "bad state: %s" % e})
