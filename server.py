@@ -384,8 +384,20 @@ def update_download(url, expect_size, ver):
                     f.write(chunk)
                     got += len(chunk)
                     _upd_set(got=got)
-            if total and got < total * 0.98:
-                raise IOError("다운로드가 끊겼습니다 (%d/%d)" % (got, total))
+            # 예전 검사는 두 군데가 헐거웠다.
+            #  - Content-Length 가 없으면(total=0) 검사 자체가 꺼져, 5MB 만 받고 끊겨도
+            #    "받기 완료" 가 됐다. 릴리스가 알려준 크기(expect_size)로 대신 본다.
+            #  - 2% 여유를 뒀는데 30MB 짜리면 600KB 가 빠져도 통과한다. exe 는 1바이트만
+            #    달라도 못 쓴다 → 정확히 맞을 때만 통과시킨다.
+            # 받은 것이 정말 실행 파일인지도 확인한다(오류 페이지를 받아 두는 경우가 있다).
+            want = total or expect_size or 0
+            if want and got != want:
+                raise IOError("다운로드가 끊겼습니다 (%d/%d 바이트) — 다시 시도해 주세요" % (got, want))
+            if not want:
+                raise IOError("파일 크기를 알 수 없어 안전하게 멈췄습니다 — 릴리스 페이지에서 직접 받아 주세요")
+            with open(tmp, "rb") as _f:
+                if _f.read(2) != b"MZ":
+                    raise IOError("받은 파일이 실행 파일이 아닙니다 (네트워크가 다른 페이지를 준 것 같습니다)")
             if dest.exists():
                 dest.unlink()
             tmp.replace(dest)
@@ -1003,8 +1015,12 @@ def build_tag_db():
             rows.append([tag, cat, cnt, path, kw, text.strip()])
     rows.sort(key=lambda r: -r[2])
     DATA.mkdir(exist_ok=True)
-    with gzip.open(TAG_JSON_GZ, "wt", encoding="utf-8", compresslevel=6) as f:
+    # 목적지에 직접 쓰면, 변환 도중 창을 닫았을 때 잘린 gz 가 남는다.
+    # 다음 실행은 "파일이 있으니 ready" 로 보고 영원히 다시 만들지 않았다.
+    tmp_gz = TAG_JSON_GZ.with_name(TAG_JSON_GZ.name + ".tmp")
+    with gzip.open(tmp_gz, "wt", encoding="utf-8", compresslevel=6) as f:
         json.dump(rows, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(str(tmp_gz), str(TAG_JSON_GZ))
     return len(rows)
 
 
@@ -1463,96 +1479,118 @@ class Handler(BaseHTTPRequestHandler):
                     force = bool((qs.get("force") or [""])[0])
                     def ccount(o):
                         return sum(len(o.get(k) or []) for k in ("chunks", "styles", "characters", "scenes")) if isinstance(o, dict) else 0
-                    cur = {}
-                    if sp.exists():
-                        try:
-                            cur = json.loads(sp.read_text(encoding="utf-8"))
-                        except Exception:
-                            cur = {}
-                    # 보호: 들어온 설정의 내용(청크·스타일·캐릭터·씬)이 서버 것의 절반 미만이면 덮어쓰지 않음 (빈 브라우저가 덮어쓰는 사고 방지)
-                    # 사용자가 실제로 지운 것(톰스톤)은 줄어드는 게 정상이다.
-                    # 그것까지 막으면 정당한 대량 삭제가 영영 저장되지 않고 409 만 반복된다.
-                    def tombed_count(o, base):
-                        d = (o or {}).get("deleted") or {}
-                        if not isinstance(d, dict):
-                            return 0
-                        n = 0
-                        for key, kind in (("chunks", "chunk"), ("styles", "style"),
-                                          ("characters", "char"), ("scenes", "scene")):
-                            for it in (base.get(key) or []):
-                                k = it.get("name") if kind in ("chunk", "char") else it.get("id")
-                                if k and (kind + "|" + str(k).lower()) in d:
-                                    n += 1
-                        return n
-                    gone = ccount(cur) - ccount(incoming)
-                    explained = tombed_count(incoming, cur)
-                    if (not force and ccount(cur) >= 3 and ccount(incoming) < ccount(cur) * 0.5
-                            and gone > explained):
-                        self._json(409, {"message": "protected", "serverCount": ccount(cur),
-                                         "incomingCount": ccount(incoming), "explained": explained})
-                        return True
-
-                    # 프롬프트도 지켜야 한다. 위 검사는 청크·스타일·캐릭터·씬 개수만 보므로,
-                    # 빈 프롬프트가 통째로 덮어써도 통과했다. 서버가 아직 안 떴을 때 열린
-                    # 빈 화면이 그대로 저장되어 프롬프트가 사라지는 사고가 실제로 났다.
-                    def _has_text(o):
-                        if not isinstance(o, dict):
-                            return False
-                        if (o.get("prompt") or "").strip():
-                            return True
-                        st = o.get("secText")
-                        return isinstance(st, dict) and any((v or "").strip() for v in st.values() if isinstance(v, str))
-                    if not force and _has_text(cur) and not _has_text(incoming):
-                        self._json(409, {"message": "protected-prompt",
-                                         "serverCount": ccount(cur), "incomingCount": ccount(incoming)})
-                        return True
-                    # 목록은 서버에서 합친다 — 탭을 두 개 열어두면 나중에 저장한 탭이 다른 탭에서
-                    # 만든 항목을 통째로 지우던 문제(클라이언트끼리는 서로의 변경을 모른다)
-                    if not force and isinstance(cur, dict) and isinstance(incoming, dict):
-                        incoming = _merge_state(cur, incoming)
-                        body = json.dumps(incoming, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-                    # 백업: 이전 저장본 + 타임스탬프 백업(최근 30개 보관)
-                    #
-                    # 예전엔 "내용 개수가 바뀔 때"만 백업해서, 설정(해상도·CFG·시드·샘플러…)만
-                    # 바꾼 구간은 기록이 하나도 안 남았다. 실제로 설정이 통째로 덮어써진 사고가
-                    # 났을 때 되돌릴 근거가 없었다. → 설정이 바뀌어도 남기되, 슬라이더를 만질
-                    # 때마다 쌓이지 않도록 30분에 한 번으로 제한한다.
-                    prev = DATA / "state.prev.json"
-                    # 매번 바뀌는 값(프롬프트·시드·현재 씬·유튜브 검색어…)은 '설정'으로 치지 않는다.
-                    # 이걸 세면 프롬프트만 고쳐도 30분마다 백업이 쌓여, 30개 상한 때문에
-                    # 정작 사고 직전의 오래된 스냅샷이 하루도 못 가 밀려난다.
-                    _VOLATILE = {"savedAt", "prompt", "uc", "seed", "curScene", "mode",
-                                 "ytLastQuery", "ytOpen", "ytPos", "updSeen"}
-                    def _scalars(o):
-                        if not isinstance(o, dict):
-                            return {}
-                        return {k: v for k, v in o.items()
-                                if not isinstance(v, (list, dict)) and k not in _VOLATILE}
-                    bdir = DATA / "backups"
-                    last_bk = 0.0
-                    if bdir.exists():
-                        try:
-                            last_bk = max((f.stat().st_mtime for f in bdir.glob("state-*.json")), default=0.0)
-                        except OSError:
-                            last_bk = 0.0
-                    setting_changed = _scalars(cur) != _scalars(incoming)
-                    try:
-                        if sp.exists() and (not prev.exists() or time.time() - prev.stat().st_mtime > 600):
-                            prev.write_bytes(sp.read_bytes())
-                        if sp.exists() and (ccount(cur) != ccount(incoming)
-                                            or (setting_changed and time.time() - last_bk > 1800)):
-                            bdir.mkdir(exist_ok=True)
-                            (bdir / ("state-%s.json" % time.strftime("%Y%m%d-%H%M%S"))).write_bytes(sp.read_bytes())
-                            olds = sorted(bdir.glob("state-*.json"))
-                            for f in olds[:-30]:
-                                try:
-                                    f.unlink()
-                                except OSError:
-                                    pass
-                    except Exception:
-                        pass
-                    tmp = DATA / ("state.%d.tmp" % threading.get_ident())
+                    # 읽기 → 병합 → 쓰기를 통째로 잠근다.
+                    # 쓰기만 잠그면, 탭 두 개가 거의 동시에 저장할 때 둘 다 "옛 상태" 를
+                    # 읽어 병합하므로 나중에 쓴 쪽이 앞 쪽의 항목을 지워 버린다.
                     with _state_lock:
+                        cur = {}
+                        if sp.exists():
+                            try:
+                                cur = json.loads(sp.read_text(encoding="utf-8"))
+                            except Exception:
+                                cur = {}
+                        # 보호: 들어온 설정의 내용(청크·스타일·캐릭터·씬)이 서버 것의 절반 미만이면 덮어쓰지 않음 (빈 브라우저가 덮어쓰는 사고 방지)
+                        # 사용자가 실제로 지운 것(톰스톤)은 줄어드는 게 정상이다.
+                        # 그것까지 막으면 정당한 대량 삭제가 영영 저장되지 않고 409 만 반복된다.
+                        def tombed_count(o, base):
+                            d = (o or {}).get("deleted") or {}
+                            if not isinstance(d, dict):
+                                return 0
+                            n = 0
+                            for key, kind in (("chunks", "chunk"), ("styles", "style"),
+                                              ("characters", "char"), ("scenes", "scene")):
+                                for it in (base.get(key) or []):
+                                    k = it.get("name") if kind in ("chunk", "char") else it.get("id")
+                                    if k and (kind + "|" + str(k).lower()) in d:
+                                        n += 1
+                            return n
+                        gone = ccount(cur) - ccount(incoming)
+                        explained = tombed_count(incoming, cur)
+                        if (not force and ccount(cur) >= 3 and ccount(incoming) < ccount(cur) * 0.5
+                                and gone > explained):
+                            self._json(409, {"message": "protected", "serverCount": ccount(cur),
+                                             "incomingCount": ccount(incoming), "explained": explained})
+                            return True
+
+                        # 프롬프트도 지켜야 한다. 위 검사는 청크·스타일·캐릭터·씬 개수만 보므로,
+                        # 빈 프롬프트가 통째로 덮어써도 통과했다. 서버가 아직 안 떴을 때 열린
+                        # 빈 화면이 그대로 저장되어 프롬프트가 사라지는 사고가 실제로 났다.
+                        def _has_text(o):
+                            if not isinstance(o, dict):
+                                return False
+                            if (o.get("prompt") or "").strip():
+                                return True
+                            st = o.get("secText")
+                            return isinstance(st, dict) and any((v or "").strip() for v in st.values() if isinstance(v, str))
+                        if not force and _has_text(cur) and not _has_text(incoming):
+                            self._json(409, {"message": "protected-prompt",
+                                             "serverCount": ccount(cur), "incomingCount": ccount(incoming)})
+                            return True
+                        # 목록은 서버에서 합친다 — 탭을 두 개 열어두면 나중에 저장한 탭이 다른 탭에서
+                        # 만든 항목을 통째로 지우던 문제(클라이언트끼리는 서로의 변경을 모른다)
+                        if not force and isinstance(cur, dict) and isinstance(incoming, dict):
+                            incoming = _merge_state(cur, incoming)
+                            body = json.dumps(incoming, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                        # 백업: 이전 저장본 + 타임스탬프 백업(최근 30개 보관)
+                        #
+                        # 예전엔 "내용 개수가 바뀔 때"만 백업해서, 설정(해상도·CFG·시드·샘플러…)만
+                        # 바꾼 구간은 기록이 하나도 안 남았다. 실제로 설정이 통째로 덮어써진 사고가
+                        # 났을 때 되돌릴 근거가 없었다. → 설정이 바뀌어도 남기되, 슬라이더를 만질
+                        # 때마다 쌓이지 않도록 30분에 한 번으로 제한한다.
+                        prev = DATA / "state.prev.json"
+                        # 매번 바뀌는 값(프롬프트·시드·현재 씬·유튜브 검색어…)은 '설정'으로 치지 않는다.
+                        # 이걸 세면 프롬프트만 고쳐도 30분마다 백업이 쌓여, 30개 상한 때문에
+                        # 정작 사고 직전의 오래된 스냅샷이 하루도 못 가 밀려난다.
+                        _VOLATILE = {"savedAt", "prompt", "uc", "seed", "curScene", "mode",
+                                     "ytLastQuery", "ytOpen", "ytPos", "updSeen"}
+                        def _scalars(o):
+                            if not isinstance(o, dict):
+                                return {}
+                            return {k: v for k, v in o.items()
+                                    if not isinstance(v, (list, dict)) and k not in _VOLATILE}
+                        bdir = DATA / "backups"
+                        last_bk = 0.0
+                        if bdir.exists():
+                            try:
+                                last_bk = max((f.stat().st_mtime for f in bdir.glob("state-*.json")), default=0.0)
+                            except OSError:
+                                last_bk = 0.0
+                        setting_changed = _scalars(cur) != _scalars(incoming)
+                        # 프롬프트·네거티브·캐릭터 칸은 위 계산에서 빠져 있다(매번 바뀌므로).
+                        # 그런데 정작 사고는 "그것들이 통째로 비는" 형태로 난다.
+                        # 있던 것이 사라지는 순간만큼은 남겨야 되돌릴 근거가 생긴다.
+                        def _texts(o):
+                            if not isinstance(o, dict):
+                                return ""
+                            st = o.get("secText") if isinstance(o.get("secText"), dict) else {}
+                            ch = o.get("chars") if isinstance(o.get("chars"), list) else []
+                            parts = [o.get("prompt") or "", o.get("uc") or ""]
+                            parts += [str(v or "") for v in st.values()]
+                            parts += [str((c or {}).get("prompt") or "") for c in ch]
+                            return "".join(parts).strip()
+                        if _texts(cur) and not _texts(incoming):
+                            setting_changed = True
+                            last_bk = 0.0     # 30분 제한을 건너뛴다
+                        try:
+                            if sp.exists() and (not prev.exists() or time.time() - prev.stat().st_mtime > 600):
+                                prev.write_bytes(sp.read_bytes())
+                            if sp.exists() and (ccount(cur) != ccount(incoming)
+                                                or (setting_changed and time.time() - last_bk > 1800)):
+                                bdir.mkdir(exist_ok=True)
+                                # 목적지에 바로 쓰면 디스크가 꽉 찼을 때 0바이트 파일이 남는다
+                                _bk = bdir / ("state-%s.json" % time.strftime("%Y%m%d-%H%M%S"))
+                                _bt = bdir / ("state-%s.tmp" % time.strftime("%Y%m%d-%H%M%S"))
+                                _bt.write_bytes(sp.read_bytes())
+                                os.replace(str(_bt), str(_bk))
+                                olds = sorted(bdir.glob("state-*.json"))
+                                for f in olds[:-30]:
+                                    try:
+                                        f.unlink()
+                                    except OSError:
+                                        pass
+                        except Exception:
+                            pass
+                        tmp = DATA / ("state.%d.tmp" % threading.get_ident())
                         tmp.write_bytes(body)
                         # 윈도우에서는 다른 요청이 state.json 을 읽는 중이면 교체가
                         # PermissionError 로 튄다. 그대로 400 으로 버리면 그 저장이 사라지고

@@ -203,7 +203,18 @@ function tagSearchLocal(q, limit, cat, maxCand) {
        단 이 기억은 '그때 그 카테고리 안에서 0건' 이라는 뜻이다. 카테고리를 같이 적어두지
        않으면, 작가 칩으로 한 번 검색한 단어가 세션 내내 전 영역에서 0건이 돼버린다. */
     const dead = TAGDB.deadQ;
-    if (terms.length === 1 && dead && dead.cat === cat && q.startsWith(dead.q)) return [];
+    /* "그때 전체를 훑어도 0건이었다" 는 기억은 전체 스캔을 건너뛰는 데만 써야 한다.
+       예전엔 여기서 바로 return [] 을 해서, 인덱스가 방금 찾아낸 결과까지 버렸다.
+       사전은 나중에 더 로드된다(보강 사전·한글 별칭) → 그 뒤로 영영 안 나왔다.
+       사전이 커졌으면 기억 자체를 버린다. */
+    if (terms.length === 1 && dead && dead.cat === cat && q.startsWith(dead.q)) {
+      if (dead.rows === (TAGDB.rows || []).length) {
+        out = out || [];                       // 인덱스가 아무것도 못 찾았으면 null 이다
+        out.sort((a, b) => b[0] - a[0] || b[1][2] - a[1][2]);
+        return out.slice(0, limit).map(x => x[1]);
+      }
+      TAGDB.deadQ = null;
+    }
     const full = scan(null);
     if (full.length) {
       // 인덱스 결과와 합치되 같은 행이 두 번 들어가지 않게
@@ -211,7 +222,8 @@ function tagSearchLocal(q, limit, cat, maxCand) {
       out = (out || []).concat(full.filter(x => !seen.has(x[1])));
       TAGDB.deadQ = null;
     } else if (terms.length === 1 && !(out && out.length)) {
-      TAGDB.deadQ = { q, cat };
+      // 사전 크기를 함께 남겨, 나중에 태그가 더 들어오면 이 기억이 저절로 무효가 되게 한다
+      TAGDB.deadQ = { q, cat, rows: (TAGDB.rows || []).length };
     }
     out = out || [];
   }
@@ -236,10 +248,19 @@ function activeTA() { // 보이는 프롬프트 칸 (숨겨진 #prompt 로 들�
   if (vis(R.lastTA)) return R.lastTA;
   if (S.mode === 'scene') { const s = $('#scPrompt'); if (vis(s)) return s; }
   if (!S.singleBox) { const s = $('#secList textarea.sec-ta'); if (vis(s)) return s; }
-  const p = $('#prompt'); return vis(p) ? p : ($('#secList textarea.sec-ta') || p);
+  const p = $('#prompt'); if (vis(p)) return p;
+  return null;   // 보이는 칸이 없다 (라이브러리·스마트툴 탭) — 숨은 칸에 몰래 넣지 않는다
 }
 function insertIntoPrompt(text) {
-  const ta = activeTA();
+  let ta = activeTA();
+  /* 라이브러리·스마트툴 탭에는 프롬프트 칸이 하나도 안 보인다.
+     예전엔 마지막 폴백으로 "숨어 있는 칸" 에 넣어서, 화면은 그대로인데 메인 프롬프트가
+     바뀌어 있었다. 넣을 곳이 없으면 메인 탭으로 옮기고 나서 넣는다. */
+  if (!ta && typeof setMode === 'function' && S.mode !== 'main') {
+    setMode('main');
+    ta = activeTA();
+    if (ta) toast('메인 탭으로 옮겨 넣었습니다');
+  }
   if (!ta) { toast('프롬프트 칸을 먼저 클릭하세요', 'err'); return; }
   const v = ta.value;
   let a = ta.selectionStart, b = ta.selectionEnd;
@@ -326,7 +347,15 @@ function acRender(items) {
 function acPick(i) {
   const t = AC.items[i]; if (!t || !AC.ta) return;
   const ta = AC.ta, seg = acSegment(ta);   // 저장된 옛 위치가 아니라 현재 커서 기준
-  const tag = t.chunk ? t.tag : fmtTag(t.tag);
+  /* 여러 줄짜리 조각은 이름만 넣으면 생성할 때 전문이 통째로 나간다
+     (기본으로 들어 있는 '작가랜덤' 은 118줄이다). 청크바에서 누를 때와 똑같이
+     <이름> 으로 넣어 매번 한 줄만 뽑히게 한다. */
+  let tag;
+  if (t.chunk) {
+    const c = S.chunks.find(x => normKey(x.name) === normKey(t.tag));
+    const multi = c && (c.text || '').split('\n').filter(x => x.trim()).length > 1;
+    tag = multi ? '<' + t.tag + '>' : t.tag;
+  } else tag = fmtTag(t.tag);
   // 뒤가 이미 쉼표로 시작하면 구분자를 붙이지 않는다 (중간 삽입 시 ", ," 로 빈 태그가 생기던 문제)
   const rest = ta.value.slice(seg.pos);
   const sep = /^\s*,/.test(rest) ? '' : ', ';
@@ -514,7 +543,17 @@ function openTagSearch(initial) {
         d.children[2].textContent = r[4] || '';
         d.children[3].textContent = r[3] ? r[3].replace('>', ' › ') : CAT_NAME[r[1]] || '';
         d.children[4].textContent = fmtN(r[2]);
-        d.onmouseenter = () => { desc.innerHTML = `<b>${fmtTag(r[0])}</b> ${r[4] ? '· ' + r[4] : ''}<br>${r[5] || '(설명 없음)'}`; };
+        /* 설명·키워드는 외부 CSV(단부루 위키)에서 온 남의 글이다. innerHTML 로 넣으면
+           마우스를 올리는 것만으로 그 안의 태그가 살아난다 — 이 페이지엔 NAI 토큰이 있다.
+           굵게만 필요하므로 요소를 만들어 텍스트로 채운다. */
+        d.onmouseenter = () => {
+          desc.textContent = '';
+          const b = document.createElement('b'); b.textContent = fmtTag(r[0]);
+          desc.appendChild(b);
+          if (r[4]) desc.appendChild(document.createTextNode(' · ' + r[4]));
+          desc.appendChild(document.createElement('br'));
+          desc.appendChild(document.createTextNode(r[5] || '(설명 없음)'));
+        };
         d.onclick = e => {
           if (e.shiftKey) { navigator.clipboard.writeText(fmtTag(r[0])).then(() => toast('복사: ' + fmtTag(r[0]))); return; }
           insertIntoPrompt(fmtTag(r[0])); toast('삽입: ' + fmtTag(r[0]));
