@@ -134,7 +134,9 @@ async function pushStateToServer(force) {
   const sentAt = S.savedAt, sentBody = JSON.stringify(S);
   try {
     const r = await fetch(R.api + '/state' + (force ? '?force=1' : ''), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: sentBody });
-    if (r.status === 409) { // 서버가 보호: 서버 쪽 내용이 훨씬 많음
+    if (r.status === 409) { // 서버가 보호: 서버 쪽 내용이 훨씬 많거나, 빈 프롬프트로 덮으려 함
+      // 이 저장은 버려졌다. 로컬을 서버 것으로 맞춰 화면이 빈 채로 남지 않게 한다.
+      pullStateFromServer(true).catch(() => {});
       const j = await r.json().catch(() => ({}));
       if (R.protectShown) return; R.protectShown = true;
       openModal('⚠ 설정 덮어쓰기 보호', body => {
@@ -204,7 +206,22 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
     const tabBase = R.seenBase;
     const basedOnCurrent = rawBase != null && seenBase > 0 && seenBase === srv.savedAt
       && (tabBase == null || tabBase === srv.savedAt);
-    const localNewer = (S.savedAt || 0) >= srv.savedAt && !forceMerge;
+    /* 빈 쪽이 채워진 쪽을 이기는 일은 절대 없어야 한다.
+
+       서버가 아직 안 떴을 때 앱을 열면 3번 실패 뒤 '로컬만 사용' 으로 넘어간다(app.js srvLoop).
+       그 상태는 DEFAULTS(=빈 프롬프트)인데, 거기서 아무거나 한 번 건드리면 '지금' 시각이
+       찍혀 서버보다 최신이 된다. 서버가 뜨는 순간 그 빈 상태가 이겨 화면이 비고,
+       이어지는 저장이 서버의 프롬프트까지 지워버린다. 실제로 여러 번 났다.
+
+       반대로 "무조건 서버 우선" 으로 바꿨더니, 서버가 뒤처진 사람의 설정이 날아갔다.
+       그래서 판정은 시각대로 두되, '내용이 없는 쪽이 있는 쪽을 덮는' 경우만 막는다.
+       이 조건은 어느 방향으로도 데이터를 없애지 않는다. */
+    const hasText = o => !!((o.prompt || '').trim() || Object.values(o.secText || {}).some(v => (v || '').trim()));
+    const localBare = !hasText(S) && contentCount(S) === 0;
+    const srvHasStuff = hasText(srv) || contentCount(srv) > 0;
+    const localNewer = (S.savedAt || 0) >= srv.savedAt && !(localBare && srvHasStuff) && !forceMerge;
+    if (localBare && srvHasStuff && (S.savedAt || 0) >= srv.savedAt)
+      toast('이 브라우저가 빈 상태라 서버에 저장된 내용을 불러왔습니다');
     // 로컬이 이기는데 그 로컬이 지금 서버 버전을 보고 만든 게 아니면, 서버 쪽 설정이
     // 이 저장으로 덮인다 → 조용히 넘어가지 않고 알린다 (덮어쓰기는 그대로 진행).
     const diverged = localNewer && rawBase != null && !basedOnCurrent;
@@ -564,7 +581,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '11.19';   // 화면 표시용 앱 버전 (상단)
+const APP_VERSION = '11.20';   // 화면 표시용 앱 버전 (상단)
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 async function tryHealth(base) {
   try {
@@ -2047,7 +2064,19 @@ function init() {
 const NST = { last: null, genTimes: [], q: null };   // q = 그림 품질 캐시 (상단 표시등도 이 값을 본다)
 async function naiStatusLoop() {
   if (!R.srvOk) { setTimeout(naiStatusLoop, 3000); return; }
-  try { const r = await fetch(R.api + '/nai/status', { cache: 'no-store' }); if (r.ok) { NST.last = await r.json(); NST.at = Date.now(); paintNaiStatus(); } } catch (e) {}
+  /* 그림 품질도 여기서 잰다. 예전엔 상세창을 열 때만 쟀기 때문에, 품질이 빨강이어도
+     상단 표시등은 그 사실을 모른 채 초록이었다 (상세창은 빨강, 상단은 초록).
+     새 이미지가 생겼을 때만 다시 재서 매번 8장을 디코드하지 않게 한다. */
+  try {
+    const h = R.hist || [];
+    const key = h.length + '|' + (h.length ? (h[h.length - 1].t || h[h.length - 1].name || '') : '');
+    if (typeof qualityHealth === 'function' && key !== NST.qKey) {
+      NST.q = await qualityHealth(8).catch(() => null);
+      NST.qKey = key;
+    }
+  } catch (e) {}
+  try { const r = await fetch(R.api + '/nai/status', { cache: 'no-store' }); if (r.ok) { NST.last = await r.json(); NST.at = Date.now(); } } catch (e) {}
+  paintNaiStatus();
   setTimeout(naiStatusLoop, 120000);
 }
 const IMG_SVC = /image/i; // 공식 상태페이지의 "Image Generation" 항목
@@ -2214,7 +2243,7 @@ function genHealth() {
 function openNaiStatus() {
   openModal('NovelAI 상태 종합 판정', async body => {
     // 상세창을 열 때는 그림 품질을 새로 재서 캐시에 넣는다 (상단 표시등도 이 값을 쓴다)
-    if (typeof qualityHealth === 'function') NST.q = await qualityHealth(8).catch(() => null);
+    if (typeof qualityHealth === 'function') { NST.q = await qualityHealth(8).catch(() => null); paintNaiStatus(); }
     const s = NST.last || {};
     const o = s.official, img = officialImg(o);
     const ico = c => c == null ? '·' : c === 100 ? '🟢' : c >= 400 ? '🔴' : '🟡';
