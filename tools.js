@@ -1295,8 +1295,10 @@ function reproParams(j) {
     if (/^(image|mask|reference_|director_reference)/.test(k)) delete raw[k];
   }
   if (raw.uc != null && raw.negative_prompt == null) raw.negative_prompt = raw.uc;
-  // prompt/uc 는 parameters 가 아니라 본문 쪽 값이고, 장수·요청종류는 이 검증에서 우리가 정한다
-  delete raw.prompt; delete raw.uc; delete raw.request_type; delete raw.signed_hash; delete raw.n_samples;
+  /* NAI 가 메타에는 적지만 요청으로는 안 받는 것들. 그대로 보내면
+     "… is not allowed" 로 통째로 거절당한다. 장수·요청종류는 이 검증에서 우리가 정한다. */
+  for (const k of ['prompt', 'uc', 'request_type', 'signed_hash', 'n_samples',
+    'extra_passthrough_testing', 'hide_debug_overlay']) delete raw[k];
   return raw;
 }
 async function runRepro(file) {
@@ -1317,11 +1319,30 @@ async function runRepro(file) {
   const ruc = orig.uc != null ? orig.uc : cap(orig.v4_negative_prompt);
   const savedN = S.n; S.n = 1;
   let item = null;
-  try {
-    item = await doGenerate({ prompt: rprompt, uc: ruc, seed: orig.seed, n: 1, noQuality: true,
-      w: orig.width || S.w, h: orig.height || S.h, rawParams: reproParams(orig) }, '재현 검증');
-  } catch (e) { S.n = savedN; return; }
+  const raw = reproParams(orig), dropped = [];
+  /* NAI 가 안 받는 필드가 또 있으면 이름을 대 주므로, 그것만 빼고 다시 보낸다.
+     검증에서 걸린 요청은 Anlas 를 쓰지 않으니 다시 보내도 손해가 없다. */
+  for (let tryN = 0; tryN < 8; tryN++) {
+    try {
+      item = await doGenerate({ prompt: rprompt, uc: ruc, seed: orig.seed, n: 1, noQuality: true,
+        w: orig.width || S.w, h: orig.height || S.h, rawParams: raw }, '재현 검증');
+      break;
+    } catch (e) {
+      const m = /([\w.]+)\s+is not allowed/i.exec(e.message || '');
+      // "parameters.xxx" 처럼 앞에 경로가 붙어 올 수도 있다 — 마지막 조각으로도 한 번 더 본다
+      let key = m ? m[1] : '';
+      const has = k => k && Object.prototype.hasOwnProperty.call(raw, k);
+      if (!has(key) && key.includes('.')) key = key.split('.').pop();
+      if (has(key)) {
+        delete raw[key]; dropped.push(key);
+        $('#genStatus').textContent = `재현 검증 — NAI 가 안 받는 항목(${key}) 빼고 다시 시도…`;
+        continue;
+      }
+      S.n = savedN; return;
+    }
+  }
   S.n = savedN;
+  if (dropped.length) toast('NAI 가 안 받는 항목은 빼고 보냈습니다: ' + dropped.join(', '));
   if (!item) return;
   const a = await blobToImage(file), b = await blobToImage(item.blob);
   const w = Math.min(a.width, b.width, 512), h = Math.round(w * a.height / a.width);
@@ -1338,6 +1359,7 @@ async function runRepro(file) {
   openModal('재현 검증 결과', body => {
     body.innerHTML = `<div class="repro"><div><img src="${URL.createObjectURL(file)}"><div class="cap">NAI 웹 원본 ${a.width}×${a.height}</div></div><div><img src="${item.url}"><div class="cap">이 앱 생성 ${b.width}×${b.height}</div></div></div>
       <div><b>일치 픽셀 ${pct}%</b> · 평균 색차 ${mean.toFixed(1)}/255 · seed ${item.seed}</div><div class="hint">${verdict}</div>
+      ${dropped.length ? `<div class="hint">NAI 가 요청으로는 안 받는 항목이라 빼고 보냈습니다 — ${esc(dropped.join(', '))}</div>` : ''}
       <div class="row"><button class="btn sm" id="rpMeta">두 메타데이터 비교 보기</button></div><div id="rpDiff"></div>`;
     body.querySelector('#rpMeta').onclick = async () => {
       const j = orig;
