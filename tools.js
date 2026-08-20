@@ -47,8 +47,14 @@ function renderChunkBar(target) {
       const b = document.createElement('button'); b.className = 'chip';
       b.innerHTML = `<span class="cdot" style="background:${catColor(cat)}"></span>`;
       b.appendChild(document.createTextNode(c.name));
-      b.title = c.text + '\n\n클릭: 청크 태그 삽입 (생성 시 내용으로 치환) · Alt+클릭: 내용 그대로 · 우클릭: 편집';
-      b.onclick = e => { if (target && target.dataset.ta) R.lastTA = $('#' + target.dataset.ta); insertIntoPrompt(e.altKey ? c.text : c.name); };
+      /* 여러 줄짜리는 '조각' 이다 — <이름> 으로 넣어야 생성할 때마다 한 줄씩 뽑힌다.
+         예전엔 이름만 넣어서 118줄짜리 작가랜덤이 통째로 프롬프트에 들어갔다. */
+      const multi = (c.text || '').split('\n').filter(x => x.trim()).length > 1;
+      b.title = c.text + (multi
+        ? '\n\n여러 줄 조각 — 클릭: <이름> 삽입 (생성할 때마다 한 줄 랜덤) · Alt+클릭: 전체 내용 그대로'
+        : '\n\n클릭: 청크 태그 삽입 (생성 시 내용으로 치환) · Alt+클릭: 내용 그대로') + ' · 우클릭: 편집';
+      b.onclick = e => { if (target && target.dataset.ta) R.lastTA = $('#' + target.dataset.ta);
+        insertIntoPrompt(e.altKey ? c.text : (multi ? '<' + c.name + '>' : c.name)); };
       b.oncontextmenu = e => { e.preventDefault(); chunkMenu(e, c); };
       bar.appendChild(b);
     }
@@ -1131,7 +1137,11 @@ async function runDirector(req, label, srcItem) {
        예전엔 curItem() 으로 지금 히스토리에서 선택된 것을 집어와서, 스마트 툴에
        다른 이미지를 올려두면 엉뚱한 이미지의 프롬프트·씬·파일명이 붙었다. */
     const it = srcItem || curItem();
-    for (const b of await respImages(res)) { const item = await addToHistory(b, it ? it.meta : { parameters: {} }, label); if (S.autoSaveOn) autoSave(item); }
+    let last = null;
+    for (const b of await respImages(res)) { const item = await addToHistory(b, it ? it.meta : { parameters: {} }, label); last = item; if (S.autoSaveOn) autoSave(item); }
+    // 스마트 툴 탭에서 돌렸으면 결과를 그 화면에 바로 올려준다 (연달아 툴을 걸 수 있게).
+    // 예전엔 히스토리에만 들어가서, 방금 만든 결과가 아니라 원본에 다음 툴이 걸렸다.
+    if (last && S.mode === 'tools' && typeof stSet === 'function') stSet(last.blob, last.meta);
     setGenStatus(label + ' 완료'); refreshAnlas().catch(() => {});
   } catch (e) { setGenStatus('오류: ' + e.message); toast(e.message, 'err'); }
   finally { R.gen = false; $('#btnGen').disabled = false; }
@@ -1375,6 +1385,12 @@ function openBackup() {
             for (const k of ['ov', 'model', 'w', 'h', 'steps', 'scale', 'rescale', 'sampler', 'schedule', 'quality', 'ucPreset', 'variety', 'decrisper', 'autoNsfw', 'theme', 'autoMode', 'autoCount', 'autoDelay']) if (state[k] !== undefined && S[k] === DEFAULTS[k]) S[k] = state[k];
           }
           S.savedAt = Date.now(); save();
+          /* '덮어쓰기' 는 말 그대로 교체여야 한다. 평소 저장은 서버가 합집합으로 합치므로
+             지운 항목이 되살아나고, 개수가 줄면 보호 규칙에 걸려 아예 저장되지 않는다.
+             → 이 경우에만 force 로 밀어 넣는다. */
+          if (replace && typeof pushStateToServer === 'function') {
+            try { await pushStateToServer(true); } catch (e) {}
+          }
           if (config) {
             // 값이 있는 키만 보낸다 — 빈 문자열을 보내면 서버가 "지우기"로 해석해
             // 백업에 없던 NAI 토큰·유튜브 연결이 날아간다
@@ -1980,7 +1996,21 @@ function openUpdate() {
       dl.onclick = () => startUpdate(j, body);
       row.appendChild(dl);
     } else if (j.available && !j.frozen) {
-      msg.textContent = '소스로 실행 중입니다 — 저장소에서 새 버전을 직접 받아 덮어쓰세요.';
+      /* 소스로 돌리는 경우(start.bat)에도 버튼 하나로 끝나야 한다.
+         예전엔 "저장소에서 직접 받아 덮어쓰세요" 라고 안내만 해서 깃헙에 들어가야 했다.
+         → 저장소 압축본을 받아 앱 파일(js/html/css/py)만 갈아끼운다.
+         사용자 데이터(data/)와 설치분(vendor/ 등)은 건드리지 않고,
+         갈아끼우기 전 지금 파일을 data/backups/src-<시각>/ 에 넣어 되돌릴 수 있게 한다. */
+      if (j.zip) {
+        const dl = document.createElement('button'); dl.className = 'btn primary';
+        dl.textContent = `⬇ ${j.latest} 받아서 적용`;
+        dl.onclick = () => startSourceUpdate(j, body);
+        row.appendChild(dl);
+        msg.innerHTML = '<span class="hint">소스로 실행 중입니다 — 앱 파일만 갈아끼웁니다. '
+          + '설정·이미지(data 폴더)는 그대로이고, 바꾸기 전 파일은 백업해 둡니다.</span>';
+      } else {
+        msg.textContent = '소스로 실행 중입니다 — 저장소 주소를 확인할 수 없습니다.';
+      }
     } else if (j.available && !j.asset) {
       msg.textContent = '릴리스에 .exe 파일이 없습니다.';
     }
@@ -1989,6 +2019,39 @@ function openUpdate() {
     re.onclick = async () => { closeModal(); await updateCheck(false); };
     row.appendChild(re);
   });
+}
+async function startSourceUpdate(j, body) {
+  const bar = body.querySelector('#updBar'), fill = bar.querySelector('.upd-fill'), txt = bar.querySelector('.upd-txt');
+  const msg = body.querySelector('#updMsg'), row = body.querySelector('#updRow');
+  row.innerHTML = ''; bar.hidden = false; txt.textContent = '연결 중…';
+  try {
+    const r = await apiFetch('/update/source', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: j.zip, ver: j.latest }) });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).message || 'HTTP ' + r.status);
+  } catch (e) { msg.textContent = '✖ ' + e.message; bar.hidden = true; return; }
+  const poll = setInterval(async () => {
+    try {
+      const st = await (await apiFetch('/update/status')).json();
+      if (st.state === 'downloading') {
+        const pct = st.total ? Math.round(st.got / st.total * 100) : 0;
+        fill.style.width = (st.total ? pct : 50) + '%';
+        txt.textContent = st.total ? `${pct}% · ${(st.got / 1e6).toFixed(1)}/${(st.total / 1e6).toFixed(1)}MB` : '받는 중…';
+      } else if (st.state === 'ready') {
+        clearInterval(poll);
+        fill.style.width = '100%'; txt.textContent = '적용 완료';
+        msg.innerHTML = (st.msg ? escHtml(st.msg) + '<br>' : '')
+          + '<span class="hint">되돌리려면 data/backups 의 src-… 폴더를 다시 덮으면 됩니다.</span>';
+        const go = document.createElement('button'); go.className = 'btn go'; go.textContent = '✔ 지금 재시작';
+        go.onclick = async () => {
+          go.disabled = true; msg.textContent = '재시작 중… 잠시 후 새 창이 열립니다.';
+          try { await apiFetch('/update/restart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch (e) {}
+        };
+        row.innerHTML = ''; row.appendChild(go);
+      } else if (st.state === 'error') {
+        clearInterval(poll); bar.hidden = true; msg.textContent = '✖ ' + (st.msg || '실패');
+      }
+    } catch (e) { clearInterval(poll); msg.textContent = '✖ ' + e.message; }
+  }, 400);
 }
 async function startUpdate(j, body) {
   const bar = body.querySelector('#updBar'), fill = bar.querySelector('.upd-fill'), txt = bar.querySelector('.upd-txt');

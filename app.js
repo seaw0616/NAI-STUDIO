@@ -311,12 +311,25 @@ function expandWild(s, peek, depth) {
     const t = inner.trim();
     if (t.includes('|')) {            // <a|b|c>
       const opts = t.split('|').map(o => o.trim()).filter(Boolean);
-      return opts.length ? opts[Math.floor(Math.random() * opts.length)] : m;
+      if (!opts.length) return m;
+      /* 뽑힌 값이 청크 이름이면 그것도 풀어야 한다. 예전엔 그대로 내보내서 청크 이름이
+         태그인 척 NAI 로 나갔다. 이름이면 <이름> 으로 다시 태워, 여러 줄 조각일 때
+         전부가 아니라 한 줄만 뽑히게 한다. */
+      const pick = opts[Math.floor(Math.random() * opts.length)];
+      const isChunk = S.chunks.some(c => normKey(c.name) === normKey(pick));
+      return isChunk ? expandWild('<' + pick + '>', peek, depth + 1)
+                     : expandWild(chunksKeepTags(pick), peek, depth + 1);
     }
     const seq = t.startsWith('*'), name = (seq ? t.slice(1) : t).trim().replace(/\s*\/\s*/g, '/');
     if (!name) return m;
     const lines = fragLines(name);
-    if (!lines) return m;             // 없는 조각은 원본 유지
+    if (!lines) {
+      /* 여러 줄이 아니면 조각이 아니다. 그래도 <이름> 으로 부른 이상 내용으로 바꿔줘야
+         한다 — 예전엔 꺾쇠째 남아 "<작태>" 가 그대로 프롬프트에 실려 나갔다. */
+      const one = S.chunks.find(c => normKey(c.name) === normKey(name));
+      if (!one) return m;             // 없는 이름은 원본 유지
+      return expandWild(chunksKeepTags(String(one.text || '').trim()), peek, depth + 1);
+    }
     let line;
     if (seq) {
       const i = SEQ[normKey(name)] || 0;
@@ -348,18 +361,24 @@ function expandWild(s, peek, depth) {
 /* 청크 치환: 프롬프트의 토큰(쉼표/줄바꿈/괄호로 구분)이 청크 이름과 같으면 내용으로 바뀜. @이름 형식도 계속 지원 */
 const normKey = s => String(s || '').trim().toLowerCase().replace(/[\s_]+/g, '_'); // 띄어쓰기/밑줄 차이 무시
 function chunkMap() { const m = {}; for (const c of S.chunks) if (c.name) m[normKey(c.name)] = c.text; return m; }
-function expandChunks(s, depth) {
+function expandChunks(s, depth, active) {
+  /* 청크 안에서 다른 청크를 부르는 건 되지만, 자기 자신(또는 돌아오는 참조)은 막아야 한다.
+     예전엔 바꾼 결과를 처음부터 다시 훑어서, 이름을 본문에 포함한 청크가 깊이 한도(5)만큼
+     겹겹이 복제됐다 — 한 번 쓴 이름이 여섯 번 들어가는 식이었다.
+     이제는 치환한 자리에서 바로 안쪽만 풀고, 지금 풀고 있는 이름은 건너뛴다. */
   depth = depth || 0;
+  active = active || new Set();
   if (depth > 5 || !S.chunks.length) return s;
   const map = chunkMap();
-  const out = s.replace(/([^,\n{}\[\]<>|]+)/g, seg => {
+  return String(s).replace(/([^,\n{}\[\]<>|]+)/g, seg => {
     const m = seg.match(/^(\s*)(-?[\d.]+::)?(@?)(.*?)(::)?(\s*)$/);
     if (!m) return seg;
     const key = normKey(m[4]);
-    if (!key || !(key in map)) return seg;
-    return m[1] + (m[2] || '') + map[key] + (m[5] || '') + m[6];
+    if (!key || !(key in map) || active.has(key)) return seg;
+    const next = new Set(active); next.add(key);
+    const inner = expandChunks(map[key], depth + 1, next);
+    return m[1] + (m[2] || '') + inner + (m[5] || '') + m[6];
   });
-  return out === s ? s : expandChunks(out, depth + 1);
 }
 function isChunkToken(tok) { const t = normKey(tok.replace(/^-?[\d.]+::/, '').replace(/::$/, '').replace(/^@/, '')); return !!t && S.chunks.some(c => normKey(c.name) === t); }
 /* 최종 프롬프트에서 두 번 이상 나오는 태그를 찾는다.
@@ -1407,12 +1426,27 @@ function renderVibes() {
 }
 async function addVibe(blob) {
   if (R.vibes.length >= 4) { toast('바이브는 최대 4개', 'err'); return; }
-  R.vibes.push({ b64: await blobToB64(blob), thumb: URL.createObjectURL(blob), strength: 0.6, ie: 1, enc: null, state: '대기 (생성 시 인코딩)', stateCls: '' });
+  const b64 = await blobToB64(blob);
+  // 여러 장을 한 번에 넣으면 위 검사는 전부 통과한 뒤에야 push 가 일어난다 → 넣기 직전에 다시 센다
+  if (R.vibes.length >= 4) { toast('바이브는 최대 4개', 'err'); return; }
+  R.vibes.push({ b64, thumb: URL.createObjectURL(blob), strength: 0.6, ie: 1, enc: null, state: '대기 (생성 시 인코딩)', stateCls: '' });
   renderVibes(); switchRefTab('vibe');
 }
 /* 바이브 라이브러리 — 인코딩 결과(모델·IE별)를 저장해 재사용 (인코딩 Anlas 절약) · .naiv4vibe 가져오기 */
 async function vibeLibAll() { return (await idbGet('vibelib')) || []; }
 async function vibeLibSave(list) { await idbSet('vibelib', list); }
+/* 라이브러리는 '읽고 → 고치고 → 쓰기' 라, 여러 파일을 한 번에 넣으면 모두 같은 옛 목록을
+   읽어가 마지막 하나만 남는다. 갱신은 한 줄로 세워서 처리한다. */
+let _vibeLibQ = Promise.resolve();
+function vibeLibUpdate(fn) {
+  _vibeLibQ = _vibeLibQ.then(async () => {
+    const cur = await vibeLibAll();
+    const next = await fn(cur);
+    if (next) await vibeLibSave(next);
+    return next;
+  }).catch(e => { logErr('바이브 라이브러리 저장 실패: ' + e.message); });
+  return _vibeLibQ;
+}
 async function saveVibeToLib(v) {
   const name = prompt('바이브 이름', v.libName || ''); if (name == null) return;
   if (!v.enc && MODELS[S.model].ver >= 40) { toast('인코딩 중… (Anlas 소량)'); await ensureVibes(); if (!v.enc) { toast('인코딩 실패로 저장 못 함', 'err'); return; } }
@@ -1509,7 +1543,10 @@ function renderPrefs() {
 async function addPref(blob) {
   if (MODELS[S.model].ver < 45) { toast('Precise Reference는 V4.5 모델에서만 사용 가능합니다', 'err'); return; }
   if (R.prefs.length >= 4) { toast('레퍼런스는 최대 4개', 'err'); return; }
-  R.prefs.push({ b64: await blobToB64Letterbox(blob), thumb: URL.createObjectURL(blob), type: 'character', strength: 1, fidelity: 0.75 });
+  const pb64 = await blobToB64Letterbox(blob);
+  // await 사이에 다른 파일이 먼저 들어갔을 수 있다 → 넣기 직전에 다시 센다
+  if (R.prefs.length >= 4) { toast('레퍼런스는 최대 4개', 'err'); return; }
+  R.prefs.push({ b64: pb64, thumb: URL.createObjectURL(blob), type: 'character', strength: 1, fidelity: 0.75 });
   renderPrefs(); switchRefTab('pref');
 }
 
@@ -1976,12 +2013,17 @@ function init() {
   document.addEventListener('keydown', e => {
     const typing = /input|textarea|select/i.test(document.activeElement.tagName);
     if (e.ctrlKey && e.key === 'Enter') {   // 씬 모드에선 현재 씬 생성
+      // 모달(AI 프롬프트 창 등)이 열려 있으면 그 창의 일이다 — 뒤에서 생성이 같이 돌면 안 된다
+      if (!$('#modalOverlay').hidden) return;
       e.preventDefault();
       if (S.mode === 'scene') { const b = $('#scRun'); if (b && !b.disabled) b.click(); } else if (S.mode === 'main') genClick();
       return;
     }
     if (!$('#modalOverlay').hidden || typing) return;
     if (S.mode !== 'main') return;   // 뷰어 단축키는 메인에서만 (씬/라이브러리의 다른 이미지에 오작동하던 문제)
+    // Ctrl/Alt/Meta 가 눌린 조합은 브라우저·앱의 다른 단축키다. 걸러내지 않으면
+    // Ctrl+F(찾기) 가 즐겨찾기를 토글하는 식으로 오작동한다.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === 'ArrowLeft') stepImage(-1); if (e.key === 'ArrowRight') stepImage(1);
     if (e.key === 'Delete') deleteCur(); if (e.key === 'f' || e.key === 'F') toggleFav();
   });

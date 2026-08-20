@@ -121,7 +121,17 @@ function openCharLibrary() {
           <textarea class="ac" rows="2" placeholder="프롬프트"></textarea><textarea class="ac" rows="1" placeholder="네거티브 (선택)"></textarea>`;
         const [n, p, u] = [d.querySelector('.st-name'), d.querySelectorAll('textarea')[0], d.querySelectorAll('textarea')[1]];
         n.value = ch.name; p.value = ch.prompt || ''; u.value = ch.uc || '';
-        n.oninput = () => { ch.name = n.value; save(); }; p.oninput = () => { ch.prompt = p.value; save(); }; u.oninput = () => { ch.uc = u.value; save(); };
+        /* 이름을 바꾸면 옛 이름을 '지웠다'고 남겨야 한다. 안 그러면 서버 병합이 옛 이름
+           캐릭터를 되살려 중복이 생긴다 (청크는 처리했는데 캐릭터만 빠져 있었다).
+           타자 도중(oninput)이 아니라 다 치고 난 뒤(onchange)에 한 번만 남긴다 —
+           안 그러면 'a','ab','abc' 처럼 중간 이름까지 전부 톰스톤이 박힌다. */
+        n.dataset.orig = ch.name || '';
+        n.oninput = () => { ch.name = n.value; save(); };
+        n.onchange = () => {
+          const oldName = n.dataset.orig;
+          if (oldName && oldName.trim() && oldName !== ch.name) tomb('char', oldName);
+          n.dataset.orig = ch.name || ''; save();
+        }; p.oninput = () => { ch.prompt = p.value; save(); }; u.oninput = () => { ch.uc = u.value; save(); };
         d.querySelector('[data-a="main"]').onclick = () => { S.chars.push({ prompt: ch.prompt, uc: ch.uc || '', x: null, y: null, libId: ch.id }); save(); renderChars(); toast('메인 캐릭터에 추가'); };
         d.querySelector('[data-a="chunk"]').onclick = () => { const name = ch.name.replace(/\s+/g, '_'); const ex = S.chunks.find(c => c.name === name); if (ex) ex.text = ch.prompt; else S.chunks.push({ name, text: ch.prompt, cat: '캐릭터', createdAt: Date.now() }); save(); renderChunkBar(); toast('청크 @' + name + ' 저장'); };
         d.querySelector('[data-a="del"]').onclick = () => { tomb('char', ch.name); S.characters.splice(i, 1); save(); draw(); };
@@ -169,7 +179,9 @@ function sceneOv(sc) { // 씬 → 생성 오버라이드
     prompt: expandAll(joinParts(st && st.prefix, mainP, sc.prompt.trim(), st && st.suffix)),
     ucExtra: joinParts(st && expandAll(st.uc || ''), expandAll(mainUc), expandAll((sc.uc || '').trim())),   // 프리셋+auto-nsfw 조립은 buildPayload 가 담당 (메인과 동일 규칙)
     sceneId: sc.id, sceneName: sc.name, n: 1, style: st || null,
-    chars: mainChars.concat((sc.chars || []).filter(c => c.prompt && c.prompt.trim())),
+    // NAI 는 캐릭터를 6명까지만 받는다. 메인 캐릭터와 씬 캐릭터를 그냥 더하면 넘어가서
+    // 요청 자체가 거절된다 → 앞에서부터 6명까지만 보낸다.
+    chars: mainChars.concat((sc.chars || []).filter(c => c.prompt && c.prompt.trim())).slice(0, 6),
     // 씬 모드에선 왼쪽 패널이 숨겨져 i2i/마스크가 보이지도, 해제되지도 않는다.
     // 이걸 막지 않으면 메인에 남아 있던 이미지 때문에 모든 씬이 img2img·인페인트로 나간다.
     noRef: true,

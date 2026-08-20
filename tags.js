@@ -157,7 +157,11 @@ function tagSearchLocal(q, limit, cat, maxCand) {
       else if (tag.includes(qSp)) score = 300;
       else if (kwn.some(k => k.includes(qNoSp))) score = 250;
       out.push([score, r]);
-      if (out.length >= cap) break;
+      /* 상한은 점수를 매기기 전에 자르므로, 뒤에 덧붙인 보강 사전 태그는 완전 일치라도
+         잘려나갔다(예: uniform 10만건이 자동완성에 안 떴다).
+         → 높은 점수(정확/앞부분 일치)를 만나면 상한을 조금 넉넉히 봐준다. */
+      if (out.length >= cap && score < 400) break;
+      if (out.length >= cap * 2) break;
     }
     return out;
   };
@@ -172,16 +176,28 @@ function tagSearchLocal(q, limit, cat, maxCand) {
       out = bucket ? scan(bucket) : [];
     }
   }
-  // 인덱스로 한 건도 못 찾았을 때만 전체 스캔 (단어 중간에 걸리는 일치를 위해).
-  // "결과가 limit 보다 적으면" 으로 두면 wlop 처럼 답이 1개인 질의마다 20만 행을 훑어 80ms 씩 멈춘다.
-  if (!out || !out.length) {
-    // 한 단어짜리 질의가 전체 스캔에서도 0건이었다면, 거기에 글자를 더 붙인 질의는 반드시 0건이다
-    // (모든 항이 부분문자열로 포함돼야 하므로) → 타이핑 중 매 글자마다 20만 행을 훑는 낭비를 막는다
+  /* 인덱스는 "단어 시작" 기준이라 단어 중간 일치(eyes 안의 yes)와 한글 별칭 일부를 놓친다.
+     예전엔 인덱스에서 한 건이라도 걸리면 전체 스캔을 통째로 건너뛰어서, 정답이 있는데도
+     엉뚱한 한 건만 보여줬다. 그렇다고 매번 20만 행을 훑으면 타이핑이 끊긴다.
+     → 인덱스 결과가 넉넉하면(8건 이상) 그대로 쓰고, 부족할 때만 전체를 훑는다. */
+  const ENOUGH = Math.min(limit || 20, 8);
+  if (!out || out.length < ENOUGH) {
+    /* 한 단어짜리 질의가 전체 스캔에서도 0건이었다면, 거기에 글자를 더 붙인 질의도 0건이다
+       (모든 항이 부분문자열로 포함돼야 하므로) → 타이핑 중 매 글자마다 훑는 낭비를 막는다.
+       단 이 기억은 '그때 그 카테고리 안에서 0건' 이라는 뜻이다. 카테고리를 같이 적어두지
+       않으면, 작가 칩으로 한 번 검색한 단어가 세션 내내 전 영역에서 0건이 돼버린다. */
     const dead = TAGDB.deadQ;
-    if (terms.length === 1 && dead && q.startsWith(dead)) return [];
-    out = scan(null);
-    if (terms.length === 1 && !out.length) TAGDB.deadQ = q;
-    else if (out.length) TAGDB.deadQ = null;
+    if (terms.length === 1 && dead && dead.cat === cat && q.startsWith(dead.q)) return [];
+    const full = scan(null);
+    if (full.length) {
+      // 인덱스 결과와 합치되 같은 행이 두 번 들어가지 않게
+      const seen = new Set((out || []).map(x => x[1]));
+      out = (out || []).concat(full.filter(x => !seen.has(x[1])));
+      TAGDB.deadQ = null;
+    } else if (terms.length === 1 && !(out && out.length)) {
+      TAGDB.deadQ = { q, cat };
+    }
+    out = out || [];
   }
   out.sort((a, b) => b[0] - a[0] || b[1][2] - a[1][2]);
   return out.slice(0, limit).map(x => x[1]);
@@ -464,7 +480,9 @@ function openTagSearch(initial) {
         const qq = q.value.trim().toLowerCase().replace(/_/g, ' ');
         rows = TAGDB.groups[grp].map(t => TAGDB.map.get(t)).filter(Boolean)
           .filter(r => cat == null || r[1] === cat)
-          .filter(r => !qq || r[6].includes(qq))
+          // r[6] 은 공백이 살아있는 원문, r[7] 은 공백을 뺀 것.
+          // 한글 별칭은 "흰 머리" 처럼 띄어져 있어서 r[6] 만 보면 "흰머리" 가 안 걸린다.
+          .filter(r => !qq || r[6].includes(qq) || r[7].includes(qq.replace(/[\s,]/g, '')))
           .sort((a, b) => b[2] - a[2]).slice(0, 300);
       } else rows = tagSearchLocal(q.value, 300, cat);
       list.innerHTML = '';
@@ -546,6 +564,16 @@ function countTokens(text) {
 function adjustWeight(ta, dir) {
   const v = ta.value; let a = ta.selectionStart, b = ta.selectionEnd;
   if (a === b) { // 커서가 있는 토큰 범위 (쉼표·줄바꿈·괄호를 경계로)
+    /* 먼저 `1.2::red hair, blue eyes::` 처럼 여러 태그를 한 묶음으로 감싼 V4 가중치 안인지
+       본다. 쉼표를 경계로 삼으면 묶음 한가운데가 잘려, 잘린 조각에 가중치를 또 씌우고
+       :: 짝이 어긋난다 (되돌리기도 안 된다). 묶음 안이면 묶음 전체를 대상으로 잡는다. */
+    const GROUP = /(-?[\d.]+)::([^:]*?)::/g;
+    let g;
+    while ((g = GROUP.exec(v))) {
+      if (a > g.index && a < g.index + g[0].length) { a = g.index; b = g.index + g[0].length; break; }
+    }
+  }
+  if (a === b) {
     const DELIM = /[,\n{}[\]<>|]/;
     while (a > 0 && !DELIM.test(v[a - 1])) a--;
     while (b < v.length && !DELIM.test(v[b])) b++;
