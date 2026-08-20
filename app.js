@@ -123,8 +123,16 @@ function save() {
   if (typeof updatePreview === 'function') updatePreview();
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => localStorage.setItem('nst_state', JSON.stringify(S)), 250);
-  if (R.booted) { clearTimeout(pushTimer); pushTimer = setTimeout(() => pushStateToServer(), 1200); }
+  if (R.booted) {
+    clearTimeout(pushTimer);
+    // force: 사용자가 "일부러" 비운 경우. 서버의 빈-프롬프트 보호는 사고를 막으려는 것이지
+    // 사용자가 직접 지우는 것까지 막으려는 게 아니다 (막으면 비우기가 아예 불가능해진다).
+    const f = R._forcePush; R._forcePush = false;
+    pushTimer = setTimeout(() => pushStateToServer(f), 1200);
+  }
 }
+/* 사용자가 직접 지운 뒤 부르는 저장 — 서버 보호를 넘어 그대로 반영한다 */
+function saveCleared() { R._forcePush = true; save(); }
 const contentCount = s => ['chunks', 'styles', 'characters', 'scenes'].reduce((a, k) => a + ((s && s[k] && s[k].length) || 0), 0);
 async function pushStateToServer(force) {
   if (!R.srvOk || !R.booted) return;
@@ -135,18 +143,25 @@ async function pushStateToServer(force) {
   try {
     const r = await fetch(R.api + '/state' + (force ? '?force=1' : ''), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: sentBody });
     if (r.status === 409) { // 서버가 보호: 서버 쪽 내용이 훨씬 많거나, 빈 프롬프트로 덮으려 함
-      // 이 저장은 버려졌다. 로컬을 서버 것으로 맞춰 화면이 빈 채로 남지 않게 한다.
-      pullStateFromServer(true).catch(() => {});
       const j = await r.json().catch(() => ({}));
+      const emptyPrompt = j.message === 'protected-prompt';
+      /* 개수 보호는 "빈 브라우저가 덮어쓰는 사고" 를 막는 것이라 화면을 서버 것으로 맞추는 게 맞다.
+         하지만 빈-프롬프트 보호는 사용자가 방금 지운 것일 수도 있다.
+         그때 서버 것을 끌어오면 지운 프롬프트가 눈앞에서 되살아난다 → 물어보고 나서 정한다. */
+      if (!emptyPrompt) pullStateFromServer(true).catch(() => {});
       if (R.protectShown) return; R.protectShown = true;
-      openModal('⚠ 설정 덮어쓰기 보호', body => {
-        body.innerHTML = `<div class="hint">서버에 저장된 설정(청크·스타일·캐릭터·씬 합계 <b>${j.serverCount}</b>개)이 이 화면의 설정(<b>${j.incomingCount}</b>개)보다 훨씬 많아 자동 덮어쓰기를 막았습니다. 다른 브라우저/창에서 만든 설정일 수 있습니다.</div>
-          <div class="row"><button class="btn primary" id="spPull">서버 설정을 가져와 합치기 (권장)</button><button class="btn danger sm" id="spForce">그래도 이 화면의 설정으로 덮어쓰기</button></div>`;
+      openModal(emptyPrompt ? '⚠ 프롬프트가 비어 있습니다' : '⚠ 설정 덮어쓰기 보호', body => {
+        body.innerHTML = emptyPrompt
+          ? `<div class="hint">이 화면의 프롬프트가 비어 있어서, 서버에 저장돼 있던 프롬프트를 덮어쓰지 않았습니다.<br>
+              앱을 켜자마자 서버가 늦게 떠서 화면이 잠깐 빈 경우를 막기 위한 장치입니다.</div>
+             <div class="row"><button class="btn primary" id="spPull">서버에 있던 프롬프트 가져오기 (권장)</button><button class="btn danger sm" id="spForce">비운 채로 저장</button></div>`
+          : `<div class="hint">서버에 저장된 설정(청크·스타일·캐릭터·씬 합계 <b>${j.serverCount}</b>개)이 이 화면의 설정(<b>${j.incomingCount}</b>개)보다 훨씬 많아 자동 덮어쓰기를 막았습니다. 다른 브라우저/창에서 만든 설정일 수 있습니다.</div>
+             <div class="row"><button class="btn primary" id="spPull">서버 설정을 가져와 합치기 (권장)</button><button class="btn danger sm" id="spForce">그래도 이 화면의 설정으로 덮어쓰기</button></div>`;
         body.querySelector('#spPull').onclick = async () => { closeModal(); R.protectShown = false; await pullStateFromServer(true); };
-        body.querySelector('#spForce').onclick = async () => { closeModal(); R.protectShown = false; await pushStateToServer(true); toast('서버 설정을 덮어썼습니다'); };
+        body.querySelector('#spForce').onclick = async () => { closeModal(); R.protectShown = false; await pushStateToServer(true); toast(emptyPrompt ? '비운 채로 저장했습니다' : '서버 설정을 덮어썼습니다'); };
         // ✕/Esc/바깥 클릭으로 닫아도 플래그를 풀어야 한다 — 안 그러면 그 세션 내내 서버 저장이 조용히 막힌다
       }, false, () => { R.protectShown = false; });
-      R.stateSynced = false; logErr('서버 저장 보류(덮어쓰기 보호)');
+      R.stateSynced = false; logErr('서버 저장 보류(' + (emptyPrompt ? '빈 프롬프트' : '덮어쓰기') + ' 보호)');
       return;
     }
     if (!r.ok && r.status !== 409) { R.stateSynced = false; logErr('설정 서버 저장 실패 ' + r.status); }
@@ -162,6 +177,15 @@ function tomb(kind, key) {
   S.deleted[kind + '|' + String(key).toLowerCase()] = Date.now();
   const ks = Object.keys(S.deleted);
   if (ks.length > 400) { ks.sort((a, b) => S.deleted[a] - S.deleted[b]).slice(0, ks.length - 400).forEach(k => delete S.deleted[k]); }
+}
+/* 삭제 기록을 걷어낸다 — 그 이름을 "다시 쓰기로 했다" 는 뜻.
+   값을 지우는 게 아니라 0 으로 둬야 서버 병합에서도 옛 기록을 이긴다
+   (서버는 cur 과 inc 의 deleted 를 합치므로, 키를 없애면 서버 것이 그대로 살아난다).
+   이게 없으면 이름을 A→B→A 로 되돌렸을 때 A 의 옛 삭제 기록에 걸려 항목이 통째로 사라진다. */
+function untomb(kind, key) {
+  if (!key) return;
+  S.deleted = S.deleted || {};
+  S.deleted[kind + '|' + String(key).toLowerCase()] = 0;
 }
 /* 삭제 기록(톰스톤) 판정.
    item 을 같이 넘기면 "톰스톤보다 나중에 만든 항목"은 살려둔다 — 지운 이름을 다시 쓰는 건
@@ -264,13 +288,47 @@ const R = {
 
 /* ─────────────── 유틸 ─────────────── */
 const ERRLOG = [];
-function logErr(msg) { ERRLOG.push({ t: new Date().toLocaleTimeString(), msg: String(msg) }); if (ERRLOG.length > 30) ERRLOG.shift(); }
-function toast(msg, type) {
+function logErr(msg, extra) {
+  ERRLOG.push({ t: new Date().toLocaleTimeString(), msg: String(msg) });
+  if (ERRLOG.length > 30) ERRLOG.shift();
+  sendErr('app', msg, extra);
+}
+/* 오류를 서버(data/errors.jsonl)에 남긴다. 새로고침하면 사라지던 걸 남겨 두어야
+   나중에 "언제 무슨 오류가 났는지" 를 볼 수 있고, 보고도 보낼 수 있다.
+   토큰·키·경로 같은 건 서버가 지운 뒤 저장한다. 여기서 실패해도 앱은 그대로 돌아야 한다. */
+const _errQ = [];
+let _errT = null;
+function sendErr(kind, msg, extra) {
+  try {
+    if (!R.srvOk) return;
+    /* 오류가 몰릴 때 요청을 쏟아내면 안 되지만, 그렇다고 서로 다른 오류를 버려서도 안 된다.
+       (처음엔 300ms 안의 것을 그냥 버렸는데, 연달아 난 세 개 중 하나만 남았다)
+       → 줄을 세워 두고 잠깐 뒤에 묶어 보낸다. */
+    if (_errQ.length >= 40) return;         // 무한 루프로 오류가 쏟아지는 경우의 상한
+    _errQ.push({
+      kind, msg: String(msg).slice(0, 1500),
+      where: (extra && extra.where) || '', stack: (extra && extra.stack) || '',
+      ver: (typeof APP_VERSION !== 'undefined' ? APP_VERSION : ''),
+      ua: navigator.userAgent.slice(0, 200),
+    });
+    if (_errT) return;
+    _errT = setTimeout(() => {
+      _errT = null;
+      const batch = _errQ.splice(0, _errQ.length);
+      for (const b of batch) {
+        fetch(R.api + '/errors', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b),
+        }).catch(() => {});
+      }
+    }, 400);
+  } catch (e) { /* 보고 실패로 앱이 멈추면 안 된다 */ }
+}
+function toast(msg, type, extra) {
   const t = document.createElement('div');
   t.className = 'toast' + (type === 'err' ? ' err' : '');
   t.textContent = msg;
   $('#toasts').appendChild(t);
-  if (type === 'err') logErr(msg);
+  if (type === 'err') logErr(msg, extra);   // extra: { where, stack } — 기록에 함께 남는다
   setTimeout(() => t.remove(), type === 'err' ? 6500 : 3000);
 }
 function bufToB64(buf) {
@@ -672,6 +730,7 @@ async function srvLoop() {
   // 서버가 10분마다 GitHub 를 확인해 /health 에 실어 준다. srvLoop 는 15초마다 도므로
   // 새 버전이 올라오면 몇 초 안에 버튼이 뜬다 (예전엔 앱이 6시간에 한 번만 물어봤다).
   if (info && info.upd) applyUpdInfo(info.upd);
+  applyHealth(info);
   R.srvOkPrev = R.srvOk;
   setTimeout(srvLoop, R.srvOk ? 15000 : 3000);
 }
@@ -686,6 +745,19 @@ function applyUpdInfo(u) {
     S.updSeen = u.latest; save();
     if (typeof toast === 'function') toast(`새 버전 ${u.latest} 이 나왔습니다 — 상단 ⬆ 버튼으로 받으세요`);
   }
+}
+/* 서버가 스스로 돌린 점검에서 걸린 것 — 있을 때만 상단에 버튼이 뜬다.
+   평소엔 아무것도 안 보이는 게 맞다 (늘 떠 있으면 아무도 안 본다). */
+function applyHealth(info) {
+  const b = document.getElementById('btnHealth');
+  if (!b) return;
+  const probs = (info && info.problems) || [];
+  b.hidden = !probs.length;
+  if (probs.length) {
+    b.textContent = `⚠ 점검 ${probs.length}`;
+    b.title = probs.map(p => p.name + (p.detail ? ' — ' + p.detail : '')).join('\n');
+    if (R._healthSeen !== probs.length) { R._healthSeen = probs.length; toast('점검에서 문제가 발견됐습니다 — 상단 ⚠ 버튼을 눌러 보세요', 'err'); }
+  } else R._healthSeen = 0;
 }
 function authHeaders(json) {
   const h = {};
@@ -1758,6 +1830,15 @@ function openSettings() {
       <div class="hint">지정한 저장소의 최신 릴리스를 6시간마다 확인하고, 새 버전이 있으면 상단에 ⬆ 버튼이 뜹니다.</div>
       <div class="row"><button class="btn primary sm" id="mUpdSave">저장</button><button class="btn sm" id="mUpdNow">지금 확인</button><span class="hint" id="mUpdState"></span></div>
       <hr>
+      <div class="mtitle">점검 · 오류 보고</div>
+      <div class="hint">앱이 켜져 있는 동안 <b>10분마다 스스로 점검</b>합니다(설정 파일·저장 공간·연결). 오류가 나면 <code>data/errors.jsonl</code> 에 남고, 토큰·키·개인 경로는 남기기 전에 지웁니다.</div>
+      <div class="row"><button class="btn primary sm" id="mHealthOpen">🩺 점검 결과 · 오류 기록 보기</button></div>
+      <input type="password" id="mGh" placeholder="(선택) 깃헙 토큰 — 넣으면 보고가 버튼 하나로 올라갑니다" autocomplete="off">
+      <div class="hint">안 넣어도 됩니다. 없으면 <b>보고 내용이 채워진 깃헙 이슈 창</b>이 열려서, 확인하고 올리면 됩니다.<br>
+        넣을 경우 권한은 <b>Issues 쓰기만</b> 주세요 (Fine-grained token → 해당 저장소 → Issues: Read and write).
+        이 토큰은 <b>이 PC 의 data/config.json 에만</b> 저장되고 배포본에는 들어가지 않습니다.</div>
+      <div class="row"><button class="btn primary sm" id="mGhSave">토큰 저장</button><button class="btn sm danger" id="mGhDel">삭제</button><span class="hint" id="mGhState"></span></div>
+      <hr>
       <div class="mtitle">Gemini API 키 <span class="hint">(✨ AI 프롬프트 생성용 · 선택)</span></div>
       <input type="password" id="mGem" placeholder="AIza… — Google AI Studio 에서 발급" autocomplete="off">
       <div class="hint">aistudio.google.com/apikey 에서 무료로 발급받습니다. 키도 <b>서버 파일에만</b> 저장되고 브라우저로 내려오지 않습니다.</div>
@@ -1798,6 +1879,28 @@ function openSettings() {
         updSt.textContent = '저장됨'; toast('업데이트 저장소를 저장했습니다');
       } catch (e) { updSt.textContent = '실패: ' + e.message; }
     };
+    {
+      const ghSt = body.querySelector('#mGhState');
+      ghSt.textContent = (R.srvInfo && R.srvInfo.hasGhToken) ? '저장되어 있음 (자동 보고 켜짐)' : '없음 — 보고는 깃헙 창을 열어서 보냅니다';
+      body.querySelector('#mHealthOpen').onclick = () => { closeModal(); if (typeof openHealth === 'function') openHealth(); };
+      body.querySelector('#mGhSave').onclick = async () => {
+        const v = body.querySelector('#mGh').value.trim();
+        if (!v) { ghSt.textContent = '토큰을 붙여넣어 주세요'; return; }
+        try {
+          await apiFetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ghToken: v }) });
+          R.srvInfo = { ...(R.srvInfo || {}), hasGhToken: true };
+          body.querySelector('#mGh').value = '';
+          ghSt.textContent = '저장됨 — 이제 보고가 바로 올라갑니다'; toast('깃헙 토큰을 저장했습니다 (이 PC 에만 남습니다)');
+        } catch (e) { ghSt.textContent = '실패: ' + e.message; }
+      };
+      body.querySelector('#mGhDel').onclick = async () => {
+        try {
+          await apiFetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ghToken: '' }) });
+          R.srvInfo = { ...(R.srvInfo || {}), hasGhToken: false };
+          ghSt.textContent = '삭제됨';
+        } catch (e) { ghSt.textContent = '실패: ' + e.message; }
+      };
+    }
     body.querySelector('#mUpdNow').onclick = async () => {
       updSt.textContent = '확인 중…';
       const j = typeof updateCheck === 'function' ? await updateCheck(false) : null;
@@ -2001,7 +2104,8 @@ function init() {
   $('#btnResetPreset').onclick = () => { delete S.ov[S.model]; syncAdvanced(); save(); toast('프리셋 기본값 복원'); };
   $('#prompt').addEventListener('input', () => { S.prompt = $('#prompt').value; save(); });
   $('#uc').addEventListener('input', () => { S.uc = $('#uc').value; save(); });
-  $('#btnPromptClear').onclick = () => { S.prompt = ''; S.secText = {}; $('#prompt').value = ''; renderSections(); save(); };
+  // 사용자가 직접 지운 것이므로 서버 보호를 넘어 그대로 반영한다 (안 그러면 곧바로 되살아난다)
+  $('#btnPromptClear').onclick = () => { S.prompt = ''; S.secText = {}; $('#prompt').value = ''; renderSections(); saveCleared(); };
   $('#btnSecEdit').onclick = openSectionEditor;
   $$('#autoModeSeg button').forEach(b => b.onclick = () => { S.autoMode = b.dataset.m; save(); syncUI(); });
   $('#contGen').onchange = () => setAutoUI(R.auto.on);
@@ -2358,8 +2462,18 @@ function openNaiStatus() {
     };
   }, true);
 }
-window.addEventListener('error', e => { if (e.message) toast('오류: ' + e.message + (e.filename ? ' @' + e.filename.split('/').pop() + ':' + e.lineno : ''), 'err'); });
-window.addEventListener('unhandledrejection', e => { logErr('unhandled: ' + (e.reason && e.reason.message || e.reason)); });
+/* 아무도 안 잡은 오류. 화면에 띄우는 동시에 서버(data/errors.jsonl)에도 남긴다 —
+   새로고침하면 사라지던 걸 남겨 둬야 나중에 "언제 뭐가 났는지" 를 볼 수 있다. */
+window.addEventListener('error', e => {
+  if (e && e.target && e.target !== window && e.target.tagName) return;   // 이미지·스크립트 로딩 실패는 여기서 다루지 않는다
+  if (!e.message) return;
+  const where = e.filename ? e.filename.split('/').pop() + ':' + e.lineno : '';
+  toast('오류: ' + e.message + (where ? ' @' + where : ''), 'err', { where, stack: (e.error && e.error.stack) || '' });
+});
+window.addEventListener('unhandledrejection', e => {
+  const r = e && e.reason;
+  logErr('unhandled: ' + ((r && r.message) || r), { stack: (r && r.stack) || '' });
+});
 document.addEventListener('DOMContentLoaded', () => {
   try { init(); } catch (e) { logErr('init 실패: ' + e.message); toast('초기화 오류: ' + e.message, 'err'); throw e; }
   if (new URLSearchParams(location.search).get('selftest')) setTimeout(runSelfTest, 1500);

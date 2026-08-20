@@ -21,6 +21,7 @@ Requires only the Python standard library.
 """
 import sys
 import os
+import io
 import re
 import csv
 import time
@@ -58,16 +59,39 @@ if "--data" in sys.argv:  # 테스트용: 별도 데이터 폴더
 CONFIG = DATA / "config.json"
 
 
-def load_cfg():
-    try:
-        return json.loads(CONFIG.read_text(encoding="utf-8"))
-    except Exception:
+def load_cfg(strict=False):
+    """설정(토큰·키)을 읽는다.
+
+    파일이 없는 것과 "있는데 못 읽는 것" 은 전혀 다르다. 예전엔 둘 다 {} 로 돌려줘서,
+    바이러스 검사나 잠금으로 한 번 읽기에 실패하면 다음 저장 때 NAI 토큰·Gemini 키·
+    유튜브 연결이 통째로 지워졌다. 이제 잠깐 기다렸다 다시 읽어 보고,
+    그래도 안 되면 strict 일 때 예외를 낸다(=저장을 하지 않는다)."""
+    if not CONFIG.exists():
         return {}
+    last = None
+    for i in range(3):
+        try:
+            return json.loads(CONFIG.read_text(encoding="utf-8") or "{}")
+        except Exception as e:
+            last = e
+            time.sleep(0.05 * (i + 1))
+    if strict:
+        raise IOError("설정 파일을 읽지 못했습니다: %s" % str(last)[:120])
+    return {}
 
 
 def save_cfg(cfg):
+    """설정을 원자적으로 쓴다 — 쓰다가 끊겨도 이전 파일이 남는다."""
     DATA.mkdir(exist_ok=True)
-    CONFIG.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = CONFIG.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    for i in range(5):
+        try:
+            os.replace(str(tmp), str(CONFIG))
+            return
+        except PermissionError:
+            time.sleep(0.08 * (i + 1))
+    os.replace(str(tmp), str(CONFIG))
 PORT_CANDIDATES = [8765, 8766, 8767, 8768, 8769]
 
 UPSTREAMS = {
@@ -424,7 +448,18 @@ def update_source(url, ver):
                 base = rel.split("/")[-1]
                 if not (rel.endswith(KEEP_EXT) or base in KEEP_NAME):
                     continue
-                dest = ROOT / rel
+                # 압축본 안의 경로를 그대로 믿으면 안 된다. "../" 나 절대경로가 들어 있으면
+                # 앱 폴더 밖에 파일을 쓰게 된다(zip slip). 여기서 쓰는 확장자가 .bat/.py 라
+                # 시작프로그램 폴더에 하나만 심어도 코드 실행이 된다.
+                if "\\" in rel or rel.startswith("/") or ":" in rel.split("/")[0]:
+                    continue
+                if any(part in ("..", "") for part in rel.split("/")):
+                    continue
+                dest = (ROOT / rel).resolve()
+                try:
+                    dest.relative_to(ROOT.resolve())     # 정말 앱 폴더 안인지 최종 확인
+                except ValueError:
+                    continue
                 if dest.exists():                       # 되돌릴 수 있게 먼저 보관
                     b = bdir / rel
                     b.parent.mkdir(parents=True, exist_ok=True)
@@ -651,9 +686,13 @@ def yt_stream(vid, mode, fresh=False, itag=None):
                # 예전엔 마지막 후보가 음성 없는 DASH 조각이나 m3u8 까지 골라서,
                # <video> 가 못 읽고 Format error(코드 4)로 죽었다. 하나도 없으면
                # 여기서 깨끗이 실패해야 앱이 오디오 모드로 넘어간다.
+               # 마지막 후보는 protocol 을 풀어 준다 — 라이브처럼 progressive 가 없는 영상은
+               # HLS 로만 오는데, 이걸 빼면 아예 재생이 안 된다(앱이 hls.js 로 받는다).
+               # 다만 "음성+영상이 함께" 라는 조건은 끝까지 지킨다 (그게 Format error 의 원인이었다).
                else "best[protocol=https][ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=720]/"
                     "best[protocol=https][ext=mp4][acodec!=none][vcodec!=none][height<=720]/"
-                    "best[protocol=https][acodec!=none][vcodec!=none]")
+                    "best[protocol=https][acodec!=none][vcodec!=none]/"
+                    "best[acodec!=none][vcodec!=none]")
     last_err = None
     info = None
     url = None
@@ -685,6 +724,250 @@ def yt_stream(vid, mode, fresh=False, itag=None):
     with _yt_lock:
         _yt_cache[key] = (now + 40 * 60, res)   # 40분 (유튜브 URL은 몇 시간 유효하지만 IP/클라이언트에 따라 일찍 죽기도 함)
     return res
+
+
+# ─────────────────────── 오류 기록 · 자체 점검 (감시) ───────────────────────
+# 앱에서 난 오류를 파일에 쌓아 두고, 서버가 스스로 주기적으로 상태를 확인한다.
+# 보고를 보낼 때 개인정보가 딸려 나가면 안 되므로 여기서 한 번 걸러 둔다.
+ERRORS = DATA / "errors.jsonl"
+HEALTHLOG = DATA / "health.jsonl"
+_err_lock = threading.Lock()
+_err_seen = {}          # 서명 -> 마지막 시각 (같은 오류 도배 방지)
+_err_writes = 0         # 몇 번 썼는지 — 가끔씩만 파일을 정리하려고
+ERR_MAX = 400           # 파일에 남기는 최대 줄 수
+_health_last = {"t": 0, "problems": [], "checks": []}
+
+
+def _scrub(text):
+    """보고에 딸려 나가면 안 되는 것을 지운다 — 토큰·키·계정·경로.
+
+    지우는 쪽이 과해도 괜찮다. 오류를 알아보는 데 필요한 건 대개 메시지와 위치다.
+    """
+    s = str(text or "")
+    if not s:
+        return s
+    try:
+        cfg = load_cfg()
+    except Exception:
+        cfg = {}
+    # 1) 설정에 든 비밀값은 통째로 치환 (짧은 값은 오탐이 나므로 8자 이상만)
+    for k in ("token", "ytClientSecret", "ytRefresh", "geminiKey", "ytClientId"):
+        v = str(cfg.get(k) or "")
+        if len(v) >= 8:
+            s = s.replace(v, "<%s>" % k)
+    # 2) 홈 경로·윈도우 사용자명
+    try:
+        home = str(Path.home())
+        if home:
+            s = s.replace(home, "<home>")
+            user = Path(home).name
+            if len(user) >= 3:
+                s = re.sub(r"(?i)\b%s\b" % re.escape(user), "<user>", s)
+    except Exception:
+        pass
+    s = s.replace(str(HOME), "<app>")
+    # 3) 흔한 비밀 모양 — Bearer, 이메일, 긴 base64/헥스 덩어리
+    s = re.sub(r"(?i)bearer\s+[\w.\-]+", "Bearer <token>", s)
+    # 설정에 든 값과 대조하는 것만으로는 부족하다 — 예전 토큰이나 남의 토큰은 안 걸린다.
+    # 알려진 모양은 값을 몰라도 지운다.
+    s = re.sub(r"\bpst-[A-Za-z0-9_.\-]{8,}", "<token>", s)                 # NAI Persistent API Token
+    s = re.sub(r"\bAIza[A-Za-z0-9_\-]{20,}", "<key>", s)                   # Google/Gemini API 키
+    s = re.sub(r"\bGOCSPX-[A-Za-z0-9_\-]{8,}", "<secret>", s)              # Google OAuth 클라이언트 시크릿
+    s = re.sub(r"\b\d+-[a-z0-9]{20,}\.apps\.googleusercontent\.com", "<clientid>", s)
+    s = re.sub(r"[\w.+-]+@[\w-]+\.[\w.]+", "<email>", s)
+    s = re.sub(r"\b(pers|sk|ghp|gho|github_pat)_[A-Za-z0-9_]{10,}", "<key>", s)
+    s = re.sub(r"[A-Za-z0-9+/=_-]{60,}", "<long>", s)      # base64 이미지·토큰 덩어리
+    return s[:4000]
+
+
+def err_add(rec):
+    """오류 한 건 기록. 같은 오류가 쏟아지면 개수만 올린다."""
+    global _err_writes
+    now = time.time()
+    rec = dict(rec or {})
+    for k in ("msg", "stack", "where", "ua"):
+        if k in rec:
+            rec[k] = _scrub(rec[k])
+    sig = (rec.get("kind") or "") + "|" + (rec.get("msg") or "")[:160] + "|" + (rec.get("where") or "")[:80]
+    rec["t"] = int(now * 1000)
+    rec["ver"] = rec.get("ver") or RELEASE
+    with _err_lock:
+        last = _err_seen.get(sig)
+        if last and now - last < 60:     # 1분 안에 같은 오류 → 파일에 또 쓰지 않는다
+            _err_seen[sig] = now
+            return {"ok": True, "deduped": True}
+        _err_seen[sig] = now
+        if len(_err_seen) > 500:
+            for k2 in sorted(_err_seen, key=lambda k2: _err_seen[k2])[:250]:
+                _err_seen.pop(k2, None)
+        try:
+            DATA.mkdir(exist_ok=True)
+            with io.open(ERRORS, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            _err_writes += 1
+            _err_trim(force=(_err_writes % 100 == 0))
+        except Exception as e:
+            return {"ok": False, "message": str(e)[:200]}
+    return {"ok": True}
+
+
+def _err_trim(force=False):
+    """줄 수가 넘치면 앞쪽을 버린다 (호출자가 잠금을 쥔 상태로 부른다).
+
+    쓸 때마다 파일을 통째로 읽으면 낭비라, 크기가 커졌거나 100번에 한 번만 본다.
+    (크기 기준만 두면 짧은 줄이 수천 개 쌓여도 안 잘렸다)"""
+    try:
+        if not ERRORS.exists():
+            return
+        if not force and ERRORS.stat().st_size < 200_000:
+            return
+        lines = io.open(ERRORS, encoding="utf-8", errors="replace").read().splitlines()
+        if len(lines) <= ERR_MAX:
+            return
+        io.open(ERRORS, "w", encoding="utf-8").write("\n".join(lines[-ERR_MAX:]) + "\n")
+    except Exception:
+        pass
+
+
+def err_list(limit=200):
+    out = []
+    try:
+        lines = io.open(ERRORS, encoding="utf-8", errors="replace").read().splitlines()
+    except Exception:
+        return out
+    for ln in lines[-max(1, min(limit, ERR_MAX)):]:
+        try:
+            out.append(json.loads(ln))
+        except Exception:
+            continue
+    return out
+
+
+def err_clear():
+    with _err_lock:
+        _err_seen.clear()
+        try:
+            if ERRORS.exists():
+                ERRORS.unlink()
+        except Exception as e:
+            return {"ok": False, "message": str(e)[:200]}
+    return {"ok": True}
+
+
+def _chk(name, ok, detail="", level="err"):
+    return {"name": name, "ok": bool(ok), "detail": str(detail)[:300], "level": level}
+
+
+def self_check(deep=False):
+    """서버가 스스로 도는 점검. 문제가 있으면 problems 에 담아 돌려준다."""
+    checks = []
+    # 1) 데이터 폴더에 실제로 쓸 수 있는가 (권한·잠금·디스크)
+    try:
+        DATA.mkdir(exist_ok=True)
+        probe = DATA / ".writecheck"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        checks.append(_chk("데이터 폴더 쓰기", True))
+    except Exception as e:
+        checks.append(_chk("데이터 폴더 쓰기", False, "%s — 설정·이미지가 저장되지 않습니다" % str(e)[:160]))
+    # 2) 설정 파일이 온전한가
+    for label, p in (("설정(state.json)", DATA / "state.json"), ("토큰(config.json)", CONFIG)):
+        if not p.exists():
+            checks.append(_chk(label, True, "아직 없음(정상)", "info"))
+            continue
+        try:
+            o = json.loads(io.open(p, encoding="utf-8").read() or "{}")
+            n = sum(len(o.get(k) or []) for k in ("chunks", "styles", "characters", "scenes")) if isinstance(o, dict) else 0
+            checks.append(_chk(label, True, ("항목 %d개" % n) if n else "", "info"))
+        except Exception as e:
+            checks.append(_chk(label, False, "읽을 수 없습니다 — %s (백업에서 되돌리세요)" % str(e)[:120]))
+    # 3) 백업이 최근 것인가
+    try:
+        bdir = DATA / "backups"
+        bks = sorted(bdir.glob("state-*.json"), key=lambda p: p.stat().st_mtime) if bdir.exists() else []
+        if not bks:
+            checks.append(_chk("설정 백업", True, "아직 없음", "info"))
+        else:
+            age_h = (time.time() - bks[-1].stat().st_mtime) / 3600
+            checks.append(_chk("설정 백업", True, "%d개 · 최근 %.0f시간 전" % (len(bks), age_h), "info"))
+    except Exception as e:
+        checks.append(_chk("설정 백업", False, str(e)[:120], "warn"))
+    # 4) 디스크 여유
+    try:
+        import shutil as _sh
+        free = _sh.disk_usage(str(DATA)).free
+        checks.append(_chk("디스크 여유", free > 300 * 1024 * 1024,
+                           "%.1fGB" % (free / 1024 ** 3),
+                           "err" if free < 300 * 1024 * 1024 else "info"))
+    except Exception:
+        pass
+    # 5) 태그 DB / 재생 엔진
+    # 태그 DB 는 처음 켤 때 받아오므로 준비 중인 건 정상이다. 실패했을 때만 문제로 본다.
+    checks.append(_chk("태그 DB", _tag_status.get("state") != "error",
+                       _tag_status.get("msg") or _tag_status.get("state", ""),
+                       "warn"))
+    checks.append(_chk("유튜브 재생 엔진", bool(yt_engine()), "" if yt_engine() else "미설치 — 직접 재생이 안 됩니다", "warn"))
+    # 6) 최근 오류
+    try:
+        now = time.time() * 1000
+        es = err_list(ERR_MAX)
+        h1 = len([e for e in es if now - (e.get("t") or 0) < 3600_000])
+        d1 = len([e for e in es if now - (e.get("t") or 0) < 86400_000])
+        checks.append(_chk("최근 오류", h1 == 0, "1시간 %d건 · 24시간 %d건" % (h1, d1), "warn" if h1 else "info"))
+    except Exception:
+        pass
+    # 7) 바깥 연결 (깊은 점검일 때만 — 평소엔 네트워크를 건드리지 않는다)
+    if deep:
+        for label, host in (("NAI 이미지 서버", "image.novelai.net"), ("깃헙", "api.github.com")):
+            try:
+                t0 = time.time()
+                with socket.create_connection((host, 443), timeout=6):
+                    pass
+                checks.append(_chk(label, True, "%dms" % int((time.time() - t0) * 1000), "info"))
+            except Exception as e:
+                checks.append(_chk(label, False, "닿지 않습니다 — %s" % str(e)[:100], "warn"))
+    # problems 는 화면에 띄울 것 = 실제로 손을 봐야 하는 것만.
+    # 참고(warn/info)까지 올리면 늘 빨간 표시가 떠 있어 아무도 안 보게 된다.
+    problems = [c for c in checks if not c["ok"] and c["level"] == "err"]
+    notes = [c for c in checks if not c["ok"] and c["level"] != "err"]
+    snap = {"t": int(time.time() * 1000), "checks": checks, "problems": problems,
+            "notes": notes, "release": RELEASE}
+    return snap
+
+
+def _health_write(snap, changed):
+    """문제가 있거나 상태가 바뀐 순간만 남긴다 — 매번 쓰면 로그가 의미를 잃는다."""
+    if not snap["problems"] and not snap.get("notes") and not changed:
+        return
+    try:
+        DATA.mkdir(exist_ok=True)
+        with io.open(HEALTHLOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"t": snap["t"],
+                                "problems": [(p["name"], p["detail"]) for p in snap["problems"]],
+                                "notes": [(p["name"], p["detail"]) for p in snap.get("notes") or []],
+                                "release": RELEASE}, ensure_ascii=False) + "\n")
+        if HEALTHLOG.stat().st_size > 300_000:
+            lines = io.open(HEALTHLOG, encoding="utf-8", errors="replace").read().splitlines()
+            io.open(HEALTHLOG, "w", encoding="utf-8").write("\n".join(lines[-300:]) + "\n")
+    except Exception:
+        pass
+
+
+def _watchdog():
+    """서버가 떠 있는 동안 계속 도는 자체 점검. 앱을 켜 두면 24시간 돈다."""
+    global _health_last
+    n = 0
+    while True:
+        try:
+            snap = self_check(deep=(n % 6 == 0))    # 1시간에 한 번만 바깥 연결까지
+            before = {p["name"] for p in _health_last.get("problems") or []}
+            after = {p["name"] for p in snap["problems"]}
+            _health_write(snap, before != after)
+            _health_last = snap
+        except Exception:
+            pass
+        n += 1
+        time.sleep(600)     # 10분
 
 
 # ─────────────────────────── tag DB ───────────────────────────
@@ -860,10 +1143,21 @@ class Handler(BaseHTTPRequestHandler):
         return p == "/config" and bool((q.get("full") or [""])[0])
 
     def _origin_ok(self):
-        """보안: 로컬 앱(자기 자신) 또는 file:// 로 연 페이지만 허용 — 외부 사이트가 저장된 NAI 토큰을 쓰지 못하게"""
+        """보안: 로컬 앱(자기 자신) 또는 file:// 로 연 페이지만 허용 — 외부 사이트가 저장된 NAI 토큰을 쓰지 못하게
+
+        Origin: null 은 file:// 로 연 페이지만 보내는 게 아니다. 아무 웹사이트나
+        <iframe sandbox> 를 띄우면 같은 값이 된다. 그래서 null 은 "읽기" 까지만 믿는다.
+        (쓰기까지 믿으면 남의 페이지가 설정을 부수거나, 저장된 NAI 토큰으로 생성을 돌리거나,
+         업데이트 경로로 코드를 심을 수 있다. 실제로 그 길이 열려 있었다.)
+        file:// 로 열어 쓰던 분은 start.bat 이 띄우는 http://127.0.0.1:… 주소로 열면 된다."""
         o = self.headers.get("Origin")
-        if not o or o == "null":
+        if not o:
             return True
+        if o == "null":
+            meth = self.command
+            if meth == "OPTIONS":     # 프리플라이트 — 실제로 하려는 메서드를 보고 판단
+                meth = (self.headers.get("Access-Control-Request-Method") or "GET").upper()
+            return meth in ("GET", "HEAD")
         try:
             u = urllib.parse.urlparse(o)
             return u.hostname in ("127.0.0.1", "localhost", "::1", "[::1]")
@@ -877,8 +1171,9 @@ class Handler(BaseHTTPRequestHandler):
         o = self.headers.get("Origin")
         if o and o != "null" and self._origin_ok():
             self.send_header("Access-Control-Allow-Origin", o)
-        elif o == "null" and not self._sensitive():
-            self.send_header("Access-Control-Allow-Origin", "null")   # file:// 로 연 앱 지원 (민감 응답 제외)
+        elif o == "null" and not self._sensitive() and self._origin_ok():
+            # file:// 로 연 앱의 "읽기" 만 허용 (_origin_ok 가 쓰기를 걸러낸다)
+            self.send_header("Access-Control-Allow-Origin", "null")
         self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, Range")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -993,7 +1288,72 @@ class Handler(BaseHTTPRequestHandler):
                              "ytLinked": bool(cfg.get("ytRefresh")), "ytEngine": bool(yt_engine()),
                              "hasGemini": bool(cfg.get("geminiKey")),
                              "release": RELEASE, "frozen": FROZEN,
+                             # 자체 점검에서 걸린 것 — 앱이 바로 띄운다 (점검 자체는 감시 스레드가 10분마다 돈다)
+                             "problems": [{"name": p["name"], "detail": p["detail"]} for p in (_health_last.get("problems") or [])],
+                             "hasGhToken": bool(cfg.get("ghToken")),
                              "updateRepo": cfg.get("updateRepo") or UPDATE_REPO or ""})
+            return True
+        if path == "/errors":     # 오류 기록 — 앱이 오류를 만나면 여기로 보낸다
+            if self.command == "POST":
+                if "application/json" not in (self.headers.get("Content-Type") or "").lower():
+                    self._json(415, {"message": "content-type must be application/json"})
+                    return True
+                try:
+                    body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                except Exception:
+                    body = {}
+                if (qs.get("clear") or [""])[0]:
+                    self._json(200, err_clear())
+                    return True
+                self._json(200, err_add(body))
+                return True
+            items = err_list(int((qs.get("limit") or ["200"])[0] or 200))
+            self._json(200, {"items": items, "path": str(ERRORS), "release": RELEASE})
+            return True
+        if path == "/selfcheck":  # 자체 점검 — 지금 바로 한 번 돌리거나(POST) 최근 결과를 본다(GET)
+            if self.command == "POST":
+                snap = self_check(deep=True)
+                self._json(200, snap)
+                return True
+            snap = _health_last if _health_last.get("t") else self_check()
+            self._json(200, snap)
+            return True
+        if path == "/report":     # 깃헙 이슈로 보내기 — 토큰이 설정에 있을 때만 (배포본에는 없다)
+            if self.command != "POST":
+                self._json(405, {"message": "POST only"})
+                return True
+            if "application/json" not in (self.headers.get("Content-Type") or "").lower():
+                self._json(415, {"message": "content-type must be application/json"})
+                return True
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            except Exception:
+                body = {}
+            cfg = load_cfg()
+            ghtok = (cfg.get("ghToken") or "").strip()
+            repo = _upd_repo()
+            if not ghtok:
+                self._json(400, {"message": "깃헙 토큰이 없습니다 — ⚙설정에 넣으면 자동으로 보냅니다"})
+                return True
+            if not re.fullmatch(r"[\w.\-]+/[\w.\-]+", repo or ""):
+                self._json(400, {"message": "보고할 저장소를 알 수 없습니다 (업데이트 저장소를 먼저 지정하세요)"})
+                return True
+            title = _scrub(body.get("title") or "오류 보고")[:200]
+            text = _scrub(body.get("body") or "")[:60000]
+            try:
+                req = urllib.request.Request(
+                    "https://api.github.com/repos/%s/issues" % repo,
+                    data=json.dumps({"title": title, "body": text, "labels": ["bug", "auto-report"]}).encode(),
+                    headers={"Authorization": "Bearer " + ghtok, "Accept": "application/vnd.github+json",
+                             "User-Agent": "NAI-Studio", "Content-Type": "application/json",
+                             "X-GitHub-Api-Version": "2022-11-28"}, method="POST")
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    j = json.loads(r.read() or b"{}")
+                self._json(200, {"ok": True, "url": j.get("html_url"), "number": j.get("number")})
+            except urllib.error.HTTPError as e:
+                self._json(e.code, {"message": "깃헙이 거절했습니다 (HTTP %d) — 토큰 권한을 확인하세요" % e.code})
+            except Exception as e:
+                self._json(502, {"message": str(e)[:200]})
             return True
         if path == "/config":
             if self.command == "POST":
@@ -1006,14 +1366,20 @@ class Handler(BaseHTTPRequestHandler):
                     body = json.loads(self.rfile.read(length) or b"{}")
                 except Exception:
                     body = {}
-                cfg = load_cfg()
+                try:
+                    cfg = load_cfg(strict=True)     # 못 읽으면 덮어쓰지 않는다 (토큰이 날아간다)
+                except Exception as e:
+                    self._json(500, {"message": "설정을 읽지 못해 저장을 멈췄습니다 — %s" % str(e)[:140]})
+                    return True
                 if "token" in body:
                     tok = (body.get("token") or "").strip()
                     if tok:
                         cfg["token"] = tok
                     else:
                         cfg.pop("token", None)
-                for k in ("ytClientId", "ytClientSecret", "ytRefresh", "geminiKey", "updateRepo"):  # YouTube 계정 연결 (Google OAuth) · Gemini API 키
+                # ghToken: 오류 보고를 자동으로 올릴 때만 쓴다. 배포하는 exe 에는 절대 안 들어가고,
+                # 넣은 사람의 PC(data/config.json)에만 남는다.
+                for k in ("ytClientId", "ytClientSecret", "ytRefresh", "geminiKey", "updateRepo", "ghToken"):  # YouTube 계정 연결 (Google OAuth) · Gemini API 키
                     if k in body:
                         v = (body.get(k) or "").strip()
                         if v:
@@ -1028,11 +1394,12 @@ class Handler(BaseHTTPRequestHandler):
             cfg = load_cfg()
             tok = cfg.get("token", "")
             if (qs.get("full") or [""])[0]:  # 백업용: 실제 값 반환 (로컬 전용)
-                self._json(200, {k: cfg.get(k, "") for k in ("token", "ytClientId", "ytClientSecret", "ytRefresh", "geminiKey", "updateRepo")})
+                self._json(200, {k: cfg.get(k, "") for k in ("token", "ytClientId", "ytClientSecret", "ytRefresh", "geminiKey", "updateRepo", "ghToken")})
                 return True
             self._json(200, {"hasToken": bool(tok), "tokenHint": ("…" + tok[-4:]) if tok else "",
                              "path": str(CONFIG), "ytClientId": cfg.get("ytClientId", ""),
-                             "ytHasSecret": bool(cfg.get("ytClientSecret")), "ytLinked": bool(cfg.get("ytRefresh"))})
+                             "ytHasSecret": bool(cfg.get("ytClientSecret")), "ytLinked": bool(cfg.get("ytRefresh")),
+                             "hasGhToken": bool(cfg.get("ghToken"))})
             return True
         if path == "/yt/oauth" and self.command == "POST":
             # PKCE 코드 교환 / 리프레시 — refresh_token 은 서버 파일에만 보관
@@ -1103,8 +1470,26 @@ class Handler(BaseHTTPRequestHandler):
                         except Exception:
                             cur = {}
                     # 보호: 들어온 설정의 내용(청크·스타일·캐릭터·씬)이 서버 것의 절반 미만이면 덮어쓰지 않음 (빈 브라우저가 덮어쓰는 사고 방지)
-                    if not force and ccount(cur) >= 3 and ccount(incoming) < ccount(cur) * 0.5:
-                        self._json(409, {"message": "protected", "serverCount": ccount(cur), "incomingCount": ccount(incoming)})
+                    # 사용자가 실제로 지운 것(톰스톤)은 줄어드는 게 정상이다.
+                    # 그것까지 막으면 정당한 대량 삭제가 영영 저장되지 않고 409 만 반복된다.
+                    def tombed_count(o, base):
+                        d = (o or {}).get("deleted") or {}
+                        if not isinstance(d, dict):
+                            return 0
+                        n = 0
+                        for key, kind in (("chunks", "chunk"), ("styles", "style"),
+                                          ("characters", "char"), ("scenes", "scene")):
+                            for it in (base.get(key) or []):
+                                k = it.get("name") if kind in ("chunk", "char") else it.get("id")
+                                if k and (kind + "|" + str(k).lower()) in d:
+                                    n += 1
+                        return n
+                    gone = ccount(cur) - ccount(incoming)
+                    explained = tombed_count(incoming, cur)
+                    if (not force and ccount(cur) >= 3 and ccount(incoming) < ccount(cur) * 0.5
+                            and gone > explained):
+                        self._json(409, {"message": "protected", "serverCount": ccount(cur),
+                                         "incomingCount": ccount(incoming), "explained": explained})
                         return True
 
                     # 프롬프트도 지켜야 한다. 위 검사는 청크·스타일·캐릭터·씬 개수만 보므로,
@@ -2071,7 +2456,9 @@ class Handler(BaseHTTPRequestHandler):
             return False
         if not self._origin_ok():
             self._drain()
-            self._json(403, {"message": "forbidden: external origin"})
+            self._json(403, {"message": "forbidden: external origin"
+                             if (self.headers.get("Origin") or "") != "null"
+                             else "file:// 로 연 화면에서는 저장·생성이 안 됩니다 — start.bat 이 띄운 http://127.0.0.1:… 주소로 열어 주세요"})
             self.close_connection = True
             return False
         ref = self.headers.get("Referer")
@@ -2169,6 +2556,9 @@ def main():
     print("=" * 54)
     seed_from_bundle()
     ensure_tag_db_async()
+    # 앱이 떠 있는 동안 스스로 상태를 확인한다 (10분마다, 1시간에 한 번은 바깥 연결까지).
+    # 문제가 생기면 data/health.jsonl 에 남고 앱 화면에도 뜬다.
+    threading.Thread(target=_watchdog, daemon=True).start()
     app_browser = None
     if "--app" in sys.argv:  # --app edge|chrome : 앱 모드(주소창 없는 창)로 열기 — 임베드 유튜브가 로그인 계정으로 재생됨
         try:

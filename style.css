@@ -604,3 +604,17 @@ input.sc-name-in:hover, input.sc-name-in:focus { border-bottom-color: var(--acc)
 .pill.tiny.bad { color: var(--red); border-color: var(--red); }
 .pill.tiny.bad { animation: naiPulse 1.8s ease-in-out infinite; }
 @keyframes naiPulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
+
+/* 점검에서 문제가 걸렸을 때만 뜨는 상단 버튼 */
+.pill.warn { background: var(--red, #c0392b); color: #fff; border-color: transparent; }
+.pill.warn:hover { filter: brightness(1.1); }
+/* 오류/점검 창 */
+.chk-row { display: flex; gap: 8px; align-items: baseline; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.chk-row .nm { min-width: 150px; font-weight: 600; }
+.chk-row .dt { color: var(--dim); font-size: 12px; }
+.chk-ok { color: var(--green, #27ae60); }
+.chk-bad { color: var(--red, #c0392b); }
+.chk-warn { color: var(--amber, #e67e22); }
+.errbox { max-height: 34vh; overflow: auto; font-size: 12px; }
+.errbox .e { padding: 5px 0; border-bottom: 1px solid var(--line); white-space: pre-wrap; word-break: break-all; }
+.errbox .e .when { color: var(--dim); margin-right: 6px; }
