@@ -200,11 +200,13 @@ function sceneOv(sc) { // 씬 → 생성 오버라이드
     // 잘리는 건 항상 "방금 씬에 넣은" 쪽이라, 말없이 자르면 왜 안 그려지는지 알 수가 없다.
     chars: (() => {
       const all = mainChars.concat((sc.chars || []).filter(c => c.prompt && c.prompt.trim()));
-      if (all.length > 6) {
-        const cut = all.length - 6;
-        if (typeof toast === 'function') toast(`캐릭터는 6명까지만 보낼 수 있어 뒤쪽 ${cut}명은 빠졌습니다 (메인 ${mainChars.length}명 + 씬 ${all.length - mainChars.length}명)`, 'err');
+      // 상한은 모델마다 다르다 — V4/4.5 는 6명, V5 는 32명까지 받는다
+      const cap = (typeof capsOf === 'function' ? capsOf(S.model).maxChars : 6) || 6;
+      if (all.length > cap) {
+        const cut = all.length - cap;
+        if (typeof toast === 'function') toast(`이 모델은 캐릭터를 ${cap}명까지 받습니다 — 뒤쪽 ${cut}명은 빠졌습니다 (메인 ${mainChars.length}명 + 씬 ${all.length - mainChars.length}명)`, 'err');
       }
-      return all.slice(0, 6);
+      return all.slice(0, cap);
     })(),
     // 씬 모드에선 왼쪽 패널이 숨겨져 i2i/마스크가 보이지도, 해제되지도 않는다.
     // 이걸 막지 않으면 메인에 남아 있던 이미지 때문에 모든 씬이 img2img·인페인트로 나간다.

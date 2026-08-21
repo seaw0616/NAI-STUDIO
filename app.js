@@ -20,6 +20,15 @@ const $$ = s => [...document.querySelectorAll(s)];
 
 /* ─────────────── 모델 정의 (퀄리티 태그 / UC 프리셋: docs.novelai.net 원문 · ucPreset id는 NAI 정수값) ─────────────── */
 const UC = {
+  /* V5 (2026-08 출시). novelai.net 웹앱이 실제로 보내는 텍스트 그대로.
+     번호는 NAI 의 ucPreset 값과 같게 맞춘다 (heavy 0 · light 1 · furry 2 · human 3 · none 4). */
+  v5: [
+    { id: 0, name: 'Heavy', text: 'lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page' },
+    { id: 1, name: 'Light', text: 'lowres, bad hands, bad anatomy, artistic error, sepia, white haze, worst quality, very displeasing, jpeg artifacts, 0::ai-generated::' },
+    { id: 3, name: 'Human Focus', text: 'lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page, @_@, mismatched pupils, glowing eyes, bad anatomy' },
+    { id: 2, name: 'Furry Focus', text: '{worst quality}, distracting watermark, unfinished, bad quality, {widescreen}, upscale, {sequence}, {{grandfathered content}}, blurred foreground, chromatic aberration, sketch, everyone, [sketch background], simple, [flat colors], ych (character), outline, multiple scenes, [[horror (theme)]], comic' },
+    { id: 4, name: '없음', text: '' },
+  ],
   v45full: [
     { id: 0, name: 'Heavy', text: 'lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page' },
     { id: 1, name: 'Light', text: 'lowres, artistic error, scan artifacts, worst quality, bad quality, jpeg artifacts, multiple views, very displeasing, too many watermarks, negative space, blank page' },
@@ -55,7 +64,11 @@ const UC = {
     { id: 4, name: '없음', text: '' },
   ],
 };
+/* ver: 50=V5, 45=V4.5, 40=V4, 30=V3.
+   quality2 는 V5 의 두 번째 퀄리티 프리셋(light) — V5 부터 두 가지가 생겼다. */
 const MODELS = {
+  'nai-diffusion-5-full':          { name: 'NAI Diffusion V5 Full', kind: '✨', ver: 50, inpaint: 'nai-diffusion-5-full-inpainting',        quality: ', very aesthetic, masterpiece, no text', quality2: ', very aesthetic, amazing quality, no text', ucs: UC.v5 },
+  'nai-diffusion-5-curated':       { name: 'NAI Diffusion V5 Curated', kind: '✨', ver: 50, inpaint: 'nai-diffusion-5-curated-inpainting',  quality: ', very aesthetic, masterpiece, no text', quality2: ', very aesthetic, amazing quality, no text', ucs: UC.v5 },
   'nai-diffusion-4-5-full':        { name: 'NAI Diffusion V4.5 Full', kind: '👤', ver: 45, inpaint: 'nai-diffusion-4-5-full-inpainting',    quality: ', very aesthetic, masterpiece, no text', ucs: UC.v45full },
   'nai-diffusion-4-5-curated':     { name: 'NAI Diffusion V4.5 Curated', kind: '👤', ver: 45, inpaint: 'nai-diffusion-4-5-curated-inpainting', quality: ', masterpiece, no text, -0.8::feet::, rating:general', ucs: UC.v45cur },
   'nai-diffusion-4-full':          { name: 'NAI Diffusion V4 Full', kind: '👤', ver: 40, inpaint: 'nai-diffusion-4-full-inpainting',        quality: ', no text, best quality, very aesthetic, absurdres', ucs: UC.v4full },
@@ -63,6 +76,27 @@ const MODELS = {
   'nai-diffusion-3':               { name: 'NAI Diffusion Anime V3', kind: '👤', ver: 30, inpaint: 'nai-diffusion-3-inpainting',            quality: ', best quality, amazing quality, very aesthetic, absurdres', ucs: UC.v3 },
   'nai-diffusion-furry-3':         { name: 'NAI Diffusion Furry V3', kind: '🐾', ver: 30, inpaint: 'nai-diffusion-furry-3-inpainting',      quality: ', {best quality}, {amazing quality}', ucs: UC.furry3 },
 };
+/* 모델이 실제로 받아주는 것들. novelai.net 이 요청을 만들 때 쓰는 표와 같게 맞춘 것으로,
+   여기 없는 걸 보내면 NAI 가 거절하거나(400) 조용히 무시한다.
+   특히 V5 는 바이브 트랜스퍼·캐릭터 레퍼런스·노이즈 스케줄·Variety+ 를 받지 않는다. */
+const CAPS = {
+  50: { vibe: false, charRef: false, noiseSchedule: false, cfgDelay: false, cfgRescale: true,
+        transparency: true, maxChars: 32, freePos: true, tokens: 1471, tokensCurated: 703 },
+  45: { vibe: true, charRef: true, noiseSchedule: true, cfgDelay: true, cfgRescale: true,
+        transparency: false, maxChars: 6, freePos: false, tokens: 512 },
+  40: { vibe: true, charRef: false, noiseSchedule: true, cfgDelay: true, cfgRescale: true,
+        transparency: false, maxChars: 6, freePos: false, tokens: 512 },
+  30: { vibe: true, charRef: false, noiseSchedule: true, cfgDelay: true, cfgRescale: true,
+        transparency: false, maxChars: 0, freePos: false, tokens: 225 },
+};
+const capsOf = m => {
+  const c = CAPS[(MODELS[m] || {}).ver] || CAPS[45];
+  if ((MODELS[m] || {}).ver === 50) return { ...c, tokens: /curated/.test(m) ? c.tokensCurated : c.tokens };
+  return c;
+};
+const isV5 = m => (MODELS[m || S.model] || {}).ver === 50;
+/* 프롬프트 토큰 한도. V4/4.5 는 512 였지만 V5 는 Curated 703 · Full 1471 로 늘었다. */
+const tokenLimit = m => capsOf(m || S.model).tokens;
 const SAMPLERS = [
   ['k_euler_ancestral', 'Euler Ancestral'], ['k_euler', 'Euler'],
   ['k_dpmpp_2s_ancestral', 'DPM++ 2S Ancestral'], ['k_dpmpp_2m_sde', 'DPM++ 2M SDE'],
@@ -111,7 +145,7 @@ const DEFAULTS = {
   autoCount: 20, autoDelay: 3, autoSaveOn: false, stripOnSave: false,
   chunks: [], deleted: {}, ytQueue: [], ytPos: null, ytSize: 'normal', ytOpen: false, ytVol: 60, ytUsePop: false, ytPopMode: 'tab',
   theme: 'violet', lastDark: 'violet', lastLight: 'light', ov: {}, tagUnderscore: false,
-  histFavOnly: false,
+  histFavOnly: false, transparent: false,   // V5 전용 — 투명 배경(straight_alpha)
   mode: 'main', scenes: [], curScene: null, styles: [], activeStyle: null, characters: [],
 };
 let S = { ...DEFAULTS };
@@ -471,9 +505,10 @@ function updatePreview() {
   $('#pvPrompt').textContent = p; $('#pvUc').textContent = uc;
   const nChunks = (getMainPrompt().match(/[^,\n{}\[\]<>|]+/g) || []).filter(t => isChunkToken(t)).length;
   const nFrag = (getMainPrompt().match(/<[^<>]+>/g) || []).length;
-  // 토큰 수 (T5, V4/4.5 한도 512) — 넘으면 뒤가 잘리므로 눈에 띄게
+  // 토큰 수 — 한도는 모델마다 다르다 (V4/4.5 512 · V5 Curated 703 · V5 Full 1471)
   const tok = typeof countTokens === 'function' ? countTokens(p) : null;
-  const tokTxt = tok == null ? '' : ` · 토큰 ${tok}/512${tok > 512 ? ' ⚠ 초과분은 무시됩니다' : ''}`;
+  const lim = typeof tokenLimit === 'function' ? tokenLimit(S.model) : 512;
+  const tokTxt = tok == null ? '' : ` · 토큰 ${tok}/${lim}${tok > lim ? ' ⚠ 초과분은 무시됩니다' : ''}`;
   // 같은 태그가 여러 번 들어가는 것을 눈에 보이게 한다.
   // 스타일 프리셋의 앞 고정 프롬프트가 지금 칸에 있는 내용과 겹치면 프롬프트가 통째로
   // 두 번 나가는데(토큰·Anlas 낭비에 그림도 망가진다) 예전엔 알 방법이 전혀 없었다.
@@ -677,7 +712,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '11.20';   // 화면 표시용 앱 버전 (상단)
+const APP_VERSION = '11.21';   // 화면 표시용 앱 버전 (상단)
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 async function tryHealth(base) {
   try {
@@ -828,8 +863,19 @@ async function refreshAnlas() {
     const t = j.trainingStepsLeft || {};
     const total = (t.fixedTrainingStepsLeft || 0) + (t.purchasedTrainingSteps || 0);
     R.tier = j.tier;
+    /* V5 부터 Opus 무료가 "무제한" 이 아니라 시간당 충전되는 사용량 한도가 됐다.
+       구독 응답 어딘가에 남은 비율이 오는데 필드 이름이 확정적이지 않아, 0~1 또는 0~100
+       범위의 값을 넓게 찾아 둔다. 못 찾으면 표시하지 않는다(없는 값을 지어내지 않는다). */
+    R.opusUsage = null;
+    for (const k of ['opusUsageLimit', 'usageLimit', 'generationUsage', 'imageGenerationLimit']) {
+      const v = j[k];
+      if (v == null) continue;
+      const pct = typeof v === 'number' ? v : (v.remaining != null ? v.remaining : v.percent);
+      if (typeof pct === 'number') { R.opusUsage = pct <= 1 ? Math.round(pct * 100) : Math.round(pct); break; }
+    }
     $('#anlas').textContent = '◈ ' + total.toLocaleString(); updateCostHint();
-    $('#anlas').title = 'Anlas ' + total.toLocaleString() + (j.tier === 3 ? ' · Opus' : '') + ' (클릭: 새로고침)';
+    $('#anlas').title = 'Anlas ' + total.toLocaleString() + (j.tier === 3 ? ' · Opus' : '')
+      + (R.opusUsage != null ? ` · Opus 무료 잔여 ${R.opusUsage}%` : '') + ' (클릭: 새로고침)';
     return total;
   } catch (e) { $('#anlas').textContent = '◈ ?'; $('#anlas').title = e.message; throw e; }
 }
@@ -862,11 +908,18 @@ function buildPayload(ov) {
   let uc = ov.uc != null ? ov.uc : joinParts(getUcText(m, ucIdx(m)), ov.ucExtra != null ? ov.ucExtra : joinParts(style && expandAll(style.uc || ''), expandAll(S.uc.trim())));
   // NAI 웹 숨은 규칙: 프롬프트에 nsfw 가 없으면 네거티브 맨 앞에 "nsfw, " 자동 추가 (Curated 모델·UC 프리셋 "없음" 제외)
   if (ov.uc == null && S.autoNsfw !== false && !NSFW_EXEMPT.includes(m) && getUcText(m, ucIdx(m)) && !prompt.toLowerCase().includes('nsfw') && !/^nsfw\b/i.test(uc)) uc = uc ? 'nsfw, ' + uc : 'nsfw';
-  const chars = (ov.chars || S.chars.filter(c => c.prompt.trim())).map(c => ({ ...c }));
+  const caps = capsOf(m);
+  let chars = (ov.chars || S.chars.filter(c => c.prompt.trim())).map(c => ({ ...c }));
+  if (caps.maxChars && chars.length > caps.maxChars) {
+    // 넘으면 NAI 가 요청 자체를 거절한다. 잘라 보내되 말없이 하지는 않는다.
+    if (typeof toast === 'function' && !ov.quiet) toast(`이 모델은 캐릭터를 ${caps.maxChars}명까지 받습니다 — 뒤쪽 ${chars.length - caps.maxChars}명은 빠졌습니다`, 'err');
+    chars = chars.slice(0, caps.maxChars);
+  }
   const useCoords = !S.aiChoice && chars.some(c => c.x != null);
   const w = ov.w || S.w, h = ov.h || S.h;
   const p = {
-    params_version: 3, width: w, height: h,
+    // NAI 웹이 V4 이상에 보내는 값. 앱은 3 을 보내고 있었다.
+    params_version: 4, width: w, height: h,
     scale: S.scale, sampler: S.sampler, steps: S.steps, n_samples: ov.n || S.n || 1,
     ucPreset: (info.ucs[ucIdx(m)] || {}).id != null ? info.ucs[ucIdx(m)].id : 0, qualityToggle: S.quality, autoSmea: false,
     dynamic_thresholding: S.decrisper, controlnet_strength: 1, legacy: false, add_original_image: true,
@@ -886,6 +939,11 @@ function buildPayload(ov) {
     p.v4_negative_prompt = { caption: { base_caption: uc, char_captions: p.characterPrompts.map(c => ({ char_caption: c.uc, centers: [c.center] })) } };
     // legacy_uc 는 NAI 웹이 보내지 않는다 → 켠 경우에만 명시적으로 추가
     if (S.legacyUc) { p.legacy_uc = true; p.v4_negative_prompt.legacy_uc = true; }
+    /* V5 가 안 받는 것들. 보내면 거절당하거나 조용히 무시된다 —
+       novelai.net 도 요청을 만들 때 능력치를 보고 같은 키들을 지운다. */
+    if (!caps.noiseSchedule) delete p.noise_schedule;
+    if (!caps.cfgDelay) delete p.skip_cfg_above_sigma;
+    if (caps.transparency && S.transparent) { p.straight_alpha = true; p.tag_hint_transparent_background = true; }
   } else {
     p.params_version = 1;
     p.sm = !!S.smea && S.sampler !== 'ddim_v3'; p.sm_dyn = !!S.smea && !!S.smeaDyn && S.sampler !== 'ddim_v3';
@@ -935,11 +993,17 @@ async function attachImages(body, ov) {
   // noRef 는 i2i 만 막는다. 씬 모드처럼 '메인 화면의 이미지 입력을 쓰지 않는' 경우에는
   // 바이브·정밀 레퍼런스도 함께 빠져야 한다. 안 그러면 씬 화면에서는 보이지도 지울 수도
   // 없는 바이브가 모든 씬 이미지에 계속 붙는다.
-  const prefs = (!ov.noRef && info.ver >= 45) ? R.prefs.filter(v => v.b64) : [];
-  // V4.5 전용인데 모델을 바꾼 경우 — 조용히 빠지지 않도록 알린다 (배지·비용 표시도 syncUI 에서 함께 정리)
-  if (!ov.noRef && info.ver < 45 && R.prefs.some(v => v.b64)) toast('Precise Reference는 V4.5 전용이라 이번 생성에서는 제외했습니다');
+  const prefs = (!ov.noRef && (typeof capsOf === 'function' ? capsOf(body.model).charRef : info.ver >= 45)) ? R.prefs.filter(v => v.b64) : [];
+  /* V5 는 바이브 트랜스퍼도 캐릭터 레퍼런스도 받지 않는다 (novelai.net 도 이 모델에서는
+     두 기능을 아예 숨긴다). 붙여둔 채로 V5 를 고르면 조용히 빠지므로 반드시 알린다. */
+  const capsA = typeof capsOf === 'function' ? capsOf(body.model) : { vibe: true, charRef: info.ver >= 45 };
+  if (!ov.noRef && !capsA.charRef && R.prefs.some(v => v.b64)) {
+    toast(capsA.vibe ? 'Precise Reference는 V4.5 전용이라 이번 생성에서는 제외했습니다'
+                     : 'V5 는 캐릭터 레퍼런스를 지원하지 않아 제외했습니다', 'err');
+  }
   // 라이브러리에서 불러온 바이브는 원본 이미지(b64) 없이 인코딩(enc)만 있을 수 있다 — 그것도 포함해야 한다
-  const vibes = ov.noRef ? [] : R.vibes.filter(v => v.b64 || (info.ver >= 40 && v.enc));
+  let vibes = ov.noRef ? [] : R.vibes.filter(v => v.b64 || (info.ver >= 40 && v.enc));
+  if (!capsA.vibe && vibes.length) { toast('V5 는 바이브 트랜스퍼를 지원하지 않아 제외했습니다 — 바이브를 쓰시려면 V4.5 를 골라주세요', 'err'); vibes = []; }
   if (prefs.length) { // Precise Reference (V4.5) — 바이브와 동시 사용 불가
     p.director_reference_images = prefs.map(v => v.b64);
     p.director_reference_descriptions = prefs.map(v => ({ caption: { base_caption: v.type, char_captions: [] }, legacy_uc: false }));
@@ -1036,14 +1100,17 @@ function anlasEstimate(o) {
   const strength = o.strength == null ? 1 : o.strength;
   const base = Math.ceil(2.951823174884865e-6 * px + 5.753298233447344e-7 * px * (o.steps || 0));
   const perImage = Math.max(Math.ceil(base * strength), 2);
-  const free = px <= 1048576 && (o.steps || 0) <= 28 && !!o.isOpus;
+  /* Opus 무료 조건(일반 해상도 이하 · 28스텝 이하)은 그대로지만, V5 부터는 그 위에
+     "사용량 한도" 가 하나 더 붙는다. 한도가 0% 면 무료가 아니라 Anlas 가 나간다. */
+  const free = px <= 1048576 && (o.steps || 0) <= 28 && !!o.isOpus && o.opusLeft !== 0;
   // Opus 무료는 '한 장' 에만 걸린다. 예전엔 장수 전체를 0 으로 표시해서, 4장을 뽑아도
   // 비용이 0 으로 보이고 실제로는 Anlas 가 빠져나갔다.
   // 모르는 쪽으로 틀릴 때는 적게 표시하는 것보다 많게 표시하는 편이 낫다.
   const generation = free ? perImage * Math.max(0, (o.batch || 1) - 1) : perImage * (o.batch || 1);
   const charRef = (o.charRefCount || 0) * 5 * (o.batch || 1);   // 캐릭터 레퍼런스 장당 5
   const vibeEncoding = (o.unencodedVibes || 0) * 2;             // encode-vibe 1회 2 (캐시되면 0)
-  return { perImage, generation, charRef, vibeEncoding, total: generation + charRef + vibeEncoding };
+  return { perImage, generation, charRef, vibeEncoding, free,
+           total: generation + charRef + vibeEncoding };
 }
 function directorToolCost(w, h, isOpus) {
   const px = w * h;
@@ -2026,7 +2093,7 @@ function syncUI() {
   ['steps', 'scale', 'rescale', 'strength', 'noise', 'enhStr', 'enhNoise', 'varStr', 'varNoise', 'ucStrength'].forEach(setR);
   $('#enhScale').value = S.enhScale; $('#sampler').value = S.sampler; $('#schedule').value = S.schedule;
   $('#seed').value = S.seed; $('#randomSeed').checked = S.randomSeed;
-  ['quality', 'variety', 'decrisper', 'smea', 'smeaDyn', 'legacyUc', 'vibeNormalize', 'autoSaveOn', 'stripOnSave', 'slashWild'].forEach(k => { $('#' + k).checked = !!S[k]; });
+  ['quality', 'variety', 'decrisper', 'smea', 'smeaDyn', 'legacyUc', 'vibeNormalize', 'autoSaveOn', 'stripOnSave', 'slashWild', 'transparent'].forEach(k => { $('#' + k).checked = !!S[k]; });
   $('#autoNsfw').checked = S.autoNsfw !== false;
   $('#prompt').value = S.prompt; $('#uc').value = S.uc;
   renderSections();
@@ -2039,6 +2106,10 @@ function syncUI() {
   $('#sampSum').textContent = `${S.steps}st · g${S.scale}${S.rescale ? ' · r' + S.rescale : ''} · ${(SAMPLERS.find(s => s[0] === S.sampler) || [])[1] || S.sampler}`;
   const uName = (MODELS[S.model].ucs[ucIdx()] || {}).name || '';
   $('#optSum').textContent = [S.quality ? '퀄리티' : '', 'UC ' + uName, S.variety ? 'Variety+' : '', S.decrisper ? 'Decrisper' : ''].filter(Boolean).join(' · ');
+  /* 투명 배경은 V5 만 받는다 — 다른 모델에서는 칸 자체를 숨겨,
+     켜 둔 줄 알고 기다리는 일이 없게 한다. */
+  { const row = $('#transpRow'), cb = $('#transparent');
+    if (row && cb) { const ok = capsOf(S.model).transparency; row.hidden = !ok; cb.checked = ok && !!S.transparent; } }
   syncAdvanced(); updateCostHint(); updateRefBadge();
   if (typeof renderStyleSelects === 'function') renderStyleSelects();
   // 코드로 value 를 바꾼 textarea 들은 input 이벤트가 안 나므로 하이라이트 미러를 직접 다시 그린다
@@ -2107,17 +2178,22 @@ function syncSizePreset() { const idx = SIZES.findIndex(s => s[1] === S.w && s[2
 function syncAdvanced() { $('#qtagsEdit').value = getQuality(S.model); $('#ucEdit').value = getUcText(S.model, ucIdx()); }
 function updateCostHint() {
   const isOpus = R.tier === 3;
+  const caps = capsOf(S.model);
   const est = anlasEstimate({ width: S.w, height: S.h, steps: S.steps, batch: S.n,
-    strength: R.i2iBlob ? S.strength : 1, isOpus,
-    charRefCount: MODELS[S.model].ver >= 45 ? R.prefs.length : 0,   // V4.5 아니면 실제로 안 나가므로 비용도 0
+    strength: R.i2iBlob ? S.strength : 1, isOpus, opusLeft: R.opusUsage,
+    charRefCount: caps.charRef ? R.prefs.length : 0,   // 그 모델이 안 받으면 비용도 0
     /* "인코딩이 있으면 공짜" 가 아니다. ensureVibes 는 모델이나 Info Extracted 가
        바뀌면 같은 조건(v.encModel === S.model && v.encIe === v.ie)으로 다시 인코딩한다.
        예전엔 v.enc 만 봐서, 모델을 바꾼 뒤에도 비용이 0 으로 보이다가 실제로는
        장당 2 Anlas 씩 더 나갔다. 여기도 같은 조건으로 센다. */
-    unencodedVibes: R.vibes.filter(v => v.b64 && !(v.enc && v.encModel === S.model && v.encIe === v.ie)).length });
+    unencodedVibes: caps.vibe ? R.vibes.filter(v => v.b64 && !(v.enc && v.encModel === S.model && v.encIe === v.ie)).length : 0 });
   const el = $('#genCost');
   if (!hasToken()) { el.textContent = ''; return; }
-  el.textContent = est.total === 0 ? 'Opus 무료' : `◈ ${est.total}` + (S.n > 1 ? ` (${S.n}장)` : '');
+  /* "Opus 무료" 라고만 쓰면, V5 에서 한도가 떨어졌을 때 예고 없이 Anlas 가 나간다.
+     남은 비율을 알면 함께 보여준다. */
+  el.textContent = est.total === 0
+    ? ('Opus 무료' + (R.opusUsage != null ? ` (잔여 ${R.opusUsage}%)` : ''))
+    : `◈ ${est.total}` + (S.n > 1 ? ` (${S.n}장)` : '');
   el.title = `장당 ${est.perImage} · 생성 ${est.generation}` + (est.charRef ? ` · 레퍼런스 ${est.charRef}` : '') + (est.vibeEncoding ? ` · 바이브 인코딩 ${est.vibeEncoding}` : '') + (isOpus ? '' : ' (Opus 구독이면 1024²·28스텝 이하 무료)');
 }
 
@@ -2162,7 +2238,7 @@ function init() {
   $('#btnDice').onclick = () => fixSeed(randSeed());
   $('#btnSeedLast').onclick = () => { if (R.lastSeed != null) fixSeed(R.lastSeed); };
   const bindCk = (id, key, after) => { $('#' + id).onchange = () => { S[key] = $('#' + id).checked; save(); if (after) after(); }; };
-  ['randomSeed', 'quality', 'variety', 'decrisper', 'legacyUc', 'vibeNormalize', 'autoSaveOn', 'stripOnSave', 'smeaDyn', 'autoNsfw', 'slashWild'].forEach(k => bindCk(k, k, updateCostHint));
+  ['randomSeed', 'quality', 'variety', 'decrisper', 'legacyUc', 'vibeNormalize', 'autoSaveOn', 'stripOnSave', 'smeaDyn', 'autoNsfw', 'slashWild', 'transparent'].forEach(k => bindCk(k, k, updateCostHint));
   bindCk('smea', 'smea', () => { $('#smeaDyn').disabled = !S.smea; if (!S.smea) { S.smeaDyn = false; $('#smeaDyn').checked = false; } updateCostHint(); });
   $('#aiChoiceBtn').onclick = () => { S.aiChoice = !S.aiChoice; save(); renderChars(); };
   $('#ucPreset').onchange = () => { S.ucPreset = +$('#ucPreset').value; syncAdvanced(); save(); };
