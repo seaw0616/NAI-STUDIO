@@ -1508,7 +1508,12 @@ function openHealth() {
       L.push(`- 브라우저: ${navigator.userAgent}`);
       L.push(`- 모델: ${S.model} · ${S.w}×${S.h} · 스텝 ${S.steps} · 스케일 ${S.scale} · ${S.sampler} / ${S.schedule}`);
       if ($$$('#hcWithPrompt').checked) {
-        L.push('', '## 프롬프트', '', '```', (typeof previewFinal === 'function' ? previewFinal() : (S.prompt || '')).slice(0, 1500), '```');
+        /* previewFinal() 은 문자열이 아니라 {p, uc} 를 돌려준다. 그대로 .slice 를 걸어서
+           보고 버튼이 TypeError 로 죽었다 (오류 보고 기능이 스스로를 못 보내던 셈). */
+        let fp = S.prompt || '', fu = S.uc || '';
+        try { if (typeof previewFinal === 'function') { const r = previewFinal(); fp = (r && r.p) || fp; fu = (r && r.uc) || fu; } } catch (e) {}
+        L.push('', '## 프롬프트', '', '```', String(fp).slice(0, 1500), '```');
+        if (fu) L.push('', '## 네거티브', '', '```', String(fu).slice(0, 800), '```');
       }
       const bad = ((snap && snap.checks) || []).filter(c => !c.ok);
       if (bad.length) { L.push('', '## 점검에서 걸린 것', ''); for (const c of bad) L.push(`- **${c.name}** — ${c.detail || ''}`); }

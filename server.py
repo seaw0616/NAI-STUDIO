@@ -39,7 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 VERSION = 17
-RELEASE = "11.21"            # 배포 버전. GitHub 릴리스 태그 "v11.21" 과 짝을 이룬다.
+RELEASE = "11.22"            # 배포 버전. GitHub 릴리스 태그 "v11.22" 과 짝을 이룬다.
 UPDATE_REPO = ""            # "사용자명/저장소" — 비어 있으면 설정에서 넣는다 (config.json 의 updateRepo)
 FROZEN = getattr(sys, "frozen", False)          # PyInstaller 로 묶인 단일 exe 인가
 if FROZEN:
@@ -621,6 +621,52 @@ def _dan_get(path_q, ttl=600):
     return data
 
 
+# ─────────────── NAI 새 모델 감시 ───────────────
+# 앱이 아는 모델. 여기 없는 id 가 novelai.net 에 보이면 새로 나온 것이다.
+KNOWN_MODELS = {
+    "nai-diffusion-5-full", "nai-diffusion-5-curated",
+    "nai-diffusion-5-full-inpainting", "nai-diffusion-5-curated-inpainting",
+    "nai-diffusion-4-5-full", "nai-diffusion-4-5-curated",
+    "nai-diffusion-4-5-full-inpainting", "nai-diffusion-4-5-curated-inpainting",
+    "nai-diffusion-4-full", "nai-diffusion-4-curated-preview",
+    "nai-diffusion-4-full-inpainting", "nai-diffusion-4-curated-inpainting",
+    "nai-diffusion-3", "nai-diffusion-3-inpainting",
+    "nai-diffusion-furry-3", "nai-diffusion-furry-3-inpainting",
+    # 옛 모델 — 지금은 안 쓰지만 "새 것" 으로 오인하면 안 된다
+    "nai-diffusion", "nai-diffusion-2", "nai-diffusion-xl", "nai-diffusion-inpainting",
+    "nai-diffusion-furry", "nai-diffusion-furry2",
+}
+_nai_watch = {"t": 0.0, "new": [], "err": ""}
+
+
+def nai_model_watch(max_age=86400):
+    """하루에 한 번 novelai.net 을 보고 앱이 모르는 모델 id 를 찾는다.
+
+    받는 건 공개된 웹앱 스크립트뿐이고, 로그인도 토큰도 쓰지 않는다.
+    실패하면 조용히 넘어간다 — 이것 때문에 점검이 시끄러워지면 안 된다."""
+    now = time.time()
+    if now - _nai_watch["t"] < max_age:
+        return _nai_watch["new"]
+    _nai_watch["t"] = now
+    try:
+        req = urllib.request.Request("https://novelai.net/image", headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            html = r.read(400000).decode("utf-8", "replace")
+        m = re.search(r"/_next/static/chunks/pages/_app-[\w]+\.js", html)
+        if not m:
+            raise RuntimeError("번들 주소를 찾지 못했습니다")
+        req = urllib.request.Request("https://novelai.net" + m.group(0), headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=40) as r:
+            js = r.read(12 * 1024 * 1024).decode("utf-8", "replace")
+        found = set(re.findall(r"nai-diffusion[a-z0-9.\-]*", js))
+        fresh = sorted(x for x in found if x not in KNOWN_MODELS)
+        _nai_watch["new"] = fresh
+        _nai_watch["err"] = ""
+    except Exception as e:
+        _nai_watch["err"] = str(e)[:140]
+    return _nai_watch["new"]
+
+
 def _dan_img_trim(cap=80 * 1024 * 1024):
     """이미지 캐시 총량을 제한한다 (호출자가 _dan_lock 을 쥔 상태로 부른다)."""
     items = [(k, v) for k, v in _dan_cache.items() if k.startswith("img|")]
@@ -967,7 +1013,19 @@ def self_check(deep=False):
         checks.append(_chk("최근 오류", h1 == 0, "1시간 %d건 · 24시간 %d건" % (h1, d1), "warn" if h1 else "info"))
     except Exception:
         pass
-    # 7) 바깥 연결 (깊은 점검일 때만 — 평소엔 네트워크를 건드리지 않는다)
+    # 7) NAI 가 새 모델을 냈는지 (하루 한 번, 공개 스크립트만 본다)
+    if deep:
+        try:
+            fresh = nai_model_watch()
+            if fresh:
+                checks.append(_chk("NAI 새 모델", False,
+                                   "앱이 모르는 모델이 보입니다: %s — 업데이트를 확인해 보세요" % ", ".join(fresh[:4]),
+                                   "warn"))
+            else:
+                checks.append(_chk("NAI 새 모델", True, "없음", "info"))
+        except Exception:
+            pass
+    # 8) 바깥 연결 (깊은 점검일 때만 — 평소엔 네트워크를 건드리지 않는다)
     if deep:
         for label, host in (("NAI 이미지 서버", "image.novelai.net"), ("깃헙", "api.github.com")):
             try:
