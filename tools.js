@@ -1780,7 +1780,9 @@ function seedCensorChunks() {
   for (const [name, text] of CENSOR_CHUNKS) {
     if (S.chunks.some(c => normKey(c.name) === normKey(name))) continue;
     if (isTombed(S.deleted, 'chunk', name)) continue;    // 지운 것은 되살리지 않음
-    S.chunks.push({ name, text, cat: '검열', createdAt: Date.now() }); n++;
+    // seeded: 앱이 자동으로 심은 것. "사용자가 만든 내용" 개수에서 빼야
+    // 빈 브라우저 보호가 제대로 걸린다 (contentCount 참고)
+    S.chunks.push({ name, text, cat: '검열', createdAt: Date.now(), seeded: true }); n++;
   }
   if (n) { addChunkCat('검열'); save(); }
 }
@@ -1799,7 +1801,7 @@ function seedArtistPack() {
   const add = (name, text, cat) => {
     if (S.chunks.some(c => normKey(c.name) === normKey(name))) return 0;
     if (isTombed(S.deleted, 'chunk', name)) return 0;
-    S.chunks.push({ name, text, cat, createdAt: Date.now() }); return 1;
+    S.chunks.push({ name, text, cat, createdAt: Date.now(), seeded: true }); return 1;
   };
   let n = 0;
   n += add('작가랜덤', ARTIST_SEED.frag, '작가');   // 여러 줄 = 조각 → <작가랜덤> 이 매번 한 명씩 뽑음
@@ -1807,7 +1809,7 @@ function seedArtistPack() {
   if (n) addChunkCat('작가');
   if (!S.styles.some(s => s.name === '작태 뽑기') && !isTombed(S.deleted, 'style', 'artist-pack')) {
     S.styles.push({ id: 'artist-pack', name: '작태 뽑기', prefix: ARTIST_SEED.base, suffix: '',
-      uc: ARTIST_SEED.baseUc, createdAt: Date.now() });
+      uc: ARTIST_SEED.baseUc, createdAt: Date.now(), seeded: true });
     n++;
   }
   if (n) save();

@@ -149,14 +149,20 @@ const DEFAULTS = {
   mode: 'main', scenes: [], curScene: null, styles: [], activeStyle: null, characters: [],
 };
 let S = { ...DEFAULTS };
-try { S = { ...DEFAULTS, ...(JSON.parse(localStorage.getItem('nst_state')) || {}) }; } catch (e) {}
+try { S = normalizeState({ ...DEFAULTS, ...(JSON.parse(localStorage.getItem('nst_state')) || {}) }); } catch (e) { S = { ...DEFAULTS }; }
 let saveTimer = null, pushTimer = null;
 function save() {
   // 초기화/서버 동기화가 끝나기 전(R.booted=false)의 내부 저장은 "사용자 편집"으로 치지 않음 → 빈 브라우저가 서버 설정을 덮어쓰는 사고 방지
   if (R.booted) S.savedAt = Date.now();
-  if (typeof updatePreview === 'function') updatePreview();
+  /* 저장을 먼저, 그리기를 나중에.
+     예전엔 updatePreview() 를 먼저 불렀는데, 거기서 예외가 한 번 나면
+     그 뒤의 localStorage 예약도 서버 push 예약도 한 줄도 실행되지 않았다.
+     그러면 그 창은 그때부터 아무것도 저장하지 못하고, 닫으면 그 세션이 통째로 사라진다.
+     실제로 그 모양의 사고가 났다 — 서버는 멀쩡한데 8시간 동안 저장이 한 건도 안 들어왔다.
+     저장은 화면 그리기가 어떻게 되든 반드시 일어나야 한다. */
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => localStorage.setItem('nst_state', JSON.stringify(S)), 250);
+  saveTimer = setTimeout(() => { try { localStorage.setItem('nst_state', JSON.stringify(S)); } catch (e) { logErr('로컬 저장 실패: ' + e.message); } }, 250);
+  try { if (typeof updatePreview === 'function') updatePreview(); } catch (e) { logErr('미리보기 갱신 실패(저장은 계속됨): ' + e.message); }
   if (R.booted) {
     clearTimeout(pushTimer);
     // force: 사용자가 "일부러" 비운 경우. 서버의 빈-프롬프트 보호는 사고를 막으려는 것이지
@@ -167,7 +173,31 @@ function save() {
 }
 /* 사용자가 직접 지운 뒤 부르는 저장 — 서버 보호를 넘어 그대로 반영한다 */
 function saveCleared() { R._forcePush = true; save(); }
-const contentCount = s => ['chunks', 'styles', 'characters', 'scenes'].reduce((a, k) => a + ((s && s[k] && s[k].length) || 0), 0);
+/* "사용자가 만든 내용" 의 개수.
+   앱이 켜질 때 검열·작가 청크 23개를 자동으로 심는데(initTools), 그걸 세면
+   새로 연 브라우저도 절대 "빈 상태" 로 판정되지 않는다.
+   그래서 "빈 브라우저는 서버를 못 덮는다" 보호가 처음부터 죽은 코드였다.
+   → 자동으로 심은 것(seeded)은 빼고 센다. */
+const contentCount = s => ['chunks', 'styles', 'characters', 'scenes']
+  .reduce((a, k) => a + ((s && s[k]) || []).filter(x => !(x && x.seeded)).length, 0);
+/* S 를 통째로 갈아끼우는 자리(부팅·서버에서 가져오기·백업 복원·설정 가져오기)에서 한 번 태운다.
+   {...DEFAULTS, ...남의것} 은 값이 null 이어도 그대로 들어온다. 그러면 S.uc.trim() 같은 데서
+   예외가 나고, 그때부터 그 창은 아무것도 저장하지 못한다. 모양만 바로잡는다 — 값은 안 건드린다. */
+function normalizeState(o) {
+  if (!o || typeof o !== 'object') return { ...DEFAULTS };
+  for (const k in DEFAULTS) {
+    const d = DEFAULTS[k], v = o[k];
+    if (Array.isArray(d)) { if (!Array.isArray(v)) o[k] = Array.isArray(d) ? [...d] : []; }
+    else if (d && typeof d === 'object') { if (!v || typeof v !== 'object' || Array.isArray(v)) o[k] = { ...d }; }
+    else if (typeof d === 'string') { if (typeof v !== 'string') o[k] = d; }
+    else if (typeof d === 'number') { if (typeof v !== 'number' || !isFinite(v)) o[k] = d; }
+    else if (typeof d === 'boolean') { if (typeof v !== 'boolean') o[k] = d; }
+  }
+  if (!MODELS[o.model]) o.model = DEFAULTS.model;
+  if (!o.deleted || typeof o.deleted !== 'object') o.deleted = {};
+  if (!o.ov || typeof o.ov !== 'object') o.ov = {};
+  return o;
+}
 /* 서버에 실제로 저장됐으면 true. 백업 복원처럼 "됐다" 를 말해야 하는 쪽에서 쓴다
    (예전엔 아무것도 안 돌려줘서, 서버가 꺼져 있어도 '✔ 복원 완료' 로 표시됐다). */
 async function pushStateToServer(force) {
@@ -297,7 +327,7 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
     // 로컬이 이기는데 그 로컬이 지금 서버 버전을 보고 만든 게 아니면, 서버 쪽 설정이
     // 이 저장으로 덮인다 → 조용히 넘어가지 않고 알린다 (덮어쓰기는 그대로 진행).
     const diverged = localNewer && rawBase != null && !basedOnCurrent;
-    const base = localNewer ? { ...S } : { ...DEFAULTS, ...srv }, other = localNewer ? srv : S;
+    const base = normalizeState(localNewer ? { ...S } : { ...DEFAULTS, ...srv }), other = localNewer ? srv : S;
     // 대기열·기록은 합치지 않는다. 톰스톤이 없어서 합집합이 곧 '절대 못 지움'이 되기 때문에
     // 대기열에서 뺀 곡이 서버/다른 탭에서 그대로 되살아났다. 이 둘은 최신 쪽(base)을 그대로 쓴다.
     for (const [k, key, kind] of [['chunks', 'name', 'chunk'], ['styles', 'id', 'style'], ['characters', 'name', 'char'], ['scenes', 'id', 'scene']])
@@ -741,7 +771,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '11.22';   // 화면 표시용 앱 버전 (상단)
+const APP_VERSION = '11.23';   // 화면 표시용 앱 버전 (상단)
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 async function tryHealth(base) {
   try {
@@ -936,14 +966,19 @@ async function refreshAnlas() {
 }
 
 /* ─────────────── 프리셋 / 스타일 ─────────────── */
-const getQuality = m => (S.ov[m] && S.ov[m].q != null) ? S.ov[m].q : MODELS[m].quality;
+/* 모델 조회는 어디서든 폴백을 거친다.
+   MODELS 에 없는 id 하나가 들어오면(예전 백업·다른 기기·버전 롤백) 여기서 예외가 나고,
+   그게 save() 를 타고 올라가 저장 자체를 멈추게 했다. */
+const modelOf = m => MODELS[m] ? m : (MODELS[S.model] ? S.model : DEFAULTS.model);
+const getQuality = m => { const k = modelOf(m); const o = S.ov && S.ov[k]; return (o && o.q != null) ? o.q : MODELS[k].quality; };
 // 모델마다 UC 프리셋 개수가 달라, 실제로 생성에 쓰는 모델(m)을 기준으로 잡아야 한다.
 // S.model 로만 보면 인핸스·변형처럼 다른 모델로 돌릴 때 엉뚱한 프리셋이 나갔다.
-function ucIdx(m) { const mm = MODELS[m] ? m : S.model; const n = MODELS[mm].ucs.length; return S.ucPreset < n ? S.ucPreset : 0; }
+function ucIdx(m) { const mm = modelOf(m); const n = MODELS[mm].ucs.length; return S.ucPreset < n ? S.ucPreset : 0; }
 function getUcText(m, idx) {
-  const o = S.ov[m];
+  const k = modelOf(m);
+  const o = S.ov && S.ov[k];
   if (o && o.uc && o.uc[idx] != null) return o.uc[idx];
-  const p = MODELS[m].ucs[idx]; return p ? p.text : '';
+  const p = MODELS[k].ucs[idx]; return p ? p.text : '';
 }
 const getStyle = id => id ? (S.styles.find(s => s.id === id) || null) : null;
 const isV4 = () => MODELS[S.model].ver >= 40;

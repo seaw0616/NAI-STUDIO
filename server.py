@@ -39,7 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 VERSION = 17
-RELEASE = "11.22"            # 배포 버전. GitHub 릴리스 태그 "v11.22" 과 짝을 이룬다.
+RELEASE = "11.23"            # 배포 버전. GitHub 릴리스 태그 "v11.22" 과 짝을 이룬다.
 UPDATE_REPO = ""            # "사용자명/저장소" — 비어 있으면 설정에서 넣는다 (config.json 의 updateRepo)
 FROZEN = getattr(sys, "frozen", False)          # PyInstaller 로 묶인 단일 exe 인가
 if FROZEN:
@@ -499,18 +499,28 @@ def restart_self():
     """
     import subprocess
     args = [a for a in sys.argv[1:] if a != "--no-browser"]
-    cmd = [sys.executable, str(ROOT / "server.py")] + args
 
-    def go():
-        try:
-            subprocess.Popen(cmd, cwd=str(ROOT),
-                             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
-        except Exception:
-            pass
-        os._exit(0)
-
-    # 먼저 죽고 나서(=포트를 놓고) 새로 띄운다 → 같은 포트로 다시 뜬다
-    threading.Timer(0.6, go).start()
+    # 포트가 바뀌면 브라우저에게는 "다른 사이트" 가 된다 — localStorage 가 통째로 비어
+    # 프롬프트도 설정도 전부 기본값이 되어 버린다. 실제로 그 사고가 났다.
+    # 그래서 반드시 **옛 프로세스가 완전히 죽은 뒤에** 새 것을 띄운다.
+    # (exe 업데이트가 쓰는 _update.bat 과 같은 방식 — PID 가 사라질 때까지 기다린다)
+    quoted = " ".join('"%s"' % a for a in ([sys.executable, str(ROOT / "server.py")] + args))
+    bat = HOME / "_restart.bat"
+    bat.write_text(
+        "@echo off\r\n"
+        "chcp 65001 >nul\r\n"
+        ":wait\r\n"
+        "timeout /t 1 /nobreak >nul\r\n"
+        'tasklist /fi "PID eq %d" 2>nul | find "%d" >nul && goto wait\r\n' % (os.getpid(), os.getpid()) +
+        "%s\r\n" % quoted +
+        'del "%~f0"\r\n',
+        encoding="utf-8")
+    try:
+        subprocess.Popen(["cmd", "/c", str(bat)], cwd=str(ROOT),
+                         creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+    except Exception as e:
+        return False, "재시작을 준비하지 못했습니다: %s" % str(e)[:120]
+    threading.Timer(0.8, lambda: os._exit(0)).start()
     return True, "재시작합니다"
 
 
@@ -2668,6 +2678,9 @@ def pick_port():
             pass
     for p in PORT_CANDIDATES:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            # SO_REUSEADDR 를 켜면 안 된다. 윈도우에서는 그 옵션이 있으면
+            # **다른 서버가 실제로 LISTEN 중인 포트도** bind 가 성공해 버린다(직접 확인).
+            # 그러면 서버 두 개가 같은 포트를 잡는다. 탐침은 옵션 없이 그대로 둔다.
             try:
                 s.bind(("127.0.0.1", p))
                 return p
