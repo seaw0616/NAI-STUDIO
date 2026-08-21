@@ -1287,7 +1287,9 @@ async function importFromPng(blob) {
   let j; try { j = JSON.parse(comment.text); } catch (e) { toast('메타데이터 파싱 실패', 'err'); return; }
   const src = (chunks.find(c => c.key === 'Source') || {}).text || '';
   let model = S.model;
-  if (/4\.5/.test(src)) model = /curated/i.test(src) ? 'nai-diffusion-4-5-curated' : 'nai-diffusion-4-5-full';
+  // V5 를 먼저 본다 — "V4.5" 검사보다 앞서야 한다 (둘 다 걸리는 문자열이 오는 경우가 있다)
+  if (/\bV?5\b/i.test(src) && !/4\.5/.test(src)) model = /curated/i.test(src) ? 'nai-diffusion-5-curated' : 'nai-diffusion-5-full';
+  else if (/4\.5/.test(src)) model = /curated/i.test(src) ? 'nai-diffusion-4-5-curated' : 'nai-diffusion-4-5-full';
   else if (/Diffusion V4/i.test(src)) model = /curated/i.test(src) ? 'nai-diffusion-4-curated-preview' : 'nai-diffusion-4-full';
   else if (/furry/i.test(src)) model = 'nai-diffusion-furry-3';
   else if (/V3/i.test(src)) model = 'nai-diffusion-3';
