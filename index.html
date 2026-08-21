@@ -236,6 +236,7 @@ try {
         <label class="ck" title="(a/b/c) 와 a/b/c 를 랜덤 선택으로 씁니다. fate/zero, (fate/apocrypha), k/da 처럼 슬래시가 이름에 들어간 정상 태그가 깨지므로 기본은 꺼둡니다. &lt;a|b|c&gt; 와 &lt;조각이름&gt; 은 이 설정과 무관하게 항상 동작합니다."><input type="checkbox" id="slashWild"> 슬래시 와일드카드 (a/b/c) 사용 — 태그가 깨질 수 있음</label>
         <details class="sub"><summary>프리셋 문자열 편집</summary>
           <label class="fld">퀄리티 태그<textarea id="qtagsEdit" rows="2" spellcheck="false"></textarea></label>
+          <div class="row" id="qtagsPresets" hidden><span class="hint">V5 프리셋:</span><button class="btn xs" id="qtStd">standard</button><button class="btn xs" id="qtLight">light</button><button class="btn xs" id="qtReset">기본값</button></div>
           <label class="fld">UC 프리셋 내용<textarea id="ucEdit" rows="3" spellcheck="false"></textarea></label>
           <button id="btnResetPreset" class="btn sm">기본값 복원</button></details>
       </div>

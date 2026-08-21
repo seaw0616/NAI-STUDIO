@@ -2175,7 +2175,19 @@ function rebuildUcPresets() {
   sel.value = S.ucPreset;
 }
 function syncSizePreset() { const idx = SIZES.findIndex(s => s[1] === S.w && s[2] === S.h); $('#sizePreset').value = idx >= 0 ? idx : SIZES.length - 1; }
-function syncAdvanced() { $('#qtagsEdit').value = getQuality(S.model); $('#ucEdit').value = getUcText(S.model, ucIdx()); }
+function syncAdvanced() {
+  $('#qtagsEdit').value = getQuality(S.model); $('#ucEdit').value = getUcText(S.model, ucIdx());
+  // V5 는 퀄리티 프리셋이 두 가지다(standard/light) — 골라 넣을 수 있게 버튼을 보여준다
+  const row = $('#qtagsPresets'); if (row) row.hidden = !MODELS[S.model].quality2;
+}
+/* 퀄리티 태그를 프리셋 값으로 채운다 (편집칸에 직접 쓴 것과 같은 취급) */
+function setQualityPreset(which) {
+  const m = MODELS[S.model];
+  const v = which === 'light' ? (m.quality2 || m.quality) : m.quality;
+  S.ov[S.model] = S.ov[S.model] || {};
+  if (which === 'reset') delete S.ov[S.model].q; else S.ov[S.model].q = v;
+  $('#qtagsEdit').value = getQuality(S.model); save(); updatePreview();
+}
 function updateCostHint() {
   const isOpus = R.tier === 3;
   const caps = capsOf(S.model);
@@ -2243,6 +2255,9 @@ function init() {
   $('#aiChoiceBtn').onclick = () => { S.aiChoice = !S.aiChoice; save(); renderChars(); };
   $('#ucPreset').onchange = () => { S.ucPreset = +$('#ucPreset').value; syncAdvanced(); save(); };
   $('#qtagsEdit').oninput = () => { S.ov[S.model] = S.ov[S.model] || {}; S.ov[S.model].q = $('#qtagsEdit').value; save(); };
+  $('#qtStd').onclick = () => setQualityPreset('standard');
+  $('#qtLight').onclick = () => setQualityPreset('light');
+  $('#qtReset').onclick = () => setQualityPreset('reset');
   $('#ucEdit').oninput = () => { S.ov[S.model] = S.ov[S.model] || {}; S.ov[S.model].uc = S.ov[S.model].uc || {}; S.ov[S.model].uc[ucIdx()] = $('#ucEdit').value; save(); };
   $('#btnResetPreset').onclick = () => { delete S.ov[S.model]; syncAdvanced(); save(); toast('프리셋 기본값 복원'); };
   $('#prompt').addEventListener('input', () => { S.prompt = $('#prompt').value; save(); });
