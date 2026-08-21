@@ -93,6 +93,8 @@ def save_cfg(cfg):
             time.sleep(0.08 * (i + 1))
     os.replace(str(tmp), str(CONFIG))
 PORT_CANDIDATES = [8765, 8766, 8767, 8768, 8769]
+_LF = bytes([10])
+_CRLF = bytes([13, 10])   # 배치 파일 줄바꿈 (LF 로 쓰면 cmd 가 줄을 합쳐 읽는다)
 
 UPSTREAMS = {
     "/img/": "https://image.novelai.net/",
@@ -477,7 +479,13 @@ def update_source(url, ver):
                     b.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(dest, b)
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(z.read(name))
+                data = z.read(name)
+                # 배치 파일은 반드시 CRLF 여야 한다. 깃헙 zip 이 LF 로 오면
+                # cmd 가 줄을 이어붙여 읽어 start.bat 이 아예 실행되지 않는다
+                # (확인: LF -> exit 255 / CRLF -> 정상).
+                if dest.suffix.lower() == ".bat":
+                    data = data.replace(_CRLF, _LF).replace(_LF, _CRLF)
+                dest.write_bytes(data)
                 n += 1
             _upd_set(state="ready", file=str(bdir), msg="소스 %d개 파일을 갈아끼웠습니다" % n)
         except Exception as e:
