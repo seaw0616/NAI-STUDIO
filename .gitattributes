@@ -1,0 +1,19 @@
+# 배치 파일은 반드시 CRLF 로 저장·배포되어야 한다.
+# LF 로 나가면 cmd 가 줄을 이어붙여 읽어 start.bat 이 아예 실행되지 않는다
+# (확인: LF → exit 255 "'em'은(는) ... 아닙니다" / CRLF → 정상).
+# 이 설정은 깃헙이 만들어 주는 zip(=앱의 ⬆ 업데이트가 받는 것)에도 그대로 적용된다.
+*.bat text eol=crlf
+
+# 나머지는 저장소에 LF 로 둔다
+*.js   text eol=lf
+*.py   text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+
+# 이진 파일은 손대지 않는다
+*.gz  binary
+*.png binary
+*.ico binary
+*.exe binary
