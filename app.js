@@ -181,10 +181,15 @@ async function pushStateToServer(force) {
     if (r.status === 409) { // 서버가 보호: 서버 쪽 내용이 훨씬 많거나, 빈 프롬프트로 덮으려 함
       const j = await r.json().catch(() => ({}));
       const emptyPrompt = j.message === 'protected-prompt';
-      /* 개수 보호는 "빈 브라우저가 덮어쓰는 사고" 를 막는 것이라 화면을 서버 것으로 맞추는 게 맞다.
-         하지만 빈-프롬프트 보호는 사용자가 방금 지운 것일 수도 있다.
-         그때 서버 것을 끌어오면 지운 프롬프트가 눈앞에서 되살아난다 → 물어보고 나서 정한다. */
-      if (!emptyPrompt) pullStateFromServer(true).catch(() => {});
+      /* 사용자가 "일부러" 지운 경우는 saveCleared() 가 force 로 보내므로 여기까지 오지 않는다.
+         그러니 여기 온 빈 프롬프트는 사고다 — 서버 것을 되불러와 화면을 되살린다.
+         (v11.20 에서 이 되불러오기를 뺐더니, 프롬프트가 빈 채로 굳어 영영 안 돌아왔다) */
+      pullStateFromServer(true).catch(() => {});
+      if (emptyPrompt) {
+        toast('프롬프트가 비어 있어 저장하지 않고, 서버에 있던 것을 되살렸습니다', 'err');
+        R.stateSynced = false; logErr('서버 저장 보류(빈 프롬프트) — 서버 값으로 복구');
+        return false;
+      }
       if (R.protectShown) return false; R.protectShown = true;
       openModal(emptyPrompt ? '⚠ 프롬프트가 비어 있습니다' : '⚠ 설정 덮어쓰기 보호', body => {
         body.innerHTML = emptyPrompt
@@ -283,6 +288,12 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
     const localNewer = (S.savedAt || 0) >= srv.savedAt && !(localBare && srvHasStuff) && !forceMerge;
     if (localBare && srvHasStuff && (S.savedAt || 0) >= srv.savedAt)
       toast('이 브라우저가 빈 상태라 서버에 저장된 내용을 불러왔습니다');
+    /* 위 판정은 "전부 비었을 때" 만 막는다. 그런데 실제 사고는
+       **청크는 그대로인데 프롬프트 글자만 없는** 모양으로 난다(동기화가 어중간하게 끝났거나,
+       포트가 바뀌어 브라우저 저장분이 새 것일 때). 그러면 localBare 가 false 라 보호가
+       안 걸리고, 글자 없는 쪽이 이겨 화면이 빈 채로 굳는다 — 서버엔 남아 있는데도.
+       → 목록 승부와 별개로, **글자가 없는 쪽은 있는 쪽의 글자를 지우지 못한다.** */
+    const textFromServer = !hasText(S) && hasText(srv);
     // 로컬이 이기는데 그 로컬이 지금 서버 버전을 보고 만든 게 아니면, 서버 쪽 설정이
     // 이 저장으로 덮인다 → 조용히 넘어가지 않고 알린다 (덮어쓰기는 그대로 진행).
     const diverged = localNewer && rawBase != null && !basedOnCurrent;
@@ -298,7 +309,25 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
     if (contentCount(base) < contentCount(S) || diverged) { try { localStorage.setItem('nst_state_prev', JSON.stringify(S)); } catch (e) {} }
     R.seenBase = srv.savedAt || 0;
     try { localStorage.setItem('nst_base', String(srv.savedAt || 0)); } catch (e) {}   // 용량 초과로 pull 전체가 중단되면 안 된다
-    if (localNewer) { S = base; R.booted = true; save(); if (diverged) toast('이 브라우저 설정으로 서버를 갱신했습니다 — 다른 창/기기에서 바꾼 설정이 있었다면 📦백업에서 되돌릴 수 있습니다'); if (typeof renderChunkBar === 'function') renderChunkBar(); if (typeof renderStyleSelects === 'function') renderStyleSelects(); return false; }
+    if (textFromServer) {
+      // 목록은 로컬이 이기더라도 글자만은 서버 것을 되살린다
+      base.prompt = srv.prompt || '';
+      base.secText = srv.secText || {};
+      if (!hasText({ prompt: base.prompt, secText: base.secText })) { base.prompt = ''; base.secText = base.secText || {}; }
+      if (srv.sections && !((S.sections || []).length)) base.sections = srv.sections;
+      if (!(S.uc || '').trim() && (srv.uc || '').trim()) base.uc = srv.uc;
+      if (!(S.chars || []).some(c => (c.prompt || '').trim()) && (srv.chars || []).length) base.chars = srv.chars;
+      toast('프롬프트가 비어 있어 서버에 저장돼 있던 것을 되살렸습니다');
+    }
+    if (localNewer) {
+      S = base; R.booted = true; save();
+      if (diverged) toast('이 브라우저 설정으로 서버를 갱신했습니다 — 다른 창/기기에서 바꾼 설정이 있었다면 📦백업에서 되돌릴 수 있습니다');
+      // 되살린 글자가 화면에 보이도록 다시 그린다 (예전엔 S 만 바뀌고 칸은 빈 채였다)
+      if (textFromServer) { if (typeof renderSections === 'function') renderSections(); if (typeof syncUI === 'function') syncUI(); }
+      if (typeof renderChunkBar === 'function') renderChunkBar();
+      if (typeof renderStyleSelects === 'function') renderStyleSelects();
+      return false;
+    }
     S = base;
     localStorage.setItem('nst_state', JSON.stringify(S));
     if (!MODELS[S.model]) S.model = DEFAULTS.model;
@@ -712,7 +741,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '11.21';   // 화면 표시용 앱 버전 (상단)
+const APP_VERSION = '11.22';   // 화면 표시용 앱 버전 (상단)
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 async function tryHealth(base) {
   try {
@@ -775,11 +804,37 @@ function setSrvUI(ok, info) {
   } else if (w) w.remove();
   updateAnlasLabel();
 }
+/* 마지막 그물.
+
+   프롬프트가 사라지는 사고를 여러 번 고쳤는데, 고칠 때마다 판정 규칙의 다른 구멍으로
+   다시 났다. 그래서 규칙과 별개로, **결과만 보고** 판정한다:
+   "서버엔 글자가 있는데 이 화면은 비어 있다" 면 무조건 되살린다.
+   이건 규칙이 어떻게 바뀌든 걸리는 그물이라, 같은 사고가 조용히 지나갈 수 없다. */
+async function guardPromptLoss() {
+  try {
+    if (!R.srvOk || R._guardDone) return;
+    const hasText = o => !!((o.prompt || '').trim() || Object.values(o.secText || {}).some(v => (v || '').trim()));
+    if (hasText(S)) { R._guardDone = true; return; }          // 화면에 글자가 있으면 볼 것 없다
+    const srv = await (await fetch(R.api + '/state', { cache: 'no-store' })).json().catch(() => null);
+    if (!srv || !hasText(srv)) { R._guardDone = true; return; }
+    R._guardDone = true;
+    S.prompt = srv.prompt || ''; S.secText = srv.secText || {};
+    if (srv.sections && !((S.sections || []).length)) S.sections = srv.sections;
+    if (!(S.uc || '').trim() && (srv.uc || '').trim()) S.uc = srv.uc;
+    if (!(S.chars || []).some(c => (c.prompt || '').trim()) && (srv.chars || []).length) S.chars = srv.chars;
+    if (typeof renderSections === 'function') renderSections();
+    if (typeof renderChars === 'function') renderChars();
+    if (typeof syncUI === 'function') syncUI();
+    save();
+    toast('프롬프트가 비어 있어 서버에 저장돼 있던 것을 되살렸습니다');
+    logErr('프롬프트 복구: 화면은 비었는데 서버에 글자가 있었음');
+  } catch (e) { R._guardDone = true; }
+}
 async function srvLoop() {
   const info = await probeServer();
   const was = R.srvOkPrev;
   setSrvUI(R.srvOk, info);
-  if (R.srvOk && !was) { await pullStateFromServer(); refreshAnlas().catch(() => {}); if (window.onServerUp) window.onServerUp(); }
+  if (R.srvOk && !was) { await pullStateFromServer(); await guardPromptLoss(); refreshAnlas().catch(() => {}); if (window.onServerUp) window.onServerUp(); }
   if (!R.srvOk && !R.booted && (R.probeFails = (R.probeFails || 0) + 1) >= 3) R.booted = true; // 서버가 없으면 로컬만 사용
   // 서버가 10분마다 GitHub 를 확인해 /health 에 실어 준다. srvLoop 는 15초마다 도므로
   // 새 버전이 올라오면 몇 초 안에 버튼이 뜬다 (예전엔 앱이 6시간에 한 번만 물어봤다).
@@ -2175,7 +2230,19 @@ function rebuildUcPresets() {
   sel.value = S.ucPreset;
 }
 function syncSizePreset() { const idx = SIZES.findIndex(s => s[1] === S.w && s[2] === S.h); $('#sizePreset').value = idx >= 0 ? idx : SIZES.length - 1; }
-function syncAdvanced() { $('#qtagsEdit').value = getQuality(S.model); $('#ucEdit').value = getUcText(S.model, ucIdx()); }
+function syncAdvanced() {
+  $('#qtagsEdit').value = getQuality(S.model); $('#ucEdit').value = getUcText(S.model, ucIdx());
+  // V5 는 퀄리티 프리셋이 두 가지다(standard/light) — 골라 넣을 수 있게 버튼을 보여준다
+  const row = $('#qtagsPresets'); if (row) row.hidden = !MODELS[S.model].quality2;
+}
+/* 퀄리티 태그를 프리셋 값으로 채운다 (편집칸에 직접 쓴 것과 같은 취급) */
+function setQualityPreset(which) {
+  const m = MODELS[S.model];
+  const v = which === 'light' ? (m.quality2 || m.quality) : m.quality;
+  S.ov[S.model] = S.ov[S.model] || {};
+  if (which === 'reset') delete S.ov[S.model].q; else S.ov[S.model].q = v;
+  $('#qtagsEdit').value = getQuality(S.model); save(); updatePreview();
+}
 function updateCostHint() {
   const isOpus = R.tier === 3;
   const caps = capsOf(S.model);
@@ -2243,6 +2310,9 @@ function init() {
   $('#aiChoiceBtn').onclick = () => { S.aiChoice = !S.aiChoice; save(); renderChars(); };
   $('#ucPreset').onchange = () => { S.ucPreset = +$('#ucPreset').value; syncAdvanced(); save(); };
   $('#qtagsEdit').oninput = () => { S.ov[S.model] = S.ov[S.model] || {}; S.ov[S.model].q = $('#qtagsEdit').value; save(); };
+  $('#qtStd').onclick = () => setQualityPreset('standard');
+  $('#qtLight').onclick = () => setQualityPreset('light');
+  $('#qtReset').onclick = () => setQualityPreset('reset');
   $('#ucEdit').oninput = () => { S.ov[S.model] = S.ov[S.model] || {}; S.ov[S.model].uc = S.ov[S.model].uc || {}; S.ov[S.model].uc[ucIdx()] = $('#ucEdit').value; save(); };
   $('#btnResetPreset').onclick = () => { delete S.ov[S.model]; syncAdvanced(); save(); toast('프리셋 기본값 복원'); };
   $('#prompt').addEventListener('input', () => { S.prompt = $('#prompt').value; save(); });
@@ -2636,6 +2706,21 @@ async function runSelfTest() {
   await step('deflate', async () => { const st = new Response(new Uint8Array([0x4b, 4, 0])).body.pipeThrough(new DecompressionStream('deflate-raw')); return 'ok ' + (await new Response(st).arrayBuffer()).byteLength; });
   await step('ui', async () => ({ modelOpts: $('#model').options.length, srvText: $('#srvText').textContent, anlas: $('#anlas').textContent, hl: !!$('#prompt').dataset.hl }));
   r.errors = ERRLOG.slice();
+  /* 프롬프트 유실 회귀 검사.
+     "청크는 있는데 글자만 없는" 상태에서 pull 을 돌렸을 때 글자가 되살아나야 한다.
+     이 사고가 세 번 났고 그때마다 다른 구멍이었다 → 배포 전에 여기서 걸리게 한다. */
+  await step('promptLoss', async () => {
+    const keep = { p: S.prompt, t: S.secText, at: S.savedAt };
+    try {
+      const srv = await (await fetch(R.api + '/state', { cache: 'no-store' })).json();
+      const has = o => !!((o.prompt || '').trim() || Object.values(o.secText || {}).some(v => (v || '').trim()));
+      if (!has(srv)) return 'skip (서버에 프롬프트 없음)';
+      S.prompt = ''; S.secText = {}; S.savedAt = (srv.savedAt || 0) + 1000;   // 사고 상태
+      await pullStateFromServer();
+      const ok = has(S);
+      return ok ? 'ok (되살아남)' : 'FAIL: 서버엔 글자가 있는데 화면이 빈 채로 남음';
+    } finally { S.prompt = keep.p; S.secText = keep.t; S.savedAt = keep.at; }
+  });
   await fetch(R.api + '/selftest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(r) }).catch(() => {});
   console.log('selftest', r);
   return r;
