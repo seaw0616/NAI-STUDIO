@@ -231,6 +231,8 @@ try {
         <label class="ck"><input type="checkbox" id="quality"> 퀄리티 태그 자동 추가</label>
         <label class="fld">Undesired Content 프리셋<select id="ucPreset"></select></label>
         <div class="grid2"><label class="ck"><input type="checkbox" id="variety"> Variety+</label><label class="ck"><input type="checkbox" id="decrisper"> Decrisper</label></div>
+        <label class="ck" title="켜면 프롬프트 칸에 커서를 둘 때 아래에 청크 칩 띠가 뜹니다. 기본은 꺼져 있습니다 — 글 쓰는 데 걸리적거린다는 얘기가 있었습니다."><input type="checkbox" id="chunkFloatOn"> 청크 칩 띠 띄우기 <span class="hint">(프롬프트 칸을 누르면 청크 칩이 아래에 뜹니다)</span></label>
+        <label class="ck" title="{tag}·[tag]·1.2::tag:: 같은 가중치 표기를 프롬프트 칸에서 색으로 보여줍니다. 올린 건 빨강, 내린 건 파랑이고 진할수록 세게 준 것입니다. 청크 칩 색은 그대로 같이 보입니다."><input type="checkbox" id="emphHl"> 가중치 강조 표시 <span class="hint">({tag} · 1.2::tag::)</span></label>
         <label class="ck" id="transpRow" hidden title="배경을 투명하게 (V5 전용). 인물만 남기고 알파 채널로 뽑습니다."><input type="checkbox" id="transparent"> 투명 배경 <span class="hint">V5 전용</span></label>
         <label class="ck" title="NAI 웹과 동일: 프롬프트에 nsfw가 없으면 네거티브 맨 앞에 'nsfw, ' 자동 추가"><input type="checkbox" id="autoNsfw"> 네거티브에 nsfw 자동 추가 (NAI 웹과 동일)</label>
         <label class="ck" title="(a/b/c) 와 a/b/c 를 랜덤 선택으로 씁니다. fate/zero, (fate/apocrypha), k/da 처럼 슬래시가 이름에 들어간 정상 태그가 깨지므로 기본은 꺼둡니다. &lt;a|b|c&gt; 와 &lt;조각이름&gt; 은 이 설정과 무관하게 항상 동작합니다."><input type="checkbox" id="slashWild"> 슬래시 와일드카드 (a/b/c) 사용 — 태그가 깨질 수 있음</label>
@@ -359,6 +361,8 @@ try {
 
 <!-- ══════════ 떠 있는 YouTube 플레이어 ══════════ -->
 <div id="ytFloat" hidden>
+  <!-- 오른쪽 아래 모서리를 끌어 크기 조절. 더블클릭하면 원래 크기로 -->
+  <div id="ytGrip" title="드래그해서 크기 조절 · 더블클릭하면 원래대로"></div>
   <div id="ytHead">
     <span class="yt-logo">▶</span><span id="ytHeadTitle">YouTube</span>
     <div class="yt-hbtns">

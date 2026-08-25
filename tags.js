@@ -143,7 +143,7 @@ async function loadTagGroups() {
 }
 window.onServerUp = () => { loadTagDb(); loadT5().then(() => { if (typeof updatePreview === 'function') updatePreview(); }); };
 
-function tagSearchLocal(q, limit, cat, maxCand) {
+function tagSearchLocal(q, limit, cat, maxCand, wantScores) {
   if (!TAGDB.rows) return [];
   q = q.trim().toLowerCase();
   if (!q) return [];
@@ -154,11 +154,13 @@ function tagSearchLocal(q, limit, cat, maxCand) {
   const cap = maxCand || 4000;
   const rows = TAGDB.rows;
 
-  const scan = list => {   // list: 행 번호 배열이거나 null(전체)
+  let capped = false;      // 상한에 걸려 중간에 끊겼나 (그러면 후보 목록을 캐시하면 안 된다)
+  const scan = (list, keep) => {   // list: 행 번호 배열이거나 null(전체) · keep: 걸린 행 번호를 받을 배열
     const out = [];
     const n = list ? list.length : rows.length;
     for (let ii = 0; ii < n; ii++) {
-      const r = rows[list ? list[ii] : ii];
+      const ri = list ? list[ii] : ii;
+      const r = rows[ri];
       if (cat != null && r[1] !== cat) continue;
       const s = r[6], sn = r[7];
       let ok = true;
@@ -173,11 +175,12 @@ function tagSearchLocal(q, limit, cat, maxCand) {
       else if (tag.includes(qSp)) score = 300;
       else if (kwn.some(k => k.includes(qNoSp))) score = 250;
       out.push([score, r]);
+      if (keep) keep.push(ri);
       /* 상한은 점수를 매기기 전에 자르므로, 뒤에 덧붙인 보강 사전 태그는 완전 일치라도
          잘려나갔다(예: uniform 10만건이 자동완성에 안 떴다).
          → 높은 점수(정확/앞부분 일치)를 만나면 상한을 조금 넉넉히 봐준다. */
-      if (out.length >= cap && score < 400) break;
-      if (out.length >= cap * 2) break;
+      if (out.length >= cap && score < 400) { capped = true; break; }
+      if (out.length >= cap * 2) { capped = true; break; }
     }
     return out;
   };
@@ -185,7 +188,29 @@ function tagSearchLocal(q, limit, cat, maxCand) {
   // 인덱스로 후보를 좁혀 먼저 훑고(대부분 여기서 끝난다), 결과가 모자랄 때만 전체 스캔으로 폴백.
   // 인덱스는 "단어 시작" 기준이라 단어 중간에 걸리는 일치(예: eyes 안의 yes)는 폴백이 잡는다.
   let out = null;
-  if (TAGDB.idx) {
+
+  /* 직전에 훑어 둔 후보가 있고 지금 질의가 그 질의에 글자를 더한 것이면,
+     22만 행을 다시 볼 필요 없이 그 후보 안에서만 찾으면 된다.
+     타이핑 중에는 이 경로가 대부분이라 한글 검색이 40ms 에서 1ms 아래로 떨어진다. */
+  const remember = (qq, cand) => {
+    /* 최근 것 몇 개만 들고 있는다. 앞으로 치는 경우(흰머 → 흰머리)뿐 아니라
+       어미 폴백이 한 글자 짧은 질의를 다시 찾을 때도 여기서 맞아떨어진다. */
+    const keepList = (TAGDB.narrows || []).filter(x => x.q !== qq || x.cat !== cat);
+    keepList.unshift({ q: qq, cat, rowsLen: rows.length, cand });
+    TAGDB.narrows = keepList.slice(0, 4);
+  };
+  const nw = (TAGDB.narrows || []).filter(x =>
+    x.cat === cat && x.rowsLen === rows.length && x.q.length >= 2 && q.startsWith(x.q))
+    .sort((a, b) => b.q.length - a.q.length)[0];
+  let narrowed = false;
+  if (nw) {
+    const keep = [];
+    out = scan(nw.cand, keep);
+    if (!capped) remember(q, keep);
+    narrowed = true;   // 인덱스·전체 스캔은 건너뛴다. 다만 아래 어미 폴백까지 건너뛰면 안 된다
+  }
+
+  if (!narrowed && TAGDB.idx) {
     const longest = terms.reduce((a, b) => (b.length > a.length ? b : a), '');
     if (longest.length >= 2) {
       const bucket = TAGDB.idx.get(longest.slice(0, 2));
@@ -197,7 +222,7 @@ function tagSearchLocal(q, limit, cat, maxCand) {
      엉뚱한 한 건만 보여줬다. 그렇다고 매번 20만 행을 훑으면 타이핑이 끊긴다.
      → 인덱스 결과가 넉넉하면(8건 이상) 그대로 쓰고, 부족할 때만 전체를 훑는다. */
   const ENOUGH = Math.min(limit || 20, 8);
-  if (!out || out.length < ENOUGH) {
+  if (!narrowed && (!out || out.length < ENOUGH)) {
     /* 한 단어짜리 질의가 전체 스캔에서도 0건이었다면, 거기에 글자를 더 붙인 질의도 0건이다
        (모든 항이 부분문자열로 포함돼야 하므로) → 타이핑 중 매 글자마다 훑는 낭비를 막는다.
        단 이 기억은 '그때 그 카테고리 안에서 0건' 이라는 뜻이다. 카테고리를 같이 적어두지
@@ -211,11 +236,15 @@ function tagSearchLocal(q, limit, cat, maxCand) {
       if (dead.rows === (TAGDB.rows || []).length) {
         out = out || [];                       // 인덱스가 아무것도 못 찾았으면 null 이다
         out.sort((a, b) => b[0] - a[0] || b[1][2] - a[1][2]);
-        return out.slice(0, limit).map(x => x[1]);
+        return wantScores ? out.slice(0, limit) : out.slice(0, limit).map(x => x[1]);
       }
       TAGDB.deadQ = null;
     }
-    const full = scan(null);
+    const keep = [];
+    const full = scan(null, keep);
+    /* 전체를 훑었으니 이 후보 목록은 완전하다 — 다음 글자부터는 여기서만 찾으면 된다.
+       상한에 걸려 끊겼으면 목록이 불완전하므로 저장하지 않는다. */
+    if (!capped && q.length >= 2) remember(q, keep);
     if (full.length) {
       // 인덱스 결과와 합치되 같은 행이 두 번 들어가지 않게
       const seen = new Set((out || []).map(x => x[1]));
@@ -227,8 +256,23 @@ function tagSearchLocal(q, limit, cat, maxCand) {
     }
     out = out || [];
   }
+  out = out || [];
+  /* 한글 어미 폴백 — "앉아있는" 은 "앉아 있음" 을 못 찾는다(끝 글자가 다르다).
+     사람이 쓰는 어미(-는/-은/-기/-음/-한/-하기…)를 사전에 다 적어둘 수는 없으니
+     결과가 모자랄 때 끝 글자를 하나 떼고 한 번만 더 본다. 정상 결과가 있으면 안 돈다. */
+  if (out.length < 3 && terms.length === 1 && /^[가-힣]{3,}$/.test(q) && !TAGDB._koStem) {
+    TAGDB._koStem = 1;                       // 재귀는 한 번만
+    try {
+      /* 점수째로 받아 60점만 깎는다. 평평하게 주면 희귀 태그가 정답을 누른다
+         (앉아있는 -> sitting_on_mushroom 이 sitting 위로 올라왔었다). */
+      const more = tagSearchLocal(q.slice(0, -1), limit, cat, maxCand, true);
+      const seen = new Set(out.map(x => x[1]));
+      for (const m of more) { if (!seen.has(m[1])) out.push([m[0] - 60, m[1]]); }
+    } catch (e) { /* 폴백일 뿐이다. 실패해도 원래 결과를 그대로 쓴다 */ }
+    TAGDB._koStem = 0;
+  }
   out.sort((a, b) => b[0] - a[0] || b[1][2] - a[1][2]);
-  return out.slice(0, limit).map(x => x[1]);
+  return wantScores ? out.slice(0, limit) : out.slice(0, limit).map(x => x[1]);
 }
 function krOf(tag) {
   const r = TAGDB.map && (TAGDB.map.get(tag) || TAGDB.map.get(tag.replace(/ /g, '_')));
@@ -320,13 +364,26 @@ async function acQuery(ta) {
     if (!res.ok) { if (!items.length) acHide(); return; }
     const j = await res.json();
     const nai = (j.tags || []).map(t => ({ tag: t.tag.replace(/ /g, '_'), count: t.count, cat: catOf(t.tag), kr: krOf(t.tag), nai: true }));
-    const seen = new Set(nai.map(t => t.tag));
-    items = chunkHits.concat(nai, items.filter(t => !t.chunk && !seen.has(t.tag))).slice(0, 14);
-    if (items.length) acRender(items); else acHide();
+    /* 이미 보여준 목록의 순서를 바꾸지 않는다.
+       예전엔 NAI 추천을 맨 앞에 놓고 다시 그려서, 방금 보이던 태그가 아래로 밀리거나
+       목록 밖으로 나갔다("white s 까지 쳤는데 셔츠가 빼꼼 보이다 사라진다").
+       → 없는 것만 뒤에 덧붙이고, 이미 있는 것은 NAI 카운트만 채워준다. */
+    const have = new Set(items.map(t => t.tag));
+    for (const t of nai) {
+      const cur = items.find(x => x.tag === t.tag);
+      if (cur) { if (cur.count == null) cur.count = t.count; cur.nai = true; }
+      else if (!have.has(t.tag)) { items.push(t); have.add(t.tag); }
+    }
+    items = items.slice(0, 14);
+    if (items.length) acRender(items, true); else acHide();
   } catch (e) { /* aborted */ }
 }
-function acRender(items) {
-  AC.items = items; AC.sel = -1;
+function acRender(items, keepSel) {
+  /* keepSel: 이어서 다시 그리는 경우(NAI 추천 병합 등)에는 고르던 항목을 유지한다.
+     예전엔 무조건 -1 로 되돌려서, 방향키로 고르는 중에 목록이 갱신되면 선택이 풀렸다. */
+  const prevTag = keepSel && AC.sel >= 0 && AC.items[AC.sel] ? AC.items[AC.sel].tag : null;
+  AC.items = items;
+  AC.sel = prevTag ? items.findIndex(t => t.tag === prevTag) : -1;
   const box = AC.box; box.innerHTML = '';
   items.forEach((t, i) => {
     const d = document.createElement('div'); d.className = 'ac-item';
@@ -339,10 +396,27 @@ function acRender(items) {
     box.appendChild(d);
   });
   const ta = AC.ta, r = ta.getBoundingClientRect();
-  box.style.left = Math.min(r.left, innerWidth - 330) + 'px';
-  box.style.top = Math.min(r.bottom + 4, innerHeight - 310) + 'px';
+  box.style.left = Math.max(4, Math.min(r.left, innerWidth - 330)) + 'px';
   box.style.width = Math.max(300, Math.min(r.width, 520)) + 'px';
-  box.hidden = false;
+  /* 자리 잡기. 예전엔 무조건 칸 아래에 붙여서, 화면 가운데쯤 칸에서 쓰면
+     그 아래 칸들이 통째로 가려졌다 (프롬프트를 이어 쓰려는데 다음 칸이 안 보인다).
+     아래에 자리가 모자라면 위로 올리고, 양쪽 다 모자라면 넓은 쪽에 붙이고 높이를 줄인다. */
+  box.style.maxHeight = '';                       // 먼저 원래 높이로 재고
+  box.style.top = '0px'; box.hidden = false;
+  const h = box.offsetHeight || 300;
+  const below = innerHeight - r.bottom - 8;
+  const above = r.top - 8;
+  if (below >= h) {
+    box.style.top = (r.bottom + 4) + 'px';
+  } else if (above >= h) {
+    box.style.top = (r.top - h - 4) + 'px';
+  } else if (below >= above) {
+    box.style.top = (r.bottom + 4) + 'px';
+    box.style.maxHeight = Math.max(120, below) + 'px';
+  } else {
+    box.style.maxHeight = Math.max(120, above) + 'px';
+    box.style.top = Math.max(4, r.top - Math.min(h, above) - 4) + 'px';
+  }
 }
 function acPick(i) {
   const t = AC.items[i]; if (!t || !AC.ta) return;
@@ -693,6 +767,17 @@ function initTags() {
     else if (e.key === 'Escape') { e.stopPropagation(); acDismiss(); }
   }, true);
   document.addEventListener('click', e => { if (AC.box && !AC.box.contains(e.target)) acDismiss(); });
+  /* 위/아래를 고르는 판정은 그릴 때 한 번뿐인데 #acBox 는 position: fixed 다.
+     목록을 띄운 채 휠을 굴리면 박스만 제자리에 남아 엉뚱한 곳을 덮었다.
+     청크 칩 띠는 같은 이유로 이미 리스너를 달아 뒀는데 여기만 빠져 있었다.
+     캡처 단계로 듣는 이유: .col · #modalBody 처럼 안쪽에서 스크롤되는 것까지 잡아야 한다. */
+  const acReflow = () => {
+    if (!AC.box || AC.box.hidden || !AC.ta) return;
+    if (!document.contains(AC.ta)) { acDismiss(); return; }   // 칸이 사라졌으면 닫는다
+    acRender(AC.items, true);                                  // 고르던 항목은 유지
+  };
+  window.addEventListener('scroll', acReflow, true);
+  window.addEventListener('resize', acReflow);
   $('#btnTagSearch').onclick = () => openTagSearch();
   const ab = $('#btnArtist'); if (ab) ab.onclick = () => openArtistBrowser();
   document.addEventListener('keydown', e => {
