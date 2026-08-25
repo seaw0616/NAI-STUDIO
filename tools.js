@@ -73,9 +73,24 @@ function popMenu(e, items) {
     b.onclick = () => { m.remove(); fn(); }; m.appendChild(b);
   }
   document.body.appendChild(m);
-  const x = Math.min(e.clientX, innerWidth - 200), y = Math.min(e.clientY, innerHeight - m.offsetHeight - 10);
+  /* 가로를 상수 200 으로 막고 있었는데 실제 폭은 240px 쯤 된다
+     ("🗑 분류 삭제 (청크는 "기본"으로 이동)" 처럼 긴 항목 + 사용자가 지은 분류 이름).
+     body 에 overflow: hidden 이라 삐져나간 부분은 스크롤로도 못 본다.
+     세로도 하한이 없어 메뉴가 창보다 높으면 위쪽 항목에 영영 못 닿았다.
+     실제 크기를 재서 자리를 잡고, 아래가 좁으면 커서 위로 올린다 (자동완성과 같은 방식). */
+  const mw = m.offsetWidth, mh = m.offsetHeight;
+  const x = Math.max(4, Math.min(e.clientX, innerWidth - mw - 8));
+  const below = innerHeight - e.clientY - 8, above = e.clientY - 8;
+  let y;
+  if (below >= mh) y = e.clientY + 4;
+  else if (above >= mh) y = e.clientY - mh - 4;
+  else if (below >= above) { y = e.clientY + 4; m.style.maxHeight = Math.max(120, below) + 'px'; }
+  else { m.style.maxHeight = Math.max(120, above) + 'px'; y = Math.max(4, e.clientY - Math.min(mh, above) - 4); }
   m.style.left = x + 'px'; m.style.top = y + 'px';
   setTimeout(() => document.addEventListener('click', () => m.remove(), { once: true }), 0);
+  // 바깥 클릭 말고 Esc 로도 닫히게 (다른 떠 있는 것들과 같게)
+  const esc = ev => { if (ev.key === 'Escape') { m.remove(); document.removeEventListener('keydown', esc); } };
+  document.addEventListener('keydown', esc);
 }
 function chunkMenu(e, c) {
   const cats = chunkCats().filter(k => k !== (c.cat || '기본'));
@@ -114,15 +129,22 @@ function initChunkFloat() {
   const fl = document.createElement('div'); fl.id = 'chunkFloat'; fl.className = 'chunkbar floating'; fl.hidden = true; document.body.appendChild(fl);
   let hideT = null, curTa = null;
   let show = ta => {
-    if (!S.chunks.length || S.showChunkBars) { fl.hidden = true; return; }
+    // 기본은 안 뜬다. 글 쓰려고 칸을 눌렀을 뿐인데 팔레트가 아래 칸을 덮는다는 얘기가 두 번 나왔다.
+    if (!S.chunks.length || S.showChunkBars || !S.chunkFloatOn) { fl.hidden = true; return; }
     if (!ta.id) ta.id = 'ta_' + uid();
     curTa = ta; fl.dataset.ta = ta.id; renderChunkBar(fl);
     if (!fl.children.length) { fl.hidden = true; return; }
     const r = ta.getBoundingClientRect();
     fl.style.left = Math.max(8, Math.min(r.left, innerWidth - 420)) + 'px';
-    fl.style.top = Math.min(r.bottom + 4, innerHeight - 60) + 'px';
     fl.style.width = Math.max(240, Math.min(r.width, 520)) + 'px';
-    fl.hidden = false;
+    /* 자리 잡기. 예전엔 무조건 칸 아래에 붙이고 화면 밖으로 나가면 위로 끌어올렸는데,
+       그러면 글을 쓰고 있는 칸을 덮어버렸다. 아래에 자리가 없으면 칸 "위" 로 올린다. */
+    fl.style.top = '0px'; fl.hidden = false;          // 높이를 재려면 일단 보여야 한다
+    const h = fl.offsetHeight || 120;
+    const below = innerHeight - r.bottom - 8;
+    const above = r.top - 8;
+    fl.style.top = (below >= h || below >= above ? Math.min(r.bottom + 4, innerHeight - h - 4)
+                                                 : Math.max(4, r.top - h - 4)) + 'px';
   };
   const hideSoon = () => { clearTimeout(hideT); hideT = setTimeout(() => { if (S.chunkFloatPin) return; const a = document.activeElement; if (fl.matches(':hover') || (a && a === curTa)) return; fl.hidden = true; }, 350); };
   document.addEventListener('focusin', e => { if (e.target.matches && e.target.matches('textarea.ac')) { clearTimeout(hideT); show(e.target); } else if (!fl.contains(e.target)) hideSoon(); });
@@ -135,8 +157,22 @@ function initChunkFloat() {
   // 📌 고정: 켜면 포커스가 빠져도 띠가 남음
   const origRender = renderChunkBar;
   window._chunkFloatPin = () => { const p = document.createElement('button'); p.className = 'chip pin' + (S.chunkFloatPin ? ' on' : ''); p.textContent = S.chunkFloatPin ? '📌 고정됨' : '📌'; p.title = '띠를 고정 (포커스가 빠져도 유지)'; p.onclick = () => { S.chunkFloatPin = !S.chunkFloatPin; save(); if (curTa) show(curTa); }; return p; };
+  /* ✕ — 그 자리에서 끄기.
+     "그냥 프롬프트 쓰는데 태그 칸이 나온다" 는 얘기가 있었다. 설정까지 찾아 들어가지 않아도
+     여기서 바로 끌 수 있어야 한다. 끄면 다음에도 안 뜬다. */
+  const closeBtn = () => {
+    const b = document.createElement('button');
+    b.className = 'chip x'; b.textContent = '✕';
+    b.title = '이 띠를 끕니다 (⚙설정 → "청크 칩 띠 띄우기" 에서 다시 켤 수 있어요)';
+    b.onclick = e => {
+      e.preventDefault(); e.stopPropagation();
+      S.chunkFloatOn = false; save(); fl.hidden = true;
+      toast('청크 칩 띠를 껐습니다 — ⚙설정에서 다시 켤 수 있어요');
+    };
+    return b;
+  };
   const origShow = show;
-  show = ta => { origShow(ta); if (!fl.hidden) fl.prepend(window._chunkFloatPin()); };
+  show = ta => { origShow(ta); if (!fl.hidden) { fl.prepend(closeBtn()); fl.prepend(window._chunkFloatPin()); } };
 }
 function saveSelectionAsChunk() {
   const ta = activeTA();
@@ -263,6 +299,7 @@ function ytOpen(show) { const f = $('#ytFloat'); f.hidden = !show; S.ytOpen = !!
 function ytApplyPos() {
   const f = $('#ytFloat');
   f.classList.toggle('compact', S.ytSize === 'compact');
+  ytApplyDim();
   if (!S.ytPos) return;
   /* 저장된 위치가 창 밖이면 창 안으로 끌어온다.
      예전에는 화면에 120px 만 남기고 잘랐다 — 380px 패널의 260px 이 화면 밖으로 나가,
@@ -274,7 +311,26 @@ function ytApplyPos() {
   f.style.top = Math.max(4, Math.min(innerHeight - h - 4, S.ytPos.y)) + 'px';
   f.style.right = 'auto'; f.style.bottom = 'auto';
 }
-addEventListener('resize', () => { if (S && S.ytPos && $('#ytFloat') && !$('#ytFloat').hidden) ytApplyPos(); });
+/* 직접 정한 크기를 적용한다. 화면보다 크면 화면에 맞춰 줄인다 —
+   큰 모니터에서 크게 해두고 노트북에서 열면 창 밖으로 나가 손잡이를 못 잡는다. */
+function ytApplyDim() {
+  const f = $('#ytFloat');
+  const d = S.ytDim;
+  if (!d || !d.w || !d.h) { f.classList.remove('sized'); f.style.width = ''; f.style.height = ''; return; }
+  f.classList.add('sized');
+  const w = Math.max(240, Math.min(d.w, innerWidth - 16));
+  const h = Math.max(120, Math.min(d.h, innerHeight - 16));
+  f.style.width = w + 'px';
+  f.style.height = h + 'px';
+  // 저장된 자리가 새 크기로는 화면 밖이면 안으로 끌어온다
+  const r = f.getBoundingClientRect();
+  if (r.right > innerWidth - 4 || r.bottom > innerHeight - 4) {
+    f.style.right = 'auto'; f.style.bottom = 'auto';
+    f.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + 'px';
+    f.style.top = Math.max(8, Math.min(r.top, innerHeight - h - 8)) + 'px';
+  }
+}
+addEventListener('resize', () => { const f = $('#ytFloat'); if (!S || !f || f.hidden) return; ytApplyDim(); if (S.ytPos) ytApplyPos(); });
 function ytPopupUrl(item) {
   if (item.list && !item.id) return `https://www.youtube.com/playlist?list=${item.list}`;
   return `https://www.youtube.com/watch?v=${item.id}${item.list ? '&list=' + item.list : ''}`;
@@ -464,7 +520,7 @@ function ytBindVideoEvents(v, item, cands, getCi, tryNext, load, diag) {
     }
     const ci = getCi(); diag.push(`${cands[ci - 1] ? cands[ci - 1][0] : '?'}: 재생 오류 코드 ${v.error ? v.error.code : '?'}`); tryNext();
   };
-  v.onplaying = () => { load.hidden = true; YT.playing = true; YT._audioRetry = false; if (YT._retry && YT._retry.id !== item.id) YT._retry = null; if (YT._resume && YT._resume.id === item.id && v.currentTime >= YT._resume.t - 3) YT._resume = null; ytSetPlayIcon(true); if (S.ytNormalize && v.crossOrigin === 'anonymous') agcAttach(v); else if (!AGC.el || AGC.el !== v) { const want = (S.ytVol == null ? 60 : S.ytVol) / 100; if (Math.abs(v.volume - want) > 0.005) { v._progVol = true; v.volume = want; setTimeout(() => { v._progVol = false; }, 50); } } };
+  v.onplaying = () => { load.hidden = true; YT.playing = true; YT._audioRetry = false; YT._failRun = 0; YT._goneRun = 0; clearTimeout(YT._skipT); if (YT._retry && YT._retry.id !== item.id) YT._retry = null; if (YT._resume && YT._resume.id === item.id && v.currentTime >= YT._resume.t - 3) YT._resume = null; ytSetPlayIcon(true); if (S.ytNormalize && v.crossOrigin === 'anonymous') agcAttach(v); else if (!AGC.el || AGC.el !== v) { const want = (S.ytVol == null ? 60 : S.ytVol) / 100; if (Math.abs(v.volume - want) > 0.005) { v._progVol = true; v.volume = want; setTimeout(() => { v._progVol = false; }, 50); } } };
   v.onpause = () => { YT.playing = false; ytSetPlayIcon(false); };
   v.onended = () => { YT.playing = false; ytSetPlayIcon(false); if (S.ytQueue.length || S.ytAutoRelated !== false) ytNext(); };
 }
@@ -496,6 +552,18 @@ async function ytPlayDirect(item) {
   try {
     const useMode = YT._forceMode ? YT._forceMode : (S.ytAudioOnly ? 'audio' : 'video'); YT._forceModeUsed = useMode;
     const r = await apiFetch('/yt/stream?id=' + encodeURIComponent(item.id) + '&mode=' + useMode);
+    if (r.status === 404) {
+      /* 지워졌거나 비공개인 영상. 몇 번을 해도 안 되므로 오류 패널을 띄우지 않고 바로 넘긴다.
+         (예전에는 502 로 와서 "서버 오류" 취급을 받고, 다른 클라이언트로 계속 다시 시도했다) */
+      const j = await r.json().catch(() => ({}));
+      if (j.gone) {
+        load.hidden = true;
+        YT.directFail = YT.directFail || {}; YT.directFail[item.id] = true;
+        logErr('영상 없음 ' + item.id + ' ' + (j.detail || j.message || ''));
+        ytAutoSkip('이 영상은 더 이상 볼 수 없습니다', { gone: true });
+        return;
+      }
+    }
     if (r.status === 503) { load.textContent = '엔진 미설치'; const ok = await ytEngineEnsure(true); if (ok) return ytPlayDirect(item); setYtMode('embed'); return ytPlay(item, true); }
     if (!r.ok) throw await apiError(r);
     const j = await r.json();
@@ -553,6 +621,7 @@ async function ytPlayDirect(item) {
         const nb = er.querySelector('#ytDrNext'); if (nb) nb.onclick = ytNext;
         er.querySelector('#ytDrUpd').onclick = async () => { toast('엔진 업데이트 중…'); const r = await apiFetch('/yt/engine', { method: 'POST' }); const jj = await r.json(); toast(jj.installed ? '업데이트 완료 ' + jj.version : '실패'); YT.directFail[item.id] = false; ytPlayDirect(item); };
         logErr('직접 재생 실패 ' + item.id + ' ' + me + ' | ' + diag.join(' · '));
+        ytAutoSkip('이 곡은 재생이 안 됩니다');
         return;
       }
       const [label, src] = cands[ci++];
@@ -584,9 +653,14 @@ async function ytPlayDirect(item) {
     tryNext();
   } catch (e) {
     load.hidden = true; const er = $('#ytErr'); er.hidden = false;
-    er.innerHTML = `<div>${esc('스트림을 가져오지 못했습니다: ' + e.message)}</div><div class="row" style="justify-content:center;margin-top:6px"><button class="btn sm" id="ytDrEmbed">임베드로 재생</button><button class="btn sm" id="ytDrUpd">엔진 업데이트</button></div>`;
-    er.querySelector('#ytDrEmbed').onclick = () => { S.ytMode = 'embed'; ytPlay(item, true); S.ytMode = 'direct'; };
-    er.querySelector('#ytDrUpd').onclick = async () => { toast('엔진 업데이트 중…'); const r = await apiFetch('/yt/engine', { method: 'POST' }); const j = await r.json(); toast(j.installed ? '업데이트 완료 ' + j.version : '실패'); ytPlayDirect(item); };
+    /* 스트림 주소를 받는 데 실패한 자리다 (서버가 클라이언트 후보를 다 돌고도 못 고른 경우 등).
+       예전에는 기록도 안 남고 "다음 곡" 버튼도 없어서, 대기열이 아무 흔적 없이 멈췄다. */
+    er.innerHTML = `<div>${esc('스트림을 가져오지 못했습니다: ' + e.message)}</div><div class="row" style="justify-content:center;margin-top:6px"><button class="btn sm" id="ytDrEmbed">임베드로 재생</button>${S.ytQueue.length ? '<button class="btn sm" id="ytDrNext2">⏭ 다음 곡</button>' : ''}<button class="btn sm" id="ytDrUpd">엔진 업데이트</button></div>`;
+    er.querySelector('#ytDrEmbed').onclick = () => { clearTimeout(YT._skipT); S.ytMode = 'embed'; ytPlay(item, true); S.ytMode = 'direct'; };
+    const nb2 = er.querySelector('#ytDrNext2'); if (nb2) nb2.onclick = () => { clearTimeout(YT._skipT); ytNext(); };
+    er.querySelector('#ytDrUpd').onclick = async () => { clearTimeout(YT._skipT); toast('엔진 업데이트 중…'); const r = await apiFetch('/yt/engine', { method: 'POST' }); const j = await r.json(); toast(j.installed ? '업데이트 완료 ' + j.version : '실패'); ytPlayDirect(item); };
+    logErr('스트림 준비 실패 ' + item.id + ' ' + e.message);
+    ytAutoSkip('스트림을 가져오지 못했습니다');
   }
 }
 async function ytPlayList(item) { // 재생목록 → 서버가 항목을 풀어 대기열로
@@ -603,6 +677,7 @@ function ytPlay(item, force) {
   /* 여기로 들어온다는 것은 "이 곡을 새로 튼다"는 뜻이다 — 목록 클릭, 대기열 자동 진행(ytNext),
      전부 재생, 검색창에 주소 입력. 끊김 복구는 ytPlayDirect 를 직접 부르므로 여기를 거치지 않는다.
      남아 있던 이어보기 목표를 안 지우면 대기열에 같은 곡이 두 번 있을 때 두 번째가 중간부터 나온다. */
+  clearTimeout(YT._skipT);          // 사용자가 직접 곡을 골랐다 — 예약된 자동 넘김은 취소
   YT._resume = null; YT._qualCap = 0; YT._noHls = null;
   if (!YT.cur || YT.cur.id !== item.id || YT.cur.list !== item.list) { YT._embedTry = 0; YT._embedList = null; YT.altTries = 0; YT.altSeen = null; }
   const mode = ytMode();
@@ -657,7 +732,8 @@ async function ytEmbedError(code) { // 101/150 = 임베드 금지·연령제한�
     ${alt ? '<button class="btn sm" id="ytErrAlt">🔎 다른 업로드 찾기</button>' : ''}${S.ytQueue.length ? '<button class="btn sm" id="ytErrNext">⏭ 다음 곡</button>' : ''}</div>`;
   er.querySelector('#ytErrDirect').onclick = async () => { const it = YT.cur; if (await ytEngineEnsure(true)) { setYtMode('direct'); ytPlayDirect(it); } };
   const ab = er.querySelector('#ytErrAlt'); if (ab) ab.onclick = () => ytFindAlternative(YT.cur);
-  const nb = er.querySelector('#ytErrNext'); if (nb) nb.onclick = ytNext;
+  const nb = er.querySelector('#ytErrNext'); if (nb) nb.onclick = () => { clearTimeout(YT._skipT); ytNext(); };
+  ytAutoSkip(why);
 }
 async function ytFindAlternative(item) { // 제목으로 다시 검색해 재생 가능한 다른 업로드를 찾음
   if (!item) return;
@@ -702,6 +778,29 @@ function ytToggle() {
     else ytPopup(YT.cur);
     return;
   } if (YT.playing) { ytCmd('pauseVideo'); YT.playing = false; } else { ytCmd('playVideo'); YT.playing = true; } ytSetPlayIcon(YT.playing); }
+/* 한 곡이 실패했다고 남은 대기열이 통째로 멈추면 안 된다.
+   그렇다고 무조건 넘기면, 전부 실패하는 상황에서 대기열 300곡을 몇 초 만에 태워 버린다.
+   → 연속 3회까지만 자동으로 넘기고 그 뒤엔 손을 뗀다.
+   한 곡이라도 실제로 재생되면(onplaying) 카운터가 0 으로 돌아간다.
+   YT._gen 은 재생 시도마다 올라가는 세대 번호다 — 그 사이 사용자가 직접 다른 곡을 틀었으면
+   예약해 둔 건너뛰기는 조용히 취소된다. */
+function ytAutoSkip(reason, opt) {
+  opt = opt || {};
+  if (!S.ytQueue.length) { toast(reason + ' — 대기열이 비어 있습니다', 'err'); return; }
+  /* 두 가지를 따로 센다.
+     · 지워진 영상(gone) — 판정이 2초면 끝나고 아무리 기다려도 안 되니 바로 넘긴다.
+       재생목록에 죽은 링크가 여럿 섞여 있는 건 흔한 일이라 여유를 더 준다.
+     · 그 밖의 실패 — 유튜브가 막고 있거나 네트워크 문제일 수 있어 3곡에서 멈춘다. */
+  const key = opt.gone ? '_goneRun' : '_failRun';
+  const cap = opt.gone ? 10 : 3;
+  YT[key] = (YT[key] || 0) + 1;
+  if (YT[key] > cap) { toast(`연속 ${cap}곡이 재생되지 않아 자동 넘김을 멈췄습니다 — ⏭ 를 눌러 계속하세요`, 'err'); return; }
+  const g = YT._gen;
+  clearTimeout(YT._skipT);
+  const wait = opt.gone ? 800 : 5000;
+  toast(`${reason} — 다음 곡으로 넘어갑니다 (${YT[key]}/${cap})`);
+  YT._skipT = setTimeout(() => { if (YT._gen === g) ytNext(); }, wait);
+}
 async function ytNext() {
   if (!S.ytQueue.length) {
     if (S.ytAutoRelated !== false && YT.cur && YT.cur.id && R.srvInfo && R.srvInfo.ytEngine) { // 알고리즘 이어듣기: 유튜브 믹스에서 연관 곡을 채움
@@ -1023,7 +1122,10 @@ function initYouTube() {
   $('#ytCloseBtn').onclick = () => ytOpen(false);
   $('#ytMinBtn').onclick = () => { YT.min = !YT.min; f.classList.toggle('min', YT.min); };
   head.ondblclick = e => { if (e.target.closest('button')) return; YT.min = !YT.min; f.classList.toggle('min', YT.min); };
-  $('#ytSizeBtn').onclick = () => { S.ytSize = S.ytSize === 'compact' ? 'normal' : 'compact'; save(); ytApplyPos(); };
+  $('#ytSizeBtn').onclick = () => {
+    // 직접 정한 크기가 남아 있으면 컴팩트/전체 전환이 안 먹는 것처럼 보인다 → 함께 푼다
+    S.ytSize = S.ytSize === 'compact' ? 'normal' : 'compact'; S.ytDim = null; save(); ytApplyPos();
+  };
   $('#ytPopBtn').onclick = () => { if (YT.cur) { ytCmd('pauseVideo'); ytPopup(YT.cur); } else toast('먼저 재생할 곡을 고르세요'); };
   const up = $('#ytUsePop'); up.checked = !!S.ytUsePop; up.onchange = () => { setYtMode(up.checked ? (S.ytPopMode === 'popup' ? 'popup' : 'tab') : ((R.srvInfo && R.srvInfo.ytEngine) ? 'direct' : 'embed')); };
   $('#ytGuideBtn').onclick = openYtAccountGuide;
@@ -1067,6 +1169,44 @@ function initYouTube() {
     f.style.top = Math.max(4, Math.min(innerHeight - h - 4, e.clientY - drag.dy)) + 'px';
   });
   head.addEventListener('pointerup', () => { if (!drag) return; drag = null; const r = f.getBoundingClientRect(); S.ytPos = { x: r.left, y: r.top }; save(); });
+  /* 오른쪽 아래 모서리로 크기 조절.
+     최소 크기를 두는 이유: 더 작아지면 헤더의 버튼들과 손잡이가 겹쳐 되돌릴 수가 없다. */
+  const grip = $('#ytGrip');
+  if (grip) {
+    let rz = null;
+    grip.addEventListener('pointerdown', e => {
+      const r = f.getBoundingClientRect();
+      rz = { x: e.clientX, y: e.clientY, w: r.width, h: r.height, left: r.left, top: r.top };
+      grip.setPointerCapture(e.pointerId);
+      f.classList.add('sized');
+      f.style.right = 'auto'; f.style.bottom = 'auto';
+      f.style.left = r.left + 'px'; f.style.top = r.top + 'px';
+      e.preventDefault();
+    });
+    grip.addEventListener('pointermove', e => {
+      if (!rz) return;
+      /* 크기는 화면 크기까지만 제한하고, 자리는 그에 맞춰 밀어 넣는다.
+         "지금 위치에서 오른쪽 끝까지" 로 제한하면, 창이 오른쪽 아래 구석에 붙어 있는
+         기본 상태에서 늘릴 공간이 12px 뿐이라 손잡이가 안 듣는 것처럼 보인다.
+         이제 오른쪽으로 끌면 왼쪽 모서리가 밀리면서 실제로 커진다. */
+      const w = Math.max(240, Math.min(rz.w + (e.clientX - rz.x), innerWidth - 16));
+      const h = Math.max(120, Math.min(rz.h + (e.clientY - rz.y), innerHeight - 16));
+      f.style.width = w + 'px';
+      f.style.height = h + 'px';
+      f.style.left = Math.max(8, Math.min(rz.left, innerWidth - w - 8)) + 'px';
+      f.style.top = Math.max(8, Math.min(rz.top, innerHeight - h - 8)) + 'px';
+    });
+    grip.addEventListener('pointerup', () => {
+      if (!rz) return;
+      rz = null;
+      const r = f.getBoundingClientRect();
+      S.ytDim = { w: Math.round(r.width), h: Math.round(r.height) };
+      S.ytPos = { x: r.left, y: r.top };
+      save();
+    });
+    // 더블클릭 = 원래 크기로. 실수로 이상하게 만들었을 때 되돌릴 길이 있어야 한다.
+    grip.addEventListener('dblclick', () => { S.ytDim = null; save(); ytApplyDim(); toast('창 크기를 원래대로 되돌렸습니다'); });
+  }
   window.addEventListener('message', e => {
     if (typeof e.data !== 'string' || !e.origin.includes('youtube')) return;
     try {
@@ -1287,10 +1427,20 @@ async function importFromPng(blob) {
   let j; try { j = JSON.parse(comment.text); } catch (e) { toast('메타데이터 파싱 실패', 'err'); return; }
   const src = (chunks.find(c => c.key === 'Source') || {}).text || '';
   let model = S.model;
+  /* Source 에는 "curated" 라는 단어가 안 들어간다. 실제 형식은
+     "NovelAI Diffusion V5 DB276663" 처럼 모델 이름 + 8자리 해시다.
+     그래서 /curated/ 로 가르던 예전 코드는 Curated 분기가 통째로 죽어 있었고,
+     Curated 로 뽑은 그림을 불러오면 전부 Full 로 잡혔다.
+     NAI 웹과 같게 해시로 가른다 — 목록에 있는 것만 Full, 나머지는 Curated. */
+  const FULL_HASH = {
+    5: /\b(657484A5|0ADF9AB7)\b/i,
+    45: /\b(4BDE2A90|1229B44F|B9F340FD|F3D95188)\b/i,
+    40: /\b(37442FCA|4F49EC75|CA4B7203|79F47848|F6302A9D)\b/i,
+  };
   // V5 를 먼저 본다 — "V4.5" 검사보다 앞서야 한다 (둘 다 걸리는 문자열이 오는 경우가 있다)
-  if (/\bV?5\b/i.test(src) && !/4\.5/.test(src)) model = /curated/i.test(src) ? 'nai-diffusion-5-curated' : 'nai-diffusion-5-full';
-  else if (/4\.5/.test(src)) model = /curated/i.test(src) ? 'nai-diffusion-4-5-curated' : 'nai-diffusion-4-5-full';
-  else if (/Diffusion V4/i.test(src)) model = /curated/i.test(src) ? 'nai-diffusion-4-curated-preview' : 'nai-diffusion-4-full';
+  if (/\bV?5\b/i.test(src) && !/4\.5/.test(src)) model = FULL_HASH[5].test(src) ? 'nai-diffusion-5-full' : 'nai-diffusion-5-curated';
+  else if (/4\.5/.test(src)) model = FULL_HASH[45].test(src) ? 'nai-diffusion-4-5-full' : 'nai-diffusion-4-5-curated';
+  else if (/Diffusion V4/i.test(src)) model = FULL_HASH[40].test(src) ? 'nai-diffusion-4-full' : 'nai-diffusion-4-curated-preview';
   else if (/furry/i.test(src)) model = 'nai-diffusion-furry-3';
   else if (/V3/i.test(src)) model = 'nai-diffusion-3';
   applyMeta({ model, input: j.prompt || (j.v4_prompt && j.v4_prompt.caption.base_caption) || '', parameters: { ...j, negative_prompt: j.uc != null ? j.uc : (j.v4_negative_prompt ? j.v4_negative_prompt.caption.base_caption : '') } });
@@ -1445,7 +1595,10 @@ function openHealth() {
     body.innerHTML = `<div class="hint" id="hcHint">불러오는 중…</div>
       <div class="mtitle">자체 점검 <span class="hint">— 앱이 켜져 있는 동안 10분마다 스스로 확인합니다</span></div>
       <div id="hcList"></div>
-      <div class="row"><button class="btn sm" id="hcNow">지금 다시 점검</button><span class="hint" id="hcWhen"></span></div>
+      <div class="row"><button class="btn sm" id="hcNow">지금 다시 점검</button>
+        <button class="btn sm" id="hcRestart" title="서버를 껐다 켭니다. 설정·이미지는 그대로입니다.">↻ 앱 다시 켜기</button>
+        <span class="hint" id="hcWhen"></span></div>
+      <div class="hint" id="hcRestartWhy" hidden></div>
       <div class="mtitle">오류 기록 <span class="hint" id="hcN"></span></div>
       <div class="errbox" id="hcErrs"></div>
       <div class="row" style="margin-top:8px">
@@ -1459,8 +1612,30 @@ function openHealth() {
     const $$$ = id => body.querySelector(id);
     let snap = null, errs = [];
 
+    /* 앱 파일을 갈아끼웠는데 서버를 안 껐다 켜면, 화면만 새것이고 서버가 하는 일은
+       옛것 그대로다 (유튜브 재생 같은 것). 그래서 여기서 바로 다시 켤 수 있게 한다. */
+    $$$('#hcRestart').onclick = async () => {
+      const b = $$$('#hcRestart');
+      if (!confirm('앱을 껐다 켭니다.\n설정·이미지·프롬프트는 그대로 있습니다.\n\n생성 중이면 그 작업은 중단됩니다. 계속할까요?')) return;
+      b.disabled = true; b.textContent = '다시 켜는 중…';
+      try {
+        const r = await apiFetch('/update/restart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.message || ('HTTP ' + r.status)); }
+        b.textContent = '잠시 후 새 창이 열립니다';
+        toast('앱을 다시 켜는 중입니다 — 잠시 후 새 창이 열립니다');
+      } catch (e) {
+        b.disabled = false; b.textContent = '↻ 앱 다시 켜기';
+        toast('다시 켜지 못했습니다: ' + e.message + ' — 앱 창(검은 콘솔)을 닫았다가 start.bat 을 다시 실행해 주세요', 'err');
+      }
+    };
+
     const drawChecks = () => {
       const el = $$$('#hcList'); el.innerHTML = '';
+      /* 소스가 바뀐 채로 돌고 있으면 다시 켜는 게 유일한 해결이다 — 버튼을 눈에 띄게. */
+      const stale = ((snap && snap.checks) || []).some(c => !c.ok && c.name === '앱 파일');
+      const rb = $$$('#hcRestart'), why = $$$('#hcRestartWhy');
+      if (rb) rb.className = stale ? 'btn sm primary' : 'btn sm';
+      if (why) { why.hidden = !stale; why.textContent = stale ? '앱 파일이 바뀌었습니다. 다시 켜야 새 코드가 돕니다 — 지금은 옛 코드가 돌고 있습니다.' : ''; }
       for (const c of (snap && snap.checks) || []) {
         const d = document.createElement('div'); d.className = 'chk-row';
         const cls = c.ok ? 'chk-ok' : (c.level === 'err' ? 'chk-bad' : 'chk-warn');
@@ -1519,7 +1694,15 @@ function openHealth() {
       if (bad.length) { L.push('', '## 점검에서 걸린 것', ''); for (const c of bad) L.push(`- **${c.name}** — ${c.detail || ''}`); }
       if (errs.length) {
         L.push('', '## 오류 기록 (최근 20건)', '', '```');
-        for (const e of errs.slice(-20)) L.push(`${new Date(e.t || 0).toISOString()} [${e.kind || '?'}] ${e.msg || ''}${e.where ? ' @' + e.where : ''}`);
+        /* 오류마다 "그때 버전" 을 적는다.
+           errors.jsonl 은 업데이트를 해도 지워지지 않아서, 옛 버전에서 난 오류가
+           보고서에는 지금 버전과 나란히 찍힌다. 실제로 이미 고친 버그를 두고
+           "아직도 난다" 고 읽어 헛다리를 짚은 적이 있다. */
+        const nowVer = (typeof APP_VERSION !== 'undefined' ? APP_VERSION : '');
+        for (const e of errs.slice(-20)) {
+          const v = e.ver ? (e.ver === nowVer ? '' : ` (v${e.ver} — 지금은 v${nowVer})`) : '';
+          L.push(`${new Date(e.t || 0).toISOString()} [${e.kind || '?'}] ${e.msg || ''}${e.where ? ' @' + e.where : ''}${v}`);
+        }
         L.push('```');
       }
       L.push('', '<sub>NAI Studio 앱에서 자동으로 만든 보고입니다. 토큰·키·개인 경로는 보내기 전에 지워집니다.</sub>');
@@ -2225,6 +2408,30 @@ function ytPaintAudioBtn() {
    비전 모델 없이도 잡히는 것들: 단색/뭉갬(표준편차↓), 흐림(라플라시안 분산↓),
    색 다양성(엔트로피↓), 과노이즈(고주파 에너지↑). 절대값이 아니라
    내 과거 이미지 대비 상대값으로 봐야 의미가 있다. */
+/* ═══════════ 이미지 자체만으로 찾는 결함 (API 없음 · 캔버스 계산만) ═══════════
+   해부학은 못 본다. "손가락이 여섯 개" 를 알려면 무엇이 손인지 알아야 하는데
+   픽셀 숫자에는 그 정보가 없다 — 그건 🔬 채점(Gemini)의 몫이다.
+
+   여기서 보는 건 하나뿐이다: **뭉개진 영역**.
+   구조 텐서로 각 자리의 "가장자리 방향이 얼마나 일관된가" 를 재고,
+   에너지는 큰데(=선이 많은데) 방향이 뒤죽박죽인 자리를 센다.
+   선이 뚜렷한 그림은 방향이 일관되고, 뭉개진 곳은 그렇지 않다.
+
+   실측 (일부러 만든 그림들):
+     깨끗 0.053 · 부드러운 화풍 0.051 · 초점 나감 0.02 · 일부 뭉갬 0.346
+   부드러운 화풍을 뭉갬으로 오해하지 않는 것이 중요한데, 통과했다.
+
+   복제(팔이 겹쳐 나오는 것) 검출도 만들어 봤지만 뺐다 —
+   칸 격자에 딱 맞은 복사만 잡히고(0.38), 한 픽셀만 어긋나도 못 잡았다(0.058).
+   게다가 AI 그림의 복제는 픽셀 복사가 아니라 "비슷하게 생긴 팔이 둘" 이라
+   알고리즘을 제대로 고쳐도 못 잡는다. 안 되는 검사를 붙여두면 거짓 안심만 준다. */
+const MUSH_WARN = 0.15;      // 이 위면 의심 (정상 0.05 · 뭉갬 0.23~0.54 사이를 넉넉히 가른다)
+/* 한 장만 따로 볼 때. 계산은 imageStats 안에서 같은 버퍼로 한 번에 한다 —
+   따로 부르면 그림을 두 번 그리고 두 번 읽는다. */
+async function imageDefects(blob) {
+  const st = await imageStats(blob);
+  return { mush: st.mush, mushy: st.mushy, busy: st.busy, at: st.mushAt, suspect: st.mush >= MUSH_WARN };
+}
 async function imageStats(blob) {
   const img = await blobToImage(blob);
   const N = 256;                                   // 256px 로 줄여서 계산 (속도)
@@ -2254,7 +2461,35 @@ async function imageStats(blob) {
   // 밝기 엔트로피 = 색/톤 다양성
   let ent = 0;
   for (let i = 0; i < 256; i++) { const p = hist[i] / g.length; if (p > 0) ent -= p * Math.log2(p); }
-  return { sd: +sd.toFixed(2), lap: +lap.toFixed(1), ent: +ent.toFixed(3), mean: +mean.toFixed(1) };
+  /* 뭉갬 — 구조 텐서로 "가장자리 방향이 얼마나 일관된가" 를 잰다.
+     선이 뚜렷한 그림은 방향이 일관되고, 뭉개진 곳은 에너지는 큰데 방향이 뒤죽박죽이다.
+     에너지 중앙값 위(=선이 많은 곳)만 본다 — 평평한 하늘은 방향이 없어도 정상이고,
+     전체가 흐린 그림은 에너지 자체가 낮아 "뭉갬" 이 아니라 그냥 부드러운 그림이다.
+     실측: 깨끗 0.053 · 부드러운 화풍 0.051 · 초점 나감 0.02 · 일부 뭉갬 0.23~0.54 */
+  const W = 8, GW = N / W;
+  const en = new Float32Array(GW * GW), coh = new Float32Array(GW * GW);
+  for (let wy = 0; wy < GW; wy++) for (let wx = 0; wx < GW; wx++) {
+    let Jxx = 0, Jyy = 0, Jxy = 0;
+    for (let y = wy * W + 1; y < (wy + 1) * W - 1; y++) for (let xx = wx * W + 1; xx < (wx + 1) * W - 1; xx++) {
+      const i = y * N + xx;
+      const gx = g[i + 1] - g[i - 1], gy = g[i + N] - g[i - N];
+      Jxx += gx * gx; Jyy += gy * gy; Jxy += gx * gy;
+    }
+    const tr = Jxx + Jyy, k = wy * GW + wx;
+    en[k] = tr;
+    coh[k] = tr > 1 ? Math.sqrt((Jxx - Jyy) * (Jxx - Jyy) + 4 * Jxy * Jxy) / tr : 1;
+  }
+  const es = Array.from(en).sort((a, b) => a - b);
+  const emed = es[es.length >> 1] || 1;
+  let busy = 0, mushy = 0; const mushAt = [];
+  for (let k = 0; k < coh.length; k++) {
+    if (en[k] < emed) continue;
+    busy++;
+    if (coh[k] < 0.35) { mushy++; if (mushAt.length < 8) mushAt.push([k % GW, (k / GW) | 0]); }
+  }
+  const mush = busy ? mushy / busy : 0;
+  return { sd: +sd.toFixed(2), lap: +lap.toFixed(1), ent: +ent.toFixed(3), mean: +mean.toFixed(1),
+           mush: +mush.toFixed(3), mushy, busy, mushAt };
 }
 /* 최근 이미지들의 품질을 재고, 내 과거 중앙값과 비교 */
 async function qualityHealth(sampleN) {
@@ -2265,9 +2500,14 @@ async function qualityHealth(sampleN) {
   if (stats.length < 3) return { enough: false, n: stats.length };
   const m = k => med(stats.map(s => s[k]));
   const cur = { sd: m('sd'), lap: m('lap'), ent: m('ent') };
+  /* 뭉갬은 "평소 대비" 가 아니라 절대값으로 본다 — 평소가 이미 뭉개져 있으면
+     비율로는 정상으로 보이기 때문이다. 몇 장이 걸렸는지도 함께 센다. */
+  const mushList = stats.map(s => s.mush).filter(v => typeof v === 'number');
+  const mush = { med: med(mushList), worst: Math.max(...mushList, 0),
+                 hits: mushList.filter(v => v >= MUSH_WARN).length, n: mushList.length };
   const base = S.qBase;                              // 기준선 (평소 상태)
   const ratio = base ? { sd: cur.sd / base.sd, lap: cur.lap / base.lap, ent: cur.ent / base.ent } : null;
-  return { enough: true, n: stats.length, cur, base, ratio };
+  return { enough: true, n: stats.length, cur, base, ratio, mush };
 }
 function setQualityBaseline(cur) { S.qBase = cur; save(); toast('지금 상태를 "평소"로 기준 저장했습니다'); }
 

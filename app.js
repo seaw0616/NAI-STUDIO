@@ -67,14 +67,16 @@ const UC = {
 /* ver: 50=V5, 45=V4.5, 40=V4, 30=V3.
    quality2 는 V5 의 두 번째 퀄리티 프리셋(light) — V5 부터 두 가지가 생겼다. */
 const MODELS = {
-  'nai-diffusion-5-full':          { name: 'NAI Diffusion V5 Full', kind: '✨', ver: 50, inpaint: 'nai-diffusion-5-full-inpainting',        quality: ', very aesthetic, masterpiece, no text', quality2: ', very aesthetic, amazing quality, no text', ucs: UC.v5 },
-  'nai-diffusion-5-curated':       { name: 'NAI Diffusion V5 Curated', kind: '✨', ver: 50, inpaint: 'nai-diffusion-5-curated-inpainting',  quality: ', very aesthetic, masterpiece, no text', quality2: ', very aesthetic, amazing quality, no text', ucs: UC.v5 },
-  'nai-diffusion-4-5-full':        { name: 'NAI Diffusion V4.5 Full', kind: '👤', ver: 45, inpaint: 'nai-diffusion-4-5-full-inpainting',    quality: ', very aesthetic, masterpiece, no text', ucs: UC.v45full },
-  'nai-diffusion-4-5-curated':     { name: 'NAI Diffusion V4.5 Curated', kind: '👤', ver: 45, inpaint: 'nai-diffusion-4-5-curated-inpainting', quality: ', masterpiece, no text, -0.8::feet::, rating:general', ucs: UC.v45cur },
-  'nai-diffusion-4-full':          { name: 'NAI Diffusion V4 Full', kind: '👤', ver: 40, inpaint: 'nai-diffusion-4-full-inpainting',        quality: ', no text, best quality, very aesthetic, absurdres', ucs: UC.v4full },
-  'nai-diffusion-4-curated-preview': { name: 'NAI Diffusion V4 Curated', kind: '👤', ver: 40, inpaint: 'nai-diffusion-4-curated-inpainting', quality: ', rating:general, amazing quality, very aesthetic, absurdres', ucs: UC.v4cur },
-  'nai-diffusion-3':               { name: 'NAI Diffusion Anime V3', kind: '👤', ver: 30, inpaint: 'nai-diffusion-3-inpainting',            quality: ', best quality, amazing quality, very aesthetic, absurdres', ucs: UC.v3 },
-  'nai-diffusion-furry-3':         { name: 'NAI Diffusion Furry V3', kind: '🐾', ver: 30, inpaint: 'nai-diffusion-furry-3-inpainting',      quality: ', {best quality}, {amazing quality}', ucs: UC.furry3 },
+  'nai-diffusion-5-full':          { name: 'NAI Diffusion V5 Full', kind: '✨', scale: 7, ver: 50, inpaint: 'nai-diffusion-5-full-inpainting',        quality: ', very aesthetic, masterpiece, no text', quality2: ', very aesthetic, amazing quality, no text', ucs: UC.v5 },
+  /* V5 Curated 인페인트 모델은 아직 안 나왔다. NAI 웹도 이 조합은
+     4.5 Curated 인페인트로 보낸다 (공식 저널: "The curated inpainting model is still cooking"). */
+  'nai-diffusion-5-curated':       { name: 'NAI Diffusion V5 Curated', kind: '✨', scale: 7, ver: 50, inpaint: 'nai-diffusion-4-5-curated-inpainting',  quality: ', very aesthetic, masterpiece, no text', quality2: ', very aesthetic, amazing quality, no text', ucs: UC.v5 },
+  'nai-diffusion-4-5-full':        { name: 'NAI Diffusion V4.5 Full', kind: '👤', scale: 5, ver: 45, inpaint: 'nai-diffusion-4-5-full-inpainting',    quality: ', very aesthetic, masterpiece, no text', ucs: UC.v45full },
+  'nai-diffusion-4-5-curated':     { name: 'NAI Diffusion V4.5 Curated', kind: '👤', scale: 5, ver: 45, inpaint: 'nai-diffusion-4-5-curated-inpainting', quality: ', masterpiece, no text, -0.8::feet::, rating:general', ucs: UC.v45cur },
+  'nai-diffusion-4-full':          { name: 'NAI Diffusion V4 Full', kind: '👤', scale: 5.5, ver: 40, inpaint: 'nai-diffusion-4-full-inpainting',        quality: ', no text, best quality, very aesthetic, absurdres', ucs: UC.v4full },
+  'nai-diffusion-4-curated-preview': { name: 'NAI Diffusion V4 Curated', kind: '👤', scale: 5.5, ver: 40, inpaint: 'nai-diffusion-4-curated-inpainting', quality: ', rating:general, amazing quality, very aesthetic, absurdres', ucs: UC.v4cur },
+  'nai-diffusion-3':               { name: 'NAI Diffusion Anime V3', kind: '👤', scale: 5, ver: 30, inpaint: 'nai-diffusion-3-inpainting',            quality: ', best quality, amazing quality, very aesthetic, absurdres', ucs: UC.v3 },
+  'nai-diffusion-furry-3':         { name: 'NAI Diffusion Furry V3', kind: '🐾', scale: 6.2, ver: 30, inpaint: 'nai-diffusion-furry-3-inpainting',      quality: ', {best quality}, {amazing quality}', ucs: UC.furry3 },
 };
 /* 모델이 실제로 받아주는 것들. novelai.net 이 요청을 만들 때 쓰는 표와 같게 맞춘 것으로,
    여기 없는 걸 보내면 NAI 가 거절하거나(400) 조용히 무시한다.
@@ -89,9 +91,19 @@ const CAPS = {
   30: { vibe: true, charRef: false, noiseSchedule: true, cfgDelay: true, cfgRescale: true,
         transparency: false, maxChars: 0, freePos: false, tokens: 225 },
 };
+/* 인페인트 모델 ID -> 원본 모델 ID. 인페인트 ID 는 MODELS 의 키가 아니라서
+   그걸로 능력치를 물으면 아무것도 못 찾고 V4.5 로 떨어졌다 —
+   그 바람에 V5 인페인트에서 바이브·캐릭터 레퍼런스가 그대로 통과했다. */
+const INPAINT_BASE = {};
+/* nai-diffusion-4-5-curated-inpainting 은 V4.5 Curated 와 V5 Curated 양쪽의 인페인트다
+   (V5 Curated 인페인트가 아직 없어서 4.5 것을 빌려 쓴다).
+   나중 것이 이기게 두어 그 ID 본래 주인인 V4.5 로 풀리게 한다.
+   V5 경로는 어차피 인페인트 ID 가 아니라 원본 모델로 능력치를 본다. */
+for (const k in MODELS) if (MODELS[k].inpaint) INPAINT_BASE[MODELS[k].inpaint] = k;
 const capsOf = m => {
-  const c = CAPS[(MODELS[m] || {}).ver] || CAPS[45];
-  if ((MODELS[m] || {}).ver === 50) return { ...c, tokens: /curated/.test(m) ? c.tokensCurated : c.tokens };
+  const base = MODELS[m] ? m : (INPAINT_BASE[m] || m);
+  const c = CAPS[(MODELS[base] || {}).ver] || CAPS[45];
+  if ((MODELS[base] || {}).ver === 50) return { ...c, tokens: /curated/.test(base) ? c.tokensCurated : c.tokens };
   return c;
 };
 const isV5 = m => (MODELS[m || S.model] || {}).ver === 50;
@@ -122,12 +134,16 @@ const THEMES = {
   mint:    { name: '민트',          dark: false, sw: ['#f0fbf8', '#0f8a6e'] },
 };
 const isDarkTheme = t => !!(THEMES[t] && THEMES[t].dark);
-const NSFW_EXEMPT = ['nai-diffusion-4-5-curated', 'nai-diffusion-4-curated-preview']; // NAI 웹에서 nsfw 자동 추가를 하지 않는 모델
+// NAI 웹이 nsfw 자동 추가를 하지 않는 모델. V5 Curated 가 빠져 있어서
+// V5 Curated 로 뽑으면 네거티브에 nsfw 가 몰래 붙고 있었다.
+const NSFW_EXEMPT = ['nai-diffusion-5-curated', 'nai-diffusion-5-curated-inpainting',
+  'nai-diffusion-4-5-curated', 'nai-diffusion-4-5-curated-inpainting',
+  'nai-diffusion-4-curated-preview', 'nai-diffusion-4-curated-inpainting'];
 
 /* ─────────────── 상태 ─────────────── */
 const DEFAULTS = {
   model: 'nai-diffusion-4-5-full', w: 832, h: 1216, n: 1,
-  steps: 28, scale: 5, rescale: 0, sampler: 'k_euler_ancestral', schedule: 'karras',
+  steps: 23, scale: 5, rescale: 0, sampler: 'k_euler_ancestral', schedule: 'karras',
   seed: '', randomSeed: true,
   quality: true, ucPreset: 0, variety: false, decrisper: false, autoNsfw: true, stream: true, slashWild: false,
   smea: false, smeaDyn: false, ucStrength: 1, legacyUc: false, aiChoice: true,
@@ -146,12 +162,25 @@ const DEFAULTS = {
   chunks: [], deleted: {}, ytQueue: [], ytPos: null, ytSize: 'normal', ytOpen: false, ytVol: 60, ytUsePop: false, ytPopMode: 'tab',
   theme: 'violet', lastDark: 'violet', lastLight: 'light', ov: {}, tagUnderscore: false,
   histFavOnly: false, transparent: false,   // V5 전용 — 투명 배경(straight_alpha)
+  /* 채점(🔬) 관련.
+     judgeAuto: 0 = 끔. N = 생성 N장마다 1회 자동 채점. 기본이 0 인 이유는
+     실측 생성 속도가 시간당 39장이라, 전량 자동 채점은 시간당 39회 유료 호출이 되기 때문이다.
+     judgeLog: 추세용 숫자 로그. 이미지 레코드와 수명을 분리해 둬야
+     400장 상한(pruneHistory)에 잘려도 과거 추세가 남는다. */
+  judgeAuto: 0, judgeLog: [],
+  /* 프롬프트 칸을 클릭만 해도 청크 칩 띠가 떠서 걸리적거린다는 얘기가 두 번 나왔다.
+     쓰지도 않을 때 튀어나오는 편보다 필요할 때 켜는 편이 낫다 → 기본은 안 뜸.
+     ⚙설정의 "청크 칩 띠 띄우기" 로 켠다.
+     키 이름을 chunkFloatOff 에서 바꾼 것은 저장돼 있던 옛 값(false)에 걸리지 않게 하기 위해서다. */
+  chunkFloatOn: false,
+  emphHl: true,           // 프롬프트 칸에서 {tag}·[tag]·N::tag:: 가중치를 색으로 표시 (NAI 도 기본 켬)
   mode: 'main', scenes: [], curScene: null, styles: [], activeStyle: null, characters: [],
 };
 let S = { ...DEFAULTS };
 try { S = normalizeState({ ...DEFAULTS, ...(JSON.parse(localStorage.getItem('nst_state')) || {}) }); } catch (e) { S = { ...DEFAULTS }; }
 let saveTimer = null, pushTimer = null;
 function save() {
+  chunkMapClear();   // 청크가 바뀌었을 수 있다 — 이름→청크 캐시를 버린다
   // 초기화/서버 동기화가 끝나기 전(R.booted=false)의 내부 저장은 "사용자 편집"으로 치지 않음 → 빈 브라우저가 서버 설정을 덮어쓰는 사고 방지
   if (R.booted) S.savedAt = Date.now();
   /* 저장을 먼저, 그리기를 나중에.
@@ -184,7 +213,11 @@ const contentCount = s => ['chunks', 'styles', 'characters', 'scenes']
    {...DEFAULTS, ...남의것} 은 값이 null 이어도 그대로 들어온다. 그러면 S.uc.trim() 같은 데서
    예외가 나고, 그때부터 그 창은 아무것도 저장하지 못한다. 모양만 바로잡는다 — 값은 안 건드린다. */
 function normalizeState(o) {
+  chunkMapClear();   // S 가 통째로 바뀐다
   if (!o || typeof o !== 'object') return { ...DEFAULTS };
+  /* 청크 칩 띠를 chunkFloatOff(끄기) 에서 chunkFloatOn(켜기) 으로 바꿨다.
+     📌 로 고정해 두셨던 분은 이 기능을 즐겨 쓰신 것이니 켠 채로 넘긴다. */
+  if (o.chunkFloatOn === undefined && o.chunkFloatPin) o.chunkFloatOn = true;
   for (const k in DEFAULTS) {
     const d = DEFAULTS[k], v = o[k];
     if (Array.isArray(d)) { if (!Array.isArray(v)) o[k] = Array.isArray(d) ? [...d] : []; }
@@ -514,6 +547,23 @@ function expandWild(s, peek, depth) {
 }
 /* 청크 치환: 프롬프트의 토큰(쉼표/줄바꿈/괄호로 구분)이 청크 이름과 같으면 내용으로 바뀜. @이름 형식도 계속 지원 */
 const normKey = s => String(s || '').trim().toLowerCase().replace(/[\s_]+/g, '_'); // 띄어쓰기/밑줄 차이 무시
+/* 정규화한 이름 → 청크. 예전엔 토큰 하나 볼 때마다 청크 전체를 훑고 normKey 도 매번 다시
+   계산했다 — 프롬프트 토큰 수 × 청크 수 × 입력칸 수 만큼. 청크가 많을수록 그대로 느려졌다.
+   (실측: 청크 0개 0.057ms → 77개 0.464ms → 200개 1.089ms)
+   청크가 바뀌면 반드시 save() 가 뒤따르므로 거기서 버린다. 오래된 값이 남을 수 없다. */
+let _chunkByName = null;
+function chunkByName() {
+  const arr = S.chunks || [];
+  // save() 를 거치지 않고 청크를 넣거나 빼는 자리가 몇 군데 있다(복원·초기 씨앗 등).
+  // 개수만 비교하면 O(1) 이고 그 경우들을 전부 잡는다. 이름만 바꾸는 경우는 save() 가 처리한다.
+  if (_chunkByName && _chunkByName._n === arr.length && _chunkByName._a === arr) return _chunkByName;
+  const m = new Map();
+  for (const c of arr) { const k = normKey(c.name); if (k && !m.has(k)) m.set(k, c); }
+  m._n = arr.length; m._a = arr;
+  return (_chunkByName = m);
+}
+function chunkMapClear() { _chunkByName = null; }
+const chunkKeyOf = tok => normKey(String(tok).replace(/^-?[\d.]+::/, '').replace(/::$/, '').replace(/^@/, ''));
 function chunkMap() { const m = {}; for (const c of S.chunks) if (c.name) m[normKey(c.name)] = c.text; return m; }
 function expandChunks(s, depth, active) {
   /* 청크 안에서 다른 청크를 부르는 건 되지만, 자기 자신(또는 돌아오는 참조)은 막아야 한다.
@@ -534,7 +584,7 @@ function expandChunks(s, depth, active) {
     return m[1] + (m[2] || '') + inner + (m[5] || '') + m[6];
   });
 }
-function isChunkToken(tok) { const t = normKey(tok.replace(/^-?[\d.]+::/, '').replace(/::$/, '').replace(/^@/, '')); return !!t && S.chunks.some(c => normKey(c.name) === t); }
+function isChunkToken(tok) { const t = chunkKeyOf(tok); return !!t && chunkByName().has(t); }
 /* 최종 프롬프트에서 두 번 이상 나오는 태그를 찾는다.
    가중치 표기(1.4::tag::, {tag}, [tag])와 대소문자·공백·언더바 차이는 같은 태그로 본다. */
 function dupTags(text) {
@@ -711,7 +761,7 @@ async function pngTextChunks(u8) {
     const data = u8.subarray(ds, ds + len);
     if (type === 'tEXt') { const z = data.indexOf(0); out.push({ key: new TextDecoder('latin1').decode(data.subarray(0, z)), text: new TextDecoder('latin1').decode(data.subarray(z + 1)) }); }
     else if (type === 'zTXt') {
-      // 키워드  + 압축방식(1바이트) + zlib(deflate) 본문.
+      // 키워드 + 압축방식(1바이트) + zlib(deflate) 본문.
       // 이 분기가 없어서, 프롬프트가 zTXt 에 든 파일을 "청크 0개"(=깨끗함)로 보고했다.
       const z = data.indexOf(0);
       if (z > 0) {
@@ -771,7 +821,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '11.23';   // 화면 표시용 앱 버전 (상단)
+const APP_VERSION = '12.0'   /* 12.0 준비 빌드 — 공개는 12.0 으로 나간다 */;   // 화면 표시용 앱 버전 (상단)
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 async function tryHealth(base) {
   try {
@@ -895,7 +945,14 @@ function applyHealth(info) {
   if (probs.length) {
     b.textContent = `⚠ 점검 ${probs.length}`;
     b.title = probs.map(p => p.name + (p.detail ? ' — ' + p.detail : '')).join('\n');
-    if (R._healthSeen !== probs.length) { R._healthSeen = probs.length; toast('점검에서 문제가 발견됐습니다 — 상단 ⚠ 버튼을 눌러 보세요', 'err'); }
+    if (R._healthSeen !== probs.length) {
+      R._healthSeen = probs.length;
+      /* 무엇을 해야 하는지가 안 보이면 알림이 소용없다. 앱 파일이 바뀐 경우는
+         할 일이 하나(다시 켜기)로 정해져 있으니 그것만은 문구로 바로 말해준다. */
+      const stale = probs.some(p => p.name === '앱 파일');
+      toast(stale ? '앱 파일이 바뀌었습니다 — 다시 켜야 적용됩니다 (상단 ⚠ → ↻ 앱 다시 켜기)'
+                  : '점검에서 문제가 발견됐습니다 — 상단 ⚠ 버튼을 눌러 보세요', 'err');
+    }
   } else R._healthSeen = 0;
 }
 function authHeaders(json) {
@@ -906,12 +963,27 @@ function authHeaders(json) {
 }
 async function apiFetch(path, opts) {
   if (!R.srvOk) { await probeServer(); setSrvUI(R.srvOk, R.srvInfo); if (!R.srvOk) throw new Error('로컬 서버에 연결할 수 없습니다 — start.bat을 실행하세요'); }
-  try { return await fetch(R.api + path, opts); }
+  let res;
+  try { res = await fetch(R.api + path, opts); }
   catch (e) {
     if (e.name === 'AbortError') throw e;
     R.srvOk = false; setSrvUI(false);
     throw new Error('로컬 서버와 연결이 끊겼습니다 — start.bat 창을 확인하세요');
   }
+  /* 앱 서버가 아닌 무언가가 그 포트에 응답한 경우.
+     우리 서버는 모르는 경로에 index.html 을 주지 않으므로(_static 은 실제 파일만 준다),
+     API 경로에서 HTML 이 왔다면 그건 우리 서버가 아니다 —
+     앱이 죽은 뒤 다른 프로그램이 그 포트를 차지했거나 중간에 뭔가 끼어든 것이다.
+     예전에는 이 응답이 그대로 .json() 으로 넘어가
+     "Unexpected token '<', "<!DOCTYPE "... is not valid JSON" 이라는
+     무슨 말인지 알 수 없는 오류가 사용자에게 그대로 보였다. */
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+  if (ct.includes('text/html') && !/\.(html|js|css)$/i.test(path)) {
+    R.srvOk = false; setSrvUI(false);
+    throw new Error('이 주소에 앱 서버가 아닌 다른 프로그램이 응답했습니다 (' + R.api + path
+      + ') — 앱을 껐다 켜 주세요. 계속 그러면 start.bat 을 다시 실행하면 빈 포트를 새로 잡습니다');
+  }
+  return res;
 }
 async function apiError(res) {
   let msg = res.status + ' ' + res.statusText, raw = '';
@@ -928,7 +1000,11 @@ async function apiError(res) {
   if (res.status === 400 && /refresh NovelAI|image URL/i.test(msg)) msg = 'NAI 서버 주소가 바뀌었습니다 (' + msg + ') — 앱 업데이트가 필요합니다. 어떤 기능에서 났는지 알려주세요';
   if (res.status === 402) msg = 'Anlas 부족 또는 구독 필요';
   if (res.status === 429) msg = '동시 생성 제한(429) — 잠시 후 다시 시도';
-  if (res.status >= 500) { // NAI 서버 오류 → 공식 상태가 장애면 그 사실을 함께 알림 (내 문제 아님)
+  /* 500번대라고 다 NAI 가 아니다. 로컬 서버는 유튜브·Gemini 실패도 502 로 돌려준다.
+     예전엔 유튜브 영상이 지워진 것뿐인데 "NAI 이미지 생성 Degraded (NAI 쪽 문제입니다)" 가
+     붙어서, 엉뚱한 데를 의심하게 만들었다. */
+  const isNaiPath = !/\/(yt|ai)\//.test(res.url || '');
+  if (res.status >= 500 && isNaiPath) { // NAI 서버 오류 → 공식 상태가 장애면 그 사실을 함께 알림 (내 문제 아님)
     const o = NST.last && NST.last.official, img = o && officialImg(o);
     if (img && img.code > 100) msg += ' · NAI 공식 상태: 이미지 생성 ' + img.status + ' (NAI 쪽 문제입니다)';
     else msg += ' · NAI 서버 오류 — 상단 NAI 상태를 확인하세요';
@@ -994,6 +1070,10 @@ function buildPayload(ov) {
   R.lastSeed = seed;
   const style = ov.style !== undefined ? ov.style : getStyle(S.activeStyle);
   let prompt = ov.prompt != null ? ov.prompt : expandAll(joinParts(style && style.prefix, getMainPrompt(), style && style.suffix));
+  /* 투명 배경은 플래그만으로는 안 걸린다. NAI 웹은 프롬프트에 "transparent background" 를
+     직접 끼워 넣고(퀄리티 태그보다 앞), tag_hint_transparent_background 는 서버가 해석하지
+     않는 단순 전달용 힌트다. 앱은 플래그만 보내서 배경이 안 지워지고 있었다. */
+  if (!ov.noQuality && capsOf(m).transparency && S.transparent) prompt += ', transparent background';
   if (S.quality && !ov.noQuality) prompt += getQuality(m);
   let uc = ov.uc != null ? ov.uc : joinParts(getUcText(m, ucIdx(m)), ov.ucExtra != null ? ov.ucExtra : joinParts(style && expandAll(style.uc || ''), expandAll(S.uc.trim())));
   // NAI 웹 숨은 규칙: 프롬프트에 nsfw 가 없으면 네거티브 맨 앞에 "nsfw, " 자동 추가 (Curated 모델·UC 프리셋 "없음" 제외)
@@ -1021,7 +1101,7 @@ function buildPayload(ov) {
       prompt: expandAll(c.prompt.trim()), uc: expandAll((c.uc || '').trim()),
       center: { x: (useCoords && c.x != null) ? c.x : 0.5, y: (useCoords && c.y != null) ? c.y : 0.5 }, enabled: true,
     })),
-    negative_prompt: uc, deliberate_euler_ancestral_bug: false, prefer_brownian: true,
+    negative_prompt: uc,
   };
   const body = { input: prompt, model: m, action: 'generate', parameters: p };
   if (info.ver >= 40) {
@@ -1032,6 +1112,19 @@ function buildPayload(ov) {
     /* V5 가 안 받는 것들. 보내면 거절당하거나 조용히 무시된다 —
        novelai.net 도 요청을 만들 때 능력치를 보고 같은 키들을 지운다. */
     if (!caps.noiseSchedule) delete p.noise_schedule;
+    /* 능력치표만 보면 V5 는 noise_schedule 을 안 받는 것처럼 보이지만(NAI 표에도 false),
+       웹은 그렇게 지운 뒤 V5 계열에 한해 karras 를 무조건 도로 박는다. 인페인트도 포함.
+       실제 V5 생성 메타 81건이 전부 "noise_schedule": "karras" 였다. */
+    if (info.ver >= 50) p.noise_schedule = 'karras';
+    /* 이 두 값은 NAI 웹이 **조건부로만** 넣는다 —
+         sampler === k_euler_ancestral && noise_schedule !== 'native'
+       예전에는 앱이 모든 요청에 무조건 넣었다. 다른 샘플러를 쓰면 웹과 다른 요청이 되고,
+       이 값들은 샘플링 노이즈에 관여하므로 같은 시드여도 그림이 갈린다.
+       noise_schedule 이 확정된 뒤에 판단해야 하므로 여기에 둔다. */
+    if (p.sampler === 'k_euler_ancestral' && p.noise_schedule !== 'native') {
+      p.deliberate_euler_ancestral_bug = false;
+      p.prefer_brownian = true;
+    }
     if (!caps.cfgDelay) delete p.skip_cfg_above_sigma;
     if (caps.transparency && S.transparent) { p.straight_alpha = true; p.tag_hint_transparent_background = true; }
   } else {
@@ -1051,6 +1144,11 @@ function buildPayload(ov) {
 async function attachImages(body, ov) {
   ov = ov || {};
   const p = body.parameters, info = MODELS[body.model];
+  /* 아래에서 인페인트일 때 body.model 을 인페인트 ID 로 바꾼다.
+     능력치는 원본 모델 기준이어야 하므로 바뀌기 전 ID 를 여기서 잡아둔다.
+     (인페인트 ID 로 물으면 V5 인데도 V4.5 능력치가 나와 바이브·레퍼런스가 그대로 실렸다) */
+  const baseModel = body.model;
+  const caps = capsOf(baseModel);
   const srcBlob = ov.image || (ov.noRef ? null : R.i2iBlob);
   if (srcBlob) {
     p.image = await blobToB64Resized(srcBlob, p.width, p.height);
@@ -1083,10 +1181,10 @@ async function attachImages(body, ov) {
   // noRef 는 i2i 만 막는다. 씬 모드처럼 '메인 화면의 이미지 입력을 쓰지 않는' 경우에는
   // 바이브·정밀 레퍼런스도 함께 빠져야 한다. 안 그러면 씬 화면에서는 보이지도 지울 수도
   // 없는 바이브가 모든 씬 이미지에 계속 붙는다.
-  const prefs = (!ov.noRef && (typeof capsOf === 'function' ? capsOf(body.model).charRef : info.ver >= 45)) ? R.prefs.filter(v => v.b64) : [];
+  const prefs = (!ov.noRef && caps.charRef) ? R.prefs.filter(v => v.b64) : [];
   /* V5 는 바이브 트랜스퍼도 캐릭터 레퍼런스도 받지 않는다 (novelai.net 도 이 모델에서는
      두 기능을 아예 숨긴다). 붙여둔 채로 V5 를 고르면 조용히 빠지므로 반드시 알린다. */
-  const capsA = typeof capsOf === 'function' ? capsOf(body.model) : { vibe: true, charRef: info.ver >= 45 };
+  const capsA = caps;
   if (!ov.noRef && !capsA.charRef && R.prefs.some(v => v.b64)) {
     toast(capsA.vibe ? 'Precise Reference는 V4.5 전용이라 이번 생성에서는 제외했습니다'
                      : 'V5 는 캐릭터 레퍼런스를 지원하지 않아 제외했습니다', 'err');
@@ -1188,7 +1286,9 @@ function msgpackDecode(u8) {
 function anlasEstimate(o) {
   const px = Math.max((o.width || 0) * (o.height || 0), 65536);
   const strength = o.strength == null ? 1 : o.strength;
-  const base = Math.ceil(2.951823174884865e-6 * px + 5.753298233447344e-7 * px * (o.steps || 0));
+  let base = Math.ceil(2.951823174884865e-6 * px + 5.753298233447344e-7 * px * (o.steps || 0));
+  // V5 는 웹에서 1.5 배다. 곱하는 자리가 중요하다 — 올림한 base 에 곱하고, strength 는 그 뒤에 건다.
+  if (isV5(o.model)) base *= 1.5;
   const perImage = Math.max(Math.ceil(base * strength), 2);
   /* Opus 무료 조건(일반 해상도 이하 · 28스텝 이하)은 그대로지만, V5 부터는 그 위에
      "사용량 한도" 가 하나 더 붙는다. 한도가 0% 면 무료가 아니라 Anlas 가 나간다. */
@@ -1238,6 +1338,7 @@ async function doGenerate(ov, label) {
       const m = blobs.length > 1 ? { ...meta, parameters: { ...meta.parameters, seed: (meta.parameters.seed || 0) + k }, batchIndex: k } : meta;
       item = await addToHistory(blobs[k], m, label + (blobs.length > 1 ? ` (${k + 1}/${blobs.length})` : ''));
       if (S.autoSaveOn) await autoSave(item);
+      if (S.judgeAuto) maybeAutoJudge(item);   // 자동 채점 (기본 꺼짐 · 생성을 기다리게 하지 않으려고 await 하지 않는다)
     }
     if (R._cancelledWith) { const k = R._cancelledWith; R._cancelledWith = 0; toast(`취소했지만 이미 나온 ${k}장은 남겼습니다 (Anlas 는 이미 빠진 뒤입니다)`); }
     if (window.onImageGenerated) window.onImageGenerated(item);
@@ -1348,6 +1449,23 @@ async function generateStreaming(body) {
 }
 
 /* ─────────────── 히스토리 / 뷰어 ─────────────── */
+/* 자동 채점. 기본은 꺼져 있다(S.judgeAuto = 0).
+   켜도 N장마다 한 번만 친다 — 한 장에 Gemini 호출이 한 번(=요금 한 번) 나가기 때문이다.
+   생성을 기다리게 하면 안 되므로 await 하지 않고, 앞 채점이 안 끝났으면 이번 장은 건너뛴다
+   (밀린 걸 나중에 몰아 치면 그만큼 돈이 한꺼번에 나간다). */
+function maybeAutoJudge(it) {
+  const every = +S.judgeAuto || 0;
+  if (!every || !it || !it.blob) return;
+  R.judgeTick = (R.judgeTick || 0) + 1;
+  if (R.judgeTick % every) return;
+  if (JQ.busy) return;
+  judgeImage(it).then(() => {
+    renderHist();
+    if (R.cur >= 0 && R.hist[R.cur] === it) showImage(R.cur);
+    if (window.onHistChanged) window.onHistChanged();
+    if (typeof paintNaiStatus === 'function') paintNaiStatus();
+  }).catch(e => { logErr('자동 채점 실패: ' + e.message); });
+}
 async function addToHistory(blob, meta, label) {
   const p = meta.parameters || {};
   const [w, h] = await blobSize(blob).catch(() => [p.width, p.height]);
@@ -1405,6 +1523,8 @@ function renderHist() {
     d.appendChild(img);
     if (it.fav) { const f = document.createElement('span'); f.className = 'fav'; f.textContent = '★'; d.appendChild(f); }
     if (it.saved) { const s = document.createElement('span'); s.className = 'svd'; s.textContent = '💾'; s.title = it.saved.how === 'download' ? '다운로드로 넘김 (받았는지는 확인 불가)' : '저장됨'; d.appendChild(s); }
+    // 채점해 둔 점수를 카드에도 — 어떤 그림이 문제였는지 목록에서 바로 보이게
+    if (it.judge && it.judge.overall != null) { const j = document.createElement('span'); j.className = 'jdg' + judgeCls(it.judge.overall); j.textContent = '🔬' + it.judge.overall; j.title = judgeTip(it.judge); d.appendChild(j); }
     d.onclick = () => showImage(i);
     g.appendChild(d);
   }
@@ -1423,6 +1543,7 @@ function showImage(i) {
   $('#tSeedV').textContent = it.seed != null ? String(it.seed).slice(0, 10) : '';
   paintSavedUI(it);
   if (it.saved) { const s = document.createElement('span'); s.textContent = it.saved.how === 'download' ? '💾 다운로드함' : '💾 저장됨'; s.title = it.saved.how === 'download' ? '브라우저 다운로드로 넘겼습니다 — 실제로 받아졌는지는 앱이 알 수 없습니다' : ''; s.style.color = 'var(--green)'; $('#viewerMeta').appendChild(s); }
+  if (it.judge && it.judge.overall != null) { const s = document.createElement('span'); s.textContent = '🔬 ' + it.judge.overall + '/10'; s.title = judgeTip(it.judge); s.style.color = it.judge.overall <= 4 ? 'var(--red)' : it.judge.overall <= 6 ? 'var(--gold)' : 'var(--green)'; $('#viewerMeta').appendChild(s); }
   renderHist();
 }
 const curItem = () => (R.cur >= 0 && R.cur < R.hist.length) ? R.hist[R.cur] : null;
@@ -1437,7 +1558,18 @@ function clearViewer() {
   const f = $('#tFav'); if (f) { f.textContent = '☆'; f.classList.remove('on'); }
   if (typeof paintSavedUI === 'function') paintSavedUI(null);
 }
-function persistItem(it) { if (it.id != null) histPut({ id: it.id, blob: it.blob, meta: it.meta, seed: it.seed, model: it.model, w: it.w, h: it.h, fav: it.fav, t: it.t, name: it.name, label: it.label, sceneId: it.sceneId || null, saved: it.saved || null }).catch(() => {}); }
+/* 필드를 손으로 나열하면, 목록에 없는 필드는 put 이 레코드를 통째로 갈아끼울 때
+   조용히 지워진다. 예를 들어 채점 결과를 붙여 놓고 ★즐겨찾기를 누르면 그 순간
+   DB 에서 사라지는데, 화면(R.hist 메모리)에는 남아 있어 새로고침 전까지 눈치도 못 챈다.
+   (실측: 새 필드를 붙이고 persistItem 을 한 번 부르면 DB 에서 사라졌다)
+   앞으로 어떤 필드를 붙여도 안 그러도록, 메모리 전용인 것만 빼고 통째로 넣는다.
+   url = URL.createObjectURL 로 만든 임시 주소라 저장해봐야 다음 실행에 무효다.
+   unsaved 는 "아직 저장 안 함" 이라는 그때그때의 표시다. */
+function persistItem(it) {
+  if (!it || it.id == null) return;
+  const { url, unsaved, ...rec } = it;
+  histPut(rec).catch(() => {});
+}
 /* 저장 표시.
    how='save'/'auto' 는 폴더에 실제로 쓴 경우, how='download' 는 브라우저에 넘긴 경우다.
    다운로드는 사용자가 취소하거나 브라우저가 막아도 앱이 알 방법이 없다
@@ -1943,26 +2075,67 @@ function openSectionEditor() {
 /* ─────────────── 프롬프트 하이라이트 (청크 = 칩, <a|b> = 랜덤 표시) ───────────────
    textarea 뒤에 같은 서체의 미러 레이어를 깔아 토큰을 색칠합니다. 입력은 그대로 textarea. */
 const escHtml = s => s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+/* 무게 → 배경 진하기(%). 1 에서 얼마나 떨어졌는지로 정한다.
+   NAI 는 알파 0.2~0.6 을 쓰지만 우리 미러는 진짜 글자가 위에 떠 있어서 그만큼 진하면 글자를 먹는다.
+   8~24% 로 옮겼다 — 24% 는 라이트 테마 청크 칩이 쓰는 20% 언저리라 테마 전부에서 안전하다. */
+function emphPct(w) {
+  if (!Number.isFinite(w) || Math.abs(w - 1) < 0.01) return 0;
+  return 8 + Math.round(16 * Math.min(Math.abs(w - 1) / (w > 0 ? 1 : 0.5), 1));
+}
+/* style 속성에 들어가는 건 Math.round 로 만든 정수뿐이다.
+   escHtml 은 따옴표를 안 벗기므로 사용자 글자를 속성값에 넣으면 안 된다. */
+function emphOpen(w) { const p = emphPct(w); return p ? '<span class="hl-emph ' + (w > 1 ? 'hl-up' : 'hl-dn') + '" style="--ea:' + p + '%">' : ''; }
+
+/* 1단계 — N::…:: 묶음만 먼저 훑는다. 쉼표를 품은 `1.2::red hair, blue eyes::` 도 한 덩어리로 잡힌다.
+   ★ 이 갈래를 2단계 정규식에 섞으면 안 된다. 정규식은 "왼쪽 갈래" 가 아니라
+     "가장 왼쪽에서 시작하는 매치" 가 이기므로, 토큰 갈래가 쉼표 뒤 공백부터 통째로 먹어
+     묶음 갈래가 영영 안 걸린다. 그래서 패스를 나눴다. */
 function hlHtml(text) {
+  if (!S.emphHl) return hlSeg(text, false) + '\n';
+  let out = '', last = 0, m;
+  const G = /(-?[\d.]+)::([^:]*?)::/g;
+  while ((m = G.exec(text))) {
+    out += hlSeg(text.slice(last, m.index), true);
+    const op = emphOpen(parseFloat(m[1]));   // "." 이나 "-" 하나뿐이면 NaN → 표시 없이 예전대로
+    out += op ? op + escHtml(m[1]) + '::' + hlSeg(m[2], false) + '::</span>' : hlSeg(m[0], true);
+    last = m.index + m[0].length;
+  }
+  return out + hlSeg(text.slice(last), true) + '\n';
+}
+/* 2단계 — 청크 칩 · <a|b> 랜덤 · {}/[] 가중치.
+   br=false 면 정규식이 예전과 똑같다. 그래서 강조를 꺼두면 출력이 한 글자도 안 달라진다.
+   여기서는 토큰 갈래가 {}[] 를 경계로 배제하므로 괄호 갈래와 시작 위치가 겹칠 수 없다.
+   괄호 안쪽은 br=false 로 다시 돌린다 — 강조를 겹겹이 칠하지 않고 한 겹만 남긴다. */
+function hlSeg(text, br) {
   let out = '';
-  const re = /(<[^<>\n]*\|[^<>\n]*>)|([^,\n{}\[\]<>|]+)/g;
+  const re = br
+    ? /(?<wild><[^<>\n]*\|[^<>\n]*>)|(?<cur>\{+[^{}\n]*\}+)|(?<sq>\[+[^\[\]\n]*\]+)|(?<tok>[^,\n{}\[\]<>|]+)/g
+    : /(?<wild><[^<>\n]*\|[^<>\n]*>)|(?<tok>[^,\n{}\[\]<>|]+)/g;
   let last = 0, m;
   while ((m = re.exec(text))) {
     out += escHtml(text.slice(last, m.index));
-    if (m[1]) out += '<mark class="hl-wild">' + escHtml(m[1]) + '</mark>';
-    else {
-      const seg = m[2], lead = seg.match(/^\s*/)[0], trail = seg.match(/\s*$/)[0];
+    const g = m.groups;
+    if (g.wild) out += '<mark class="hl-wild">' + escHtml(g.wild) + '</mark>';
+    else if (g.cur || g.sq) {
+      // {tag} 는 ×1.05, [tag] 는 ÷1.05. 겹치면 개수만큼 거듭제곱. 여닫이 개수가 안 맞으면 무표시.
+      const t = g.cur || g.sq, o = g.cur ? '{' : '[', cch = g.cur ? '}' : ']';
+      let a = 0; while (t[a] === o) a++;
+      let b = 0; while (t[t.length - 1 - b] === cch) b++;
+      const op = a === b ? emphOpen(Math.pow(1.05, g.cur ? a : -a)) : '';
+      const body = escHtml(t.slice(0, a)) + hlSeg(t.slice(a, t.length - b), false) + escHtml(t.slice(t.length - b));
+      out += op ? op + body + '</span>' : body;
+    } else {
+      const seg = g.tok, lead = seg.match(/^\s*/)[0], trail = seg.match(/\s*$/)[0];
       const core = seg.slice(lead.length, seg.length - trail.length);
       if (core && isChunkToken(core)) out += escHtml(lead) + '<mark class="hl-chunk" style="--cc:' + chunkColorOf(core) + '">' + escHtml(core) + '</mark>' + escHtml(trail);
       else out += escHtml(seg);
     }
     last = m.index + m[0].length;
   }
-  return out + escHtml(text.slice(last)) + '\n';
+  return out + escHtml(text.slice(last));
 }
 function chunkColorOf(tok) {
-  const t = normKey(tok.replace(/^-?[\d.]+::/, '').replace(/::$/, '').replace(/^@/, ''));
-  const c = S.chunks.find(x => normKey(x.name) === t);
+  const c = chunkByName().get(chunkKeyOf(tok));
   return (typeof catColor === 'function' && c) ? catColor(c.cat) : 'var(--acc)';
 }
 function attachHighlight(ta) {
@@ -1972,10 +2145,20 @@ function attachHighlight(ta) {
   ta.parentNode.insertBefore(wrap, ta);
   const hl = document.createElement('div'); hl.className = 'phl' + (ta.classList.contains('big') ? ' big' : ''); hl.setAttribute('aria-hidden', 'true');
   wrap.appendChild(hl); wrap.appendChild(ta);
-  const sync = () => { hl.innerHTML = hlHtml(ta.value); hl.scrollTop = ta.scrollTop; hl.style.height = ta.offsetHeight + 'px'; };
-  ta.addEventListener('input', sync); ta.addEventListener('scroll', () => { hl.scrollTop = ta.scrollTop; });
-  new ResizeObserver(sync).observe(ta);
-  ta._hlSync = sync; sync();
+  /* 내용도 청크도 그대로면 다시 그릴 필요가 없다.
+     syncUI 는 버튼을 누를 때마다 모든 칸의 미러를 다시 만들고 있었다 —
+     체크박스 하나 켜는데도 프롬프트 전체를 다시 색칠한 셈이다.
+     청크 목록이 바뀌면 칩 색이 달라지므로 그때는 다시 그린다. */
+  const sync = force => {
+    const v = ta.value, n = (S.chunks || []).length;
+    if (force !== true && hl._v === v && hl._n === n) { hl.scrollTop = ta.scrollTop; return; }
+    hl._v = v; hl._n = n;
+    hl.innerHTML = hlHtml(v); hl.scrollTop = ta.scrollTop; hl.style.height = ta.offsetHeight + 'px';
+  };
+  ta.addEventListener('input', () => sync()); ta.addEventListener('scroll', () => { hl.scrollTop = ta.scrollTop; });
+  // 크기가 바뀌면 높이를 다시 맞춰야 하므로 내용이 같아도 다시 그린다
+  new ResizeObserver(() => sync(true)).observe(ta);
+  ta._hlSync = sync; sync(true);
 }
 function refreshHighlights() { $$('textarea[data-hl]').forEach(t => t._hlSync && t._hlSync()); }
 
@@ -2183,7 +2366,7 @@ function syncUI() {
   ['steps', 'scale', 'rescale', 'strength', 'noise', 'enhStr', 'enhNoise', 'varStr', 'varNoise', 'ucStrength'].forEach(setR);
   $('#enhScale').value = S.enhScale; $('#sampler').value = S.sampler; $('#schedule').value = S.schedule;
   $('#seed').value = S.seed; $('#randomSeed').checked = S.randomSeed;
-  ['quality', 'variety', 'decrisper', 'smea', 'smeaDyn', 'legacyUc', 'vibeNormalize', 'autoSaveOn', 'stripOnSave', 'slashWild', 'transparent'].forEach(k => { $('#' + k).checked = !!S[k]; });
+  ['quality', 'variety', 'decrisper', 'smea', 'smeaDyn', 'legacyUc', 'vibeNormalize', 'autoSaveOn', 'stripOnSave', 'slashWild', 'transparent', 'chunkFloatOn', 'emphHl'].forEach(k => { const el = $('#' + k); if (el) el.checked = !!S[k]; });
   $('#autoNsfw').checked = S.autoNsfw !== false;
   $('#prompt').value = S.prompt; $('#uc').value = S.uc;
   renderSections();
@@ -2281,7 +2464,7 @@ function setQualityPreset(which) {
 function updateCostHint() {
   const isOpus = R.tier === 3;
   const caps = capsOf(S.model);
-  const est = anlasEstimate({ width: S.w, height: S.h, steps: S.steps, batch: S.n,
+  const est = anlasEstimate({ width: S.w, height: S.h, steps: S.steps, batch: S.n, model: S.model,
     strength: R.i2iBlob ? S.strength : 1, isOpus, opusLeft: R.opusUsage,
     charRefCount: caps.charRef ? R.prefs.length : 0,   // 그 모델이 안 받으면 비용도 0
     /* "인코딩이 있으면 공짜" 가 아니다. ensureVibes 는 모델이나 Info Extracted 가
@@ -2318,10 +2501,19 @@ function init() {
   if (!S.singleBox && (!S.secText || !Object.keys(S.secText).length) && S.prompt) { S.secText = {}; S.secText[S.sections[0].id] = S.prompt; renderSections(); } // 예전 단일 프롬프트 이관
 
   $('#model').onchange = () => {
-    const oldId = (MODELS[S.model].ucs[ucIdx()] || {}).id;
+    const prev = MODELS[S.model];
+    const oldId = (prev.ucs[ucIdx()] || {}).id;
     S.model = $('#model').value;
-    const i = MODELS[S.model].ucs.findIndex(u => u.id === oldId);
+    const now = MODELS[S.model];
+    const i = now.ucs.findIndex(u => u.id === oldId);
     if (i >= 0) S.ucPreset = i; else { S.ucPreset = 0; if (oldId != null) toast('이 모델에는 그 UC 프리셋이 없어 Heavy로 바뀌었습니다'); }
+    /* NAI 웹은 모델마다 기본 scale 이 다르다 (V5 7 · V4.5 5 · V4 5.5 · Furry 6.2).
+       앱은 하나로 고정돼 있어서 V5 를 골라도 5 로 나갔다 — 웹과 그림이 달라진다.
+       직접 만져둔 값까지 덮으면 곤란하니, 이전 모델의 기본값 그대로일 때만 바꾼다. */
+    if (prev.scale != null && now.scale != null && S.scale === prev.scale && now.scale !== prev.scale) {
+      S.scale = now.scale;
+      toast(`이 모델의 기본 프롬프트 가이던스는 ${now.scale} 입니다 (바꿔뒀습니다)`);
+    }
     syncUI(); save();
   };
   $('#sizePreset').onchange = () => { const s = SIZES[$('#sizePreset').value]; if (s[1]) { S.w = s[1]; S.h = s[2]; $('#w').value = S.w; $('#h').value = S.h; updateCostHint(); save(); } };
@@ -2340,7 +2532,8 @@ function init() {
   $('#btnDice').onclick = () => fixSeed(randSeed());
   $('#btnSeedLast').onclick = () => { if (R.lastSeed != null) fixSeed(R.lastSeed); };
   const bindCk = (id, key, after) => { $('#' + id).onchange = () => { S[key] = $('#' + id).checked; save(); if (after) after(); }; };
-  ['randomSeed', 'quality', 'variety', 'decrisper', 'legacyUc', 'vibeNormalize', 'autoSaveOn', 'stripOnSave', 'smeaDyn', 'autoNsfw', 'slashWild', 'transparent'].forEach(k => bindCk(k, k, updateCostHint));
+  ['randomSeed', 'quality', 'variety', 'decrisper', 'legacyUc', 'vibeNormalize', 'autoSaveOn', 'stripOnSave', 'smeaDyn', 'autoNsfw', 'slashWild', 'transparent', 'chunkFloatOn'].forEach(k => bindCk(k, k, updateCostHint));
+  bindCk('emphHl', 'emphHl', () => { if (typeof refreshHighlights === 'function') refreshHighlights(); });
   bindCk('smea', 'smea', () => { $('#smeaDyn').disabled = !S.smea; if (!S.smea) { S.smeaDyn = false; $('#smeaDyn').checked = false; } updateCostHint(); });
   $('#aiChoiceBtn').onclick = () => { S.aiChoice = !S.aiChoice; save(); renderChars(); };
   $('#ucPreset').onchange = () => { S.ucPreset = +$('#ucPreset').value; syncAdvanced(); save(); };
@@ -2494,7 +2687,7 @@ function naiMarks(q) {
   const o = s.official, img = officialImg(o);
   const gh = genHealth();
   const marks = [];
-  const add = (name, lv, txt) => marks.push({ name, lv, txt });
+  const add = (name, lv, txt, local) => marks.push({ name, lv, txt, local: !!local });
 
   if (!NST.last) add('NAI 접속', -1, '확인 중');
   else if (!s.api_ok || !s.img_ok) add('NAI 접속', 2, `api ${s.api_ok ? s.api_ms + 'ms' : '불가'} · image ${s.img_ok ? s.img_ms + 'ms' : '불가'}`);
@@ -2533,18 +2726,73 @@ function naiMarks(q) {
     (gh.fails >= 2 && gh.failRate >= 0.2) ? 2 : (gh.fails >= 2 && gh.failRate >= 0.08) ? 1 : 0,
     `${gh.fails}/${gh.total}회 실패 (${Math.round(gh.failRate * 100)}%)`);
 
-  if (!q || !q.enough) add('그림 품질', -1, `최근 이미지 ${(q && q.n) || 0}장 (3장 이상 필요)`);
-  else if (!q.ratio) add('그림 품질', -1, `선명도 ${q.cur.lap} · 대비 ${q.cur.sd} · 다양성 ${q.cur.ent} — “평소로 기준 저장”을 눌러두면 다음부터 비교합니다`);
+  /* 이름을 "그림 품질" 이라고 붙여 뒀더니, 인체가 망가진 그림에도 초록불이 떠서
+     "이게 왜 초록이냐" 는 얘기가 나왔다. 당연하다 — 이 지표는 인체를 볼 수 없다.
+     256×256 으로 줄인 그림의 픽셀 통계(가장자리 또렷함·밝기 편차·톤 분포)뿐이라,
+     손가락이 여섯 개여도 숫자는 하나도 안 변한다.
+     실제 쓸모는 NAI 출력 자체가 평소와 달라졌는지(뭉개짐·흐림·색 빠짐) 알아채는 것이다.
+     못 하는 일을 약속하지 않도록 이름을 바꿨다. */
+  const QNAME = '출력 상태 (평소 대비)';
+  if (!q || !q.enough) add(QNAME, -1, `최근 이미지 ${(q && q.n) || 0}장 (3장 이상 필요) · 그림이 잘 나왔는지가 아니라 NAI 출력이 평소와 같은지를 봅니다`);
+  else if (!q.ratio) add(QNAME, -1, `또렷함 ${q.cur.lap} · 밝기편차 ${q.cur.sd} · 톤분포 ${q.cur.ent} — “평소로 기준 저장”을 눌러두면 다음부터 비교합니다`);
   else {
     const r = q.ratio;
-    const bad = r.lap < 0.5 || r.sd < 0.6 || r.ent < 0.75;
-    const warn = r.lap < 0.75 || r.sd < 0.8 || r.ent < 0.9;
-    add('그림 품질', bad ? 2 : warn ? 1 : 0,
-      `선명도 ${(r.lap * 100).toFixed(0)}% · 대비 ${(r.sd * 100).toFixed(0)}% · 다양성 ${(r.ent * 100).toFixed(0)}% (평소=100%)`);
+    /* 한 지표만 낮은 것은 그림 차이지 이상이 아니다 —
+       밤 장면은 대비가 낮고, 단순한 배경은 다양성이 낮고, 부드러운 그림체는 선명도가 낮다.
+       예전엔 셋 중 하나만 걸려도 노란불이라(특히 다양성은 10%만 낮아도) 멀쩡한 결과에도 늘 떴다.
+       늘 떠 있는 경고는 아무도 안 보게 되고, 정작 진짜 문제가 묻힌다.
+       모델이 실제로 망가지면 여러 지표가 함께 내려간다 → 두 개 이상일 때만 알린다. */
+    const low = [r.lap < 0.62, r.sd < 0.70, r.ent < 0.80].filter(Boolean).length;
+    const vlow = [r.lap < 0.42, r.sd < 0.52, r.ent < 0.68].filter(Boolean).length;
+    const bad = vlow >= 2 || (vlow >= 1 && low >= 2);
+    const warn = !bad && low >= 2;
+    /* 숫자 이름도 풀어 쓴다. "다양성" 이 뭔지 알 수 없다는 얘기가 있었다 —
+       실제로는 밝기 히스토그램 엔트로피, 즉 톤이 얼마나 고르게 퍼져 있는가다. */
+    add(QNAME, bad ? 2 : warn ? 1 : 0,
+      `또렷함 ${(r.lap * 100).toFixed(0)}% · 밝기편차 ${(r.sd * 100).toFixed(0)}% · 톤분포 ${(r.ent * 100).toFixed(0)}% (평소=100%)`
+      + (low === 1 ? ' — 한 가지만 낮은 것은 그림 차이라 넘어갑니다' : ''));
+  }
+  /* 뭉갬 — 이건 위의 통계와 달리 **실제로 그림에서 보는** 것이다.
+     가장자리 방향이 뒤죽박죽인 자리를 세므로, 부분적으로 뭉개진 그림을 잡는다.
+     (실측: 깨끗 0.05 · 부드러운 화풍 0.05 · 일부 뭉갬 0.23~0.54 — 화풍은 오탐하지 않는다)
+     손가락 개수·인체 비율은 여전히 못 본다. 그건 🔬 채점의 몫이다. */
+  const mu = q && q.mush;
+  if (mu && mu.n) {
+    const lv = mu.hits >= Math.max(2, Math.ceil(mu.n * 0.4)) ? 2 : mu.hits ? 1 : 0;
+    add('뭉갬 검사', lv,
+      `최근 ${mu.n}장 중 ${mu.hits}장 의심 (중앙 ${mu.med.toFixed(2)} · 최대 ${mu.worst.toFixed(2)} · 기준 ${typeof MUSH_WARN === 'number' ? MUSH_WARN : 0.15})`
+      + (lv ? ' — 뭉개진 부분이 있는 그림이 섞여 있습니다' : ' · 손·인체는 이 검사로 알 수 없습니다 → 🔬 최근 이미지 채점'));
+  }
+  /* 채점 추세 — 위 '출력 상태' 가 원리상 못 보는 것(손가락·해부학)을 본다.
+     대신 Gemini 호출이 필요해서 자동으로는 안 돈다 — 여기 숫자는 채점한 것만 모은 결과다.
+     local:true 로 넣는다: 이건 내 그림 얘기지 NovelAI 서버 얘기가 아니라서
+     상단 표시등 색까지 물들이면 안 된다(naiWorst 가 건너뛴다). */
+  const jh = judgeHealth();
+  const JNAME = '채점 추세 (손·인체)';
+  const jNow = jh.recent ? `최근 ${jh.recentN}장 종합 <b>${fx1(jh.recent.ov)}</b> · 손 ${fx1(jh.recent.ha)} · 해부 ${fx1(jh.recent.an)}` : '';
+  if (!jh.n) add(JNAME, -1, '아직 채점한 이미지가 없습니다 — 아래 🔬 로 채점하면 여기에 추세가 쌓입니다', true);
+  else if (!jh.enough) add(JNAME, -1,
+    `${jNow} — 과거와 비교하려면 ${JHL.win + JHL.minBase}장이 필요합니다 (지금 ${jh.n}장)`, true);
+  else if (jh.mixed) add(JNAME, 0,
+    `${jNow} — 중간에 모델이 바뀌어(${escHtml(jh.mBase)}/${escHtml(jh.jmBase)} → ${escHtml(jh.mRecent)}/${escHtml(jh.jmRecent)}) 과거와 비교하지 않았습니다`, true);
+  else {
+    const arw = v => v >= JHL.low ? ' ↓' : v <= -JHL.low ? ' ↑' : '';
+    add(JNAME, jh.lv, [
+      `최근 ${jh.recentN}장 종합 <b>${fx1(jh.recent.ov)}</b> (지난 ${jh.baseN}장 ${fx1(jh.base.ov)})${arw(jh.drop.ov)}`,
+      `손 ${fx1(jh.recent.ha)} (${fx1(jh.base.ha)})${arw(jh.drop.ha)}`,
+      `해부 ${fx1(jh.recent.an)} (${fx1(jh.base.an)})${arw(jh.drop.an)}`,
+      /* 아무것도 안 내려갔는데 "한 지표만 낮은 건 넘어간다" 고 하면 말이 안 맞는다.
+         실제로 내려간 게 있을 때만 그 얘기를 한다. */
+      jh.lv ? '<b>두 지표 이상</b>이 함께 내려갔습니다'
+            : (Math.max(jh.drop.ov, jh.drop.ha, jh.drop.an) >= JHL.low
+                 ? '한 지표만 낮은 것은 그림 차이라 넘어갑니다' : '평소와 비슷합니다'),
+    ].join(' · '), true);
   }
   return marks;
 }
-const naiWorst = marks => marks.reduce((a, m) => Math.max(a, m.lv), -1);
+/* 상단 표시등은 "NovelAI 가 멀쩡한가" 만 말한다. local 로 표시된 항목(내 그림 얘기)은
+   목록·툴팁에는 그대로 뜨지만 색은 물들이지 않는다 — NAI 는 멀쩡한데 상단이 빨개지면 안 된다. */
+const naiWorst = marks => marks.reduce((a, m) => m.local ? a : Math.max(a, m.lv), -1);
 
 function paintNaiStatus() {
   const s = NST.last; const dot = $('#naiDot'), ms = $('#naiMs'), pill = $('#naiStat');
@@ -2645,6 +2893,126 @@ function genHealth() {
   out.cfg = `${recent[0].w}×${recent[0].h} ${recent[0].st}st`;
   return out;
 }
+/* ═══════════ 이미지 채점 (Gemini) — 결과를 이미지에 붙여 남긴다 ═══════════
+   버튼을 한 번 누를 때마다 Gemini 비전 호출이 한 번 나간다(= 돈). 그래서
+   (1) 이미 채점한 이미지는 다시 안 친다 — temperature 0 이라 답도 어차피 같다
+   (2) 한 번에 한 장씩만 보낸다 — 서버는 ThreadingHTTPServer 라 N개를 던지면
+       90초짜리 blocking 호출을 붙잡은 스레드가 N개 생긴다
+   (3) 최소 간격을 둔다. */
+const JQ = { busy: false, last: 0, gap: 1500, stop: false };
+async function judgeImage(it, opts) {
+  opts = opts || {};
+  if (!it || !it.blob) throw new Error('채점할 이미지가 없습니다');
+  if (it.judge && !opts.force) return it.judge;
+  let guard = 0;
+  while (JQ.busy && guard++ < 600) await sleep(200);
+  if (it.judge && !opts.force) return it.judge;   // 기다리는 사이 다른 경로가 채점했을 수 있다
+  JQ.busy = true;
+  try {
+    const wait = JQ.gap - (Date.now() - JQ.last);
+    if (wait > 0) await sleep(wait);
+    const model = S.aiModel || 'gemini-2.5-flash';
+    const res = await apiFetch('/ai/judge', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: await blobToB64(it.blob), prompt: (it.meta && it.meta.input) || '', model }) });
+    JQ.last = Date.now();
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) { const err = new Error(j.message || ('HTTP ' + res.status)); err.detail = j; throw err; }
+    const g = j.judge || {};
+    const cat = v => (v && typeof v.score === 'number')
+      ? { score: v.score, note: String(v.note || '').slice(0, 300) } : null;
+    it.judge = {
+      t: Date.now(), model,
+      overall: typeof g.overall === 'number' ? g.overall : null,
+      hands: cat(g.hands), anatomy: cat(g.anatomy), style: cat(g.style),
+      artifacts: cat(g.artifacts), prompt_follow: cat(g.prompt_follow),
+      defects: Array.isArray(g.defects)
+        ? g.defects.filter(x => x && String(x).trim()).map(x => String(x).slice(0, 200)).slice(0, 12) : [],
+      summary: String(g.summary || '').slice(0, 300),
+    };
+    persistItem(it);     // 이미지에 붙여 남긴다 (창을 닫아도, 새로고침해도 남는다)
+    judgeLogPush(it);    // 추세는 따로 — 이미지가 지워져도 남게
+    return it.judge;
+  } finally { JQ.busy = false; }
+}
+/* 추세 로그. 이미지 레코드는 400장 상한(pruneHistory, app.js:1437)과 삭제로 통째로 사라지므로
+   추세를 it.judge 에만 두면 400장 경계에서 과거가 날아간다 → 수명을 분리한다.
+   글(note·summary)은 넣지 않는다. S 는 통째로 localStorage 에 쓰이고 서버로도 밀리므로
+   문장까지 수백 건 쌓으면 상태 파일이 눈에 띄게 커진다 — 숫자만 남긴다.
+   정렬 키는 "채점한 시각" 이 아니라 "이미지가 나온 시각(t)" 이다.
+   소급 채점을 하면 옛 이미지가 나중에 채점되는데, 채점 순서로 쌓으면
+   옛 그림이 '최근'으로 둔갑해 추세가 거꾸로 나온다. */
+function judgeLogPush(it) {
+  const g = it.judge; if (!g) return;
+  const n = v => (v && typeof v.score === 'number') ? v.score : null;
+  const rec = { t: it.t || Date.now(), jt: g.t, id: it.id != null ? it.id : null,
+    seed: it.seed != null ? it.seed : null,
+    ov: g.overall, ha: n(g.hands), an: n(g.anatomy), sy: n(g.style), ar: n(g.artifacts), pf: n(g.prompt_follow),
+    w: it.w || null, h: it.h || null,
+    m: String(it.model || '').slice(0, 28),      // NAI 모델 — 점수는 이것에 크게 좌우된다
+    jm: String(g.model || '').slice(0, 28),      // 채점한 Gemini 모델 — 바뀌면 점수 기준도 바뀐다
+    nd: (g.defects || []).length };
+  S.judgeLog = Array.isArray(S.judgeLog) ? S.judgeLog : [];
+  const same = x => (rec.id != null ? x.id === rec.id : (x.t === rec.t && x.seed === rec.seed));
+  const i = S.judgeLog.findIndex(same);
+  if (i >= 0) S.judgeLog[i] = rec; else S.judgeLog.push(rec);
+  S.judgeLog.sort((a, b) => a.t - b.t);
+  if (S.judgeLog.length > 300) S.judgeLog = S.judgeLog.slice(-300);
+  save();
+}
+/* 채점 결과를 그리는 유일한 자리. 모달·소급채점이 같이 쓴다.
+   note·summary·defects 는 Gemini 가 쓴 문장이므로 반드시 escHtml 을 태운다. */
+function judgeHtml(j) {
+  if (!j) return '';
+  const row = (k, label) => j[k] ? `<div class="jrow"><span>${label} <b>${j[k].score}/10</b></span><span class="hint">${escHtml(j[k].note || '')}</span></div>` : '';
+  const df = j.defects || [];
+  const dfHtml = df.length
+    ? `<div class="jdefects"><b>찾은 결함 ${df.length}개</b><ul>${df.map(x => `<li>${escHtml(String(x))}</li>`).join('')}</ul></div>`
+    : '<div class="jdefects hint">눈에 띄는 결함을 찾지 못했습니다</div>';
+  return `<div class="judge-list">${dfHtml}
+    ${row('hands', '✋ 손가락')}${row('anatomy', '🧍 해부학')}${row('style', '🎨 그림체')}
+    ${row('artifacts', '🧩 뭉갬·노이즈')}${row('prompt_follow', '📝 프롬프트 준수')}
+    <div class="jrow"><span><b>종합 ${j.overall != null ? j.overall + '/10' : '-'}</b></span><span class="hint">${escHtml(j.summary || '')}</span></div>
+    <div class="hint">${escHtml(new Date(j.t).toLocaleString())} · ${escHtml(j.model || '')}</div></div>`;
+}
+/* 배지 마우스오버용 (title 속성이라 HTML 이 아니다 — 이스케이프 필요 없음) */
+const judgeTip = j => !j ? '' : `종합 ${j.overall}/10`
+  + (j.hands ? ` · 손 ${j.hands.score}` : '') + (j.anatomy ? ` · 해부 ${j.anatomy.score}` : '')
+  + ((j.defects || []).length ? '\n' + j.defects.slice(0, 5).map(x => '· ' + x).join('\n') : '')
+  + (j.summary ? '\n' + j.summary : '');
+const judgeCls = v => v == null ? '' : v <= 4 ? ' bad' : v <= 6 ? ' warn' : '';
+/* 채점 추세 판정 — genHealth()(app.js:2766)와 같은 틀이다. 두 가지만 다르다.
+   (1) 그룹을 나누지 않는다. 속도 기록은 하루에 400건이 쌓이지만 채점은 유료라 드물게 찍힌다.
+       genHealth 처럼 (해상도·스텝·모델)로 쪼개면 표본이 영영 안 모여 판정을 못 한다.
+       대신 최근창과 기준선의 주력 모델(NAI·Gemini 둘 다)이 다르면 비교하지 않고 그 사실을 밝힌다 —
+       모델을 바꿔서 난 점수 차이를 "품질이 떨어졌다" 고 말하면 헛경보다.
+   (2) 지표 하나가 내려간 것은 그림 차이다(어두운 그림, 손이 안 보이는 구도).
+       손 점수 한 번 낮았다고 경보를 띄우면 "늘 떠 있어 아무도 안 보는 경고" 를 되풀이한다
+       → 두 지표 이상이 함께 내려갔을 때만 알린다. 이건 출력 상태에서 이미 겪은 실패다. */
+const JHL = { win: 10, minBase: 10, low: 1.0, vlow: 2.0 };
+const fx1 = v => (v == null ? '-' : v.toFixed(1));
+const jmean = (a, k) => { const v = a.map(x => x[k]).filter(x => typeof x === 'number'); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : null; };
+const jtop = (a, k) => { const c = {}; a.forEach(x => { const v = x[k] || ''; c[v] = (c[v] || 0) + 1; }); return Object.keys(c).sort((p, q) => c[q] - c[p])[0] || ''; };
+function judgeHealth() {
+  const log = (Array.isArray(S.judgeLog) ? S.judgeLog : []).filter(x => x && x.t && typeof x.ov === 'number');
+  const out = { n: log.length, enough: false, mixed: false, lv: 0 };
+  if (!log.length) return out;
+  const recent = log.slice(-JHL.win), prior = log.slice(0, -JHL.win);
+  out.recentN = recent.length; out.baseN = prior.length;
+  out.recent = { ov: jmean(recent, 'ov'), ha: jmean(recent, 'ha'), an: jmean(recent, 'an') };
+  if (recent.length < JHL.win || prior.length < JHL.minBase) return out;
+  out.base = { ov: jmean(prior, 'ov'), ha: jmean(prior, 'ha'), an: jmean(prior, 'an') };
+  out.enough = true;
+  out.mRecent = jtop(recent, 'm'); out.mBase = jtop(prior, 'm');
+  out.jmRecent = jtop(recent, 'jm'); out.jmBase = jtop(prior, 'jm');
+  if (out.mRecent !== out.mBase || out.jmRecent !== out.jmBase) { out.mixed = true; return out; }
+  const d = k => (out.base[k] == null || out.recent[k] == null) ? 0 : out.base[k] - out.recent[k];
+  const drops = [d('ov'), d('ha'), d('an')];
+  out.drop = { ov: drops[0], ha: drops[1], an: drops[2] };
+  const low = drops.filter(x => x >= JHL.low).length;
+  const vlow = drops.filter(x => x >= JHL.vlow).length;
+  out.lv = (vlow >= 2 || (vlow >= 1 && low >= 2)) ? 2 : (low >= 2) ? 1 : 0;
+  return out;
+}
 function openNaiStatus() {
   openModal('NovelAI 상태 종합 판정', async body => {
     // 상세창을 열 때는 그림 품질을 새로 재서 캐시에 넣는다 (상단 표시등도 이 값을 쓴다)
@@ -2656,7 +3024,7 @@ function openNaiStatus() {
     const incRows = o && (o.incidents || []).length ? o.incidents.map(i => `<div class="inc"><b>${escHtml(i.name || '')}</b> <span class="hint">${escHtml((i.status || '') + ' · ' + (i.at || '').slice(0, 16).replace('T', ' '))}</span><div>${escHtml((i.detail || '').slice(0, 300))}</div></div>`).join('') : '';
 
     const marks = naiMarks(NST.q);
-    const worstLv = Math.max(...marks.map(m => m.lv));
+    const worstLv = naiWorst(marks);   // 종합 판정도 NovelAI 얘기만 — 내 그림 점수로 '장애' 라 하면 안 된다
     const verdict = worstLv >= 2
       ? '🔴 정상이 아닙니다 — 아래 빨간 항목을 보세요'
       : worstLv === 1 ? '🟡 평소보다 나쁩니다' : '🟢 정상';
@@ -2668,9 +3036,21 @@ function openNaiStatus() {
       ${incRows ? `<div><b>진행 중 장애</b><div>${incRows}</div></div>` : ''}
       <div><b>공식 서비스별</b><div class="svcs">${svcRows || '<span class="hint">확인 중</span>'}</div></div>
       <div><b>사이트 공지</b><div>${s.notice ? escHtml(s.notice) : '없음'}</div></div>
-      <div><b>정밀 판정</b><div class="hint">최근 이미지를 AI 가 보고 손가락·해부학·그림체·프롬프트 준수도를 채점합니다 (Gemini 키 필요)</div>
-        <div class="row"><button class="btn sm" id="nsJudge">🔬 최근 이미지 채점</button><span class="hint" id="nsJudgeSt"></span></div>
-        <div id="nsJudgeOut"></div></div>
+      <div><b>정밀 판정</b><div class="hint">AI 가 손가락·해부학·그림체·프롬프트 준수도를 채점하고 <b>결과를 그 이미지에 붙여 남깁니다</b> (Gemini 키 필요 · 한 장 = 호출 1회 = 요금 1회)</div>
+        <div class="row"><button class="btn sm" id="nsJudge">🔬 지금 보는 이미지 채점</button>
+          <button class="btn sm ghost" id="nsJudgeRe" hidden>다시 채점 (재과금)</button>
+          <span class="hint" id="nsJudgeSt"></span></div>
+        <div id="nsJudgeOut"></div>
+        <div class="row" style="margin-top:8px">
+          <label class="fld" style="width:auto">자동 채점<select id="nsJudgeAuto">
+            <option value="0">끔 (권장)</option><option value="5">5장마다 1회</option>
+            <option value="10">10장마다 1회</option><option value="20">20장마다 1회</option></select></label>
+          <label class="fld" style="width:auto">안 채점한 최근<select id="nsJudgeBackN">
+            <option value="5">5장</option><option value="10">10장</option><option value="20">20장</option></select></label>
+          <button class="btn sm" id="nsJudgeBack">소급 채점</button>
+          <button class="btn sm ghost" id="nsJudgeStop" hidden>정지</button>
+        </div>
+        <div class="hint" id="nsJudgeAutoHint"></div></div>
       </div>
       <div class="hint">2분마다 자동 확인 · 공식 상태 출처: status.novelai.net · 속도는 <b>내 과거 기록</b>과 비교합니다(스텝·해상도 차이를 보정).</div>
       <div class="row"><button class="btn sm" id="nsNow">지금 다시 확인</button>
@@ -2683,31 +3063,63 @@ function openNaiStatus() {
       if (!qq.enough) { toast('이미지가 3장 이상 있어야 기준을 잡을 수 있습니다', 'err'); return; }
       setQualityBaseline(qq.cur);
     };
-    body.querySelector('#nsJudge').onclick = async () => {
-      const it = (R.hist || []).filter(h => h.blob).slice(-1)[0];
-      const st = body.querySelector('#nsJudgeSt'), out = body.querySelector('#nsJudgeOut');
-      if (!it) { st.textContent = '채점할 이미지가 없습니다'; return; }
-      st.textContent = '채점 중…';
-      try {
-        const p = (it.meta && it.meta.input) || '';
-        const res = await apiFetch('/ai/judge', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image: await blobToB64(it.blob), prompt: p, model: S.aiModel || 'gemini-2.5-flash' }) });
-        const j = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          // 실패 원인을 그대로 보여준다 (모델·중단사유·응답 일부)
-          const detail = [j.finish ? '중단사유 ' + j.finish : '', j.model ? '모델 ' + j.model : ''].filter(Boolean).join(' · ');
-          out.innerHTML = detail || j.raw ? `<div class="hint">${escHtml(detail)}${j.raw ? '<br>응답: ' + escHtml(String(j.raw).slice(0, 200)) : ''}</div>` : '';
-          throw new Error(j.message || ('HTTP ' + res.status));
-        }
-        const g = j.judge || {};
-        const row = (k, label) => g[k] ? `<div class="jrow"><span>${label} <b>${g[k].score}/10</b></span><span class="hint">${escHtml(g[k].note || '')}</span></div>` : '';
-        out.innerHTML = `<div class="judge-list">
-          ${row('hands', '✋ 손가락')}${row('anatomy', '🧍 해부학')}${row('style', '🎨 그림체')}
-          ${row('artifacts', '🧩 뭉갬·노이즈')}${row('prompt_follow', '📝 프롬프트 준수')}
-          <div class="jrow"><span><b>종합 ${g.overall != null ? g.overall + '/10' : '-'}</b></span><span class="hint">${escHtml(g.summary || '')}</span></div></div>`;
-        st.textContent = '';
-      } catch (e) { st.textContent = '✖ ' + e.message; }
+    const jOut = body.querySelector('#nsJudgeOut'), jSt = body.querySelector('#nsJudgeSt'), jRe = body.querySelector('#nsJudgeRe');
+    /* 맨 끝 장이 아니라 "지금 보고 있는 이미지" 를 채점한다.
+       예전엔 slice(-1)[0] 이라, 뷰어에서 3장 전을 보며 눌러도 마지막 장이 채점됐다 —
+       붙여 남기는 순간 그 어긋남이 그대로 잘못된 배지가 된다. */
+    const jTarget = () => curItem() || (R.hist || []).filter(h => h.blob).slice(-1)[0];
+    const jPaint = it => { const j = it && it.judge; jOut.innerHTML = judgeHtml(j); jRe.hidden = !j; };
+    const jSync = () => { renderHist(); if (R.cur >= 0 && R.hist[R.cur]) showImage(R.cur); if (window.onHistChanged) window.onHistChanged(); paintNaiStatus(); };
+    jPaint(jTarget());   // 이미 채점해 둔 것이 있으면 호출 없이(=돈 안 쓰고) 바로 보여준다
+    const jRun = async force => {
+      const it = jTarget();
+      if (!it) { jSt.textContent = '채점할 이미지가 없습니다'; return; }
+      if (it.judge && !force) { jPaint(it); jSt.textContent = '저장해 둔 결과입니다 (호출 안 함)'; return; }
+      jSt.textContent = '채점 중… (최대 90초)';
+      try { await judgeImage(it, { force }); jPaint(it); jSt.textContent = ''; jSync(); }
+      catch (e) {
+        const d = e.detail || {};
+        const det = [d.finish ? '중단사유 ' + d.finish : '', d.model ? '모델 ' + d.model : ''].filter(Boolean).join(' · ');
+        jOut.innerHTML = (det || d.raw) ? `<div class="hint">${escHtml(det)}${d.raw ? '<br>응답: ' + escHtml(String(d.raw).slice(0, 200)) : ''}</div>` : '';
+        jSt.textContent = '✖ ' + e.message;
+      }
     };
+    body.querySelector('#nsJudge').onclick = () => jRun(false);
+    jRe.onclick = () => jRun(true);
+
+    /* 자동 채점 — 켜면 돈이 나가므로 시간당 몇 회인지 숫자로 못박아 보여준다.
+       실측 생성 속도가 시간당 39장이다. */
+    const au = body.querySelector('#nsJudgeAuto'), auH = body.querySelector('#nsJudgeAutoHint');
+    au.value = String(S.judgeAuto || 0);
+    const auPaint = () => { auH.innerHTML = S.judgeAuto
+      ? `켜짐 — 생성 <b>${S.judgeAuto}장마다 1회</b>. 시간당 40장을 뽑으면 <b>시간당 약 ${Math.max(1, Math.round(40 / S.judgeAuto))}회</b> Gemini 호출이 나갑니다.`
+      : '꺼짐 — 버튼을 누를 때만 호출합니다 (자동으로는 요금이 나가지 않습니다)'; };
+    auPaint();
+    au.onchange = () => { S.judgeAuto = +au.value || 0; save(); auPaint(); };
+
+    /* 소급 채점 — 이미 뽑아둔 것 중 아직 안 채점한 최근 N장. 호출 횟수를 먼저 알리고 확인받는다. */
+    const bk = body.querySelector('#nsJudgeBack'), bkN = body.querySelector('#nsJudgeBackN'), bkStop = body.querySelector('#nsJudgeStop');
+    bk.onclick = async () => {
+      const todo = (R.hist || []).filter(h => h.blob && !h.judge).slice(-(+bkN.value || 5));
+      if (!todo.length) { jSt.textContent = '안 채점한 이미지가 없습니다'; return; }
+      if (!confirm(`${todo.length}장을 채점합니다.\nGemini 호출이 ${todo.length}회 나갑니다 (요금).\n한 장에 최대 90초까지 걸릴 수 있습니다.\n\n계속할까요?`)) return;
+      JQ.stop = false; bk.disabled = true; bkStop.hidden = false;
+      let ok = 0, fail = 0;
+      for (let i = 0; i < todo.length; i++) {
+        if (JQ.stop) break;
+        jSt.textContent = `소급 채점 ${i + 1}/${todo.length}…`;
+        try { await judgeImage(todo[i]); ok++; }
+        catch (e) {
+          fail++;
+          // 쿼터에 부딪히면 나머지를 계속 던져 봐야 전부 실패한다 — 서버에 재시도·백오프가 없다
+          if (/\b429\b|quota|RESOURCE_EXHAUSTED/i.test(e.message)) { toast('Gemini 쿼터에 걸려 중단합니다: ' + e.message, 'err'); break; }
+        }
+      }
+      bk.disabled = false; bkStop.hidden = true;
+      jSt.textContent = `소급 채점 종료 — 성공 ${ok}장${fail ? `, 실패 ${fail}장` : ''}${JQ.stop ? ' (정지됨)' : ''}`;
+      jSync(); jPaint(jTarget());
+    };
+    bkStop.onclick = () => { JQ.stop = true; bkStop.hidden = true; };
   }, true);
 }
 /* 아무도 안 잡은 오류. 화면에 띄우는 동시에 서버(data/errors.jsonl)에도 남긴다 —

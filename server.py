@@ -27,6 +27,7 @@ import csv
 import time
 import base64
 import gzip
+import hashlib
 import json
 import socket
 import threading
@@ -39,7 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 VERSION = 17
-RELEASE = "11.23"            # 배포 버전. GitHub 릴리스 태그 "v11.22" 과 짝을 이룬다.
+RELEASE = "12.0"   # 12.0 준비 빌드. 공개 번호(11.23)를 태우지 않으려고 11.99.N 을 쓴다            # 배포 버전. GitHub 릴리스 태그 "v11.22" 과 짝을 이룬다.
 UPDATE_REPO = ""            # "사용자명/저장소" — 비어 있으면 설정에서 넣는다 (config.json 의 updateRepo)
 FROZEN = getattr(sys, "frozen", False)          # PyInstaller 로 묶인 단일 exe 인가
 if FROZEN:
@@ -180,6 +181,27 @@ def find_node():
 _NODE = None
 # 클라이언트마다 유튜브가 주는 URL의 유효성이 다름(android_vr·mweb 은 403 나는 경우 많음) → 되는 것을 찾을 때까지 순서대로 시도
 YT_CLIENTS = [None, "android", "tv_simply", "web_embedded", "web_safari", "android_vr"]
+
+
+class YtGone(Exception):
+    """지워졌거나 비공개인 영상 — 다시 시도해도 소용없다."""
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# 지워짐·비공개처럼 몇 번을 해도 안 되는 것들. 다른 클라이언트로 더 시도해봐야 시간만 버린다.
+_DEAD = ("video unavailable", "private video", "has been removed", "account associated",
+         "no longer available", "removed by the uploader", "this video is unavailable")
+
+
+def _yt_err(e):
+    """yt-dlp 오류를 사람이 읽을 수 있게. 터미널 색상 코드를 지운다."""
+    return _ANSI.sub("", str(e or "")).strip()
+
+
+def _yt_dead(e):
+    """다시 시도해도 소용없는 실패인가."""
+    t = _yt_err(e).lower()
+    return any(k in t for k in _DEAD)
 
 
 def _ydl_opts(fmt, client):
@@ -480,9 +502,8 @@ def update_source(url, ver):
                     shutil.copy2(dest, b)
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 data = z.read(name)
-                # 배치 파일은 반드시 CRLF 여야 한다. 깃헙 zip 이 LF 로 오면
-                # cmd 가 줄을 이어붙여 읽어 start.bat 이 아예 실행되지 않는다
-                # (확인: LF -> exit 255 / CRLF -> 정상).
+                # 배치 파일은 반드시 CRLF 여야 한다. 깃헙 zip 은 LF 로 오는데,
+                # 그대로 쓰면 cmd 가 줄을 이어붙여 읽어 start.bat 이 동작하지 않는다.
                 if dest.suffix.lower() == ".bat":
                     data = data.replace(_CRLF, _LF).replace(_LF, _CRLF)
                 dest.write_bytes(data)
@@ -766,16 +787,41 @@ class _CheckRedir(urllib.request.HTTPRedirectHandler):
 
 
 def _url_ok(url, headers):
-    """스트림 URL이 실제로 열리는지 확인 (403이면 다른 클라이언트로 재시도)"""
-    try:
+    """스트림 URL 이 **끝까지** 열리는지 확인 (막히면 다른 클라이언트로 재시도).
+
+    앞부분만 보면 안 된다. 유튜브는 PO Token(pot 파라미터)이 없는 스트림에
+    앞의 몇 MB 만 주고 그 뒤로는 403 을 낸다. 앞 1KB 만 확인하던 시절에는
+    그런 URL 이 검사를 통과해, 재생이 시작된 뒤 몇 초 만에 끊겼다
+    (사용자에게는 "코드 2 · 네트워크" 로 보인다).
+
+    실측: 같은 영상에서 android_vr 은 75% 지점이 403, android 는 정상.
+    1KB 만 읽어도 0.2초 안에 구별된다.
+    """
+    def _get(a, b):
         h = dict(headers or {})
         h.setdefault("User-Agent", UA)
-        h["Range"] = "bytes=0-1023"
+        h["Range"] = "bytes=%d-%d" % (a, b)
         req = urllib.request.Request(url, headers=h)
         with urllib.request.urlopen(req, timeout=12) as r:
-            return r.status in (200, 206)
+            if r.status not in (200, 206):
+                return None
+            r.read(2048)
+            cr = r.headers.get("Content-Range") or ""
+            m2 = re.search(r"/(\d+)$", cr)
+            return int(m2.group(1)) if m2 else -1
+
+    try:
+        total = _get(0, 1023)
+        if total is None:
+            return False
+        # 크기를 알 수 있으면 뒤쪽도 확인한다. 작은 파일은 앞 검사로 충분하다.
+        if total and total > 2 * 1024 * 1024:
+            deep = int(total * 0.75)
+            if _get(deep, deep + 1023) is None:
+                return False
     except Exception:
         return False
+    return True
 
 
 def yt_stream(vid, mode, fresh=False, itag=None):
@@ -818,6 +864,9 @@ def yt_stream(vid, mode, fresh=False, itag=None):
                 info = ydl.extract_info("https://www.youtube.com/watch?v=" + vid, download=False)
         except Exception as e:
             last_err = e
+            # 지워진 영상이면 다른 클라이언트로 더 해봐야 똑같다. 여기서 끝낸다.
+            if _yt_dead(e):
+                break
             continue
         url = info.get("url")
         if not url and info.get("requested_formats"):
@@ -829,7 +878,10 @@ def yt_stream(vid, mode, fresh=False, itag=None):
             break
         url = None
     if not url:
-        raise RuntimeError("no playable stream" + (" (%s)" % str(last_err)[-120:] if last_err else " — 403"))
+        if _yt_dead(last_err):
+            # 앱이 기다리지 않고 바로 다음 곡으로 넘어가도록 표시해 둔다
+            raise YtGone(_yt_err(last_err)[-160:])
+        raise RuntimeError("no playable stream" + (" (%s)" % _yt_err(last_err)[-120:] if last_err else " — 403"))
     res = {"id": vid, "url": url, "title": info.get("title"), "duration": info.get("duration"),
            "thumb": info.get("thumbnail"), "ext": info.get("ext"), "height": info.get("height"),
            "itag": str(info.get("format_id") or ""),
@@ -973,9 +1025,43 @@ def _chk(name, ok, detail="", level="err"):
     return {"name": name, "ok": bool(ok), "detail": str(detail)[:300], "level": level}
 
 
+SRC_FILES = ("server.py", "app.js", "tools.js", "tags.js", "scenes.js", "index.html", "style.css")
+
+
+def _src_stamp():
+    """소스 파일들의 (크기, 수정시각). 못 읽으면 그 파일은 뺀다."""
+    out = {}
+    for n in SRC_FILES:
+        try:
+            st = (ROOT / n).stat()
+            out[n] = (st.st_size, int(st.st_mtime))
+        except Exception:
+            pass
+    return out
+
+
+_SRC_AT_START = {} if FROZEN else _src_stamp()
+
+
+def stale_source():
+    """켠 뒤에 앱 파일이 바뀌었나 → 지금 도는 코드는 옛것이다."""
+    if FROZEN or not _SRC_AT_START:
+        return []
+    now = _src_stamp()
+    return sorted(n for n, v in now.items() if n in _SRC_AT_START and _SRC_AT_START[n] != v)
+
+
 def self_check(deep=False):
     """서버가 스스로 도는 점검. 문제가 있으면 problems 에 담아 돌려준다."""
     checks = []
+    # 0) 켠 뒤에 앱 파일이 바뀌었는가.
+    #    브라우저는 새 app.js 를 바로 읽어가지만 서버는 켤 때 읽은 코드를 계속 쓴다.
+    #    그래서 화면만 새것이고 서버가 하는 일(유튜브 프록시 등)은 옛것인 상태가 된다.
+    stale = stale_source()
+    if stale:
+        checks.append(_chk("앱 파일", False,
+                           "켠 뒤에 %s 가 바뀌었습니다 — 앱을 껐다 켜야 적용됩니다 (지금은 옛 코드가 돌고 있습니다)"
+                           % ", ".join(stale[:4])))
     # 1) 데이터 폴더에 실제로 쓸 수 있는가 (권한·잠금·디스크)
     try:
         DATA.mkdir(exist_ok=True)
@@ -1139,18 +1225,71 @@ def build_tag_db():
     return len(rows)
 
 
+def _seed_id(b):
+    return "%d-%s" % (len(b), hashlib.sha1(b).hexdigest()[:16])
+
+
+def _rowcount(path):
+    """사전에 태그가 몇 개 들었는지. 못 읽으면 -1."""
+    try:
+        with gzip.open(str(path), "rt", encoding="utf-8") as f:
+            return len(json.load(f))
+    except Exception:
+        return -1
+
+
 def seed_from_bundle():
-    """배포본(exe)에 함께 넣어둔 사전을 첫 실행 때 데이터 폴더로 복사 —
-       16MB CSV 다운로드·변환을 건너뛰게 한다."""
+    """배포본(exe)에 함께 넣어둔 사전을 데이터 폴더로 복사 —
+       16MB CSV 다운로드·변환을 건너뛰게 한다.
+
+    예전에는 파일이 없을 때만 복사해서, 이미 쓰고 계신 분은 앱을 업데이트해도
+    사전이 첫 설치 때 것 그대로였다(한글 번역을 추가해도 전달되지 않았다).
+    지금은 배포본 사전의 지문을 적어두고, 달라지면 갈아끼운다."""
     try:
         DATA.mkdir(parents=True, exist_ok=True)
         src = ROOT / "assets" / "tags_kr.seed.json.gz"
-        if src.exists() and not TAG_JSON_GZ.exists():
+        if not src.exists():
+            return
+        if not TAG_JSON_GZ.exists():
             TAG_JSON_GZ.write_bytes(src.read_bytes())
             _tag_status.update(state="ready", msg="")
+            try:
+                (DATA / "tags_seed.id").write_text(_seed_id(src.read_bytes()), encoding="utf-8")
+            except Exception:
+                pass
             print("  태그 사전을 준비했습니다 (%.1fMB)" % (TAG_JSON_GZ.stat().st_size / 1e6))
+            return
+        threading.Thread(target=_seed_refresh, args=(src,), daemon=True).start()
     except Exception as e:
         print("  태그 사전 준비 실패:", e)
+
+
+def _seed_refresh(src):
+    """배포본 사전이 바뀌었으면 갈아끼운다 (백그라운드)."""
+    try:
+        data = src.read_bytes()
+        want = _seed_id(data)
+        mark = DATA / "tags_seed.id"
+        try:
+            if mark.read_text(encoding="utf-8").strip() == want:
+                return
+        except Exception:
+            pass
+        # 배포본 쪽이 더 적으면 그대로 둔다 (직접 만든 더 큰 사전을 깎지 않는다)
+        with _tag_lock:
+            now, new = _rowcount(TAG_JSON_GZ), _rowcount(src)
+            if new >= 0 and new >= now:
+                tmp = TAG_JSON_GZ.with_name(TAG_JSON_GZ.name + ".new")
+                tmp.write_bytes(data)
+                os.replace(str(tmp), str(TAG_JSON_GZ))
+                print("  태그 사전을 새 버전으로 갱신했습니다 (%s -> %s개)"
+                      % (format(now, ","), format(new, ",")))
+            try:
+                mark.write_text(want, encoding="utf-8")   # 매번 다시 세지 않도록
+            except Exception:
+                pass
+    except Exception as e:
+        err_add({"kind": "tag-seed-refresh", "msg": str(e)})
 
 
 def ensure_tag_db_async():
@@ -1420,7 +1559,10 @@ class Handler(BaseHTTPRequestHandler):
                              "hasGemini": bool(cfg.get("geminiKey")),
                              "release": RELEASE, "frozen": FROZEN,
                              # 자체 점검에서 걸린 것 — 앱이 바로 띄운다 (점검 자체는 감시 스레드가 10분마다 돈다)
-                             "problems": [{"name": p["name"], "detail": p["detail"]} for p in (_health_last.get("problems") or [])],
+                             # 소스가 바뀐 것만은 여기서 바로 본다. stat 몇 번이라 싸고,
+                             # 파일을 갈아끼운 직후가 정작 제일 알려야 할 순간인데 10분을 기다릴 이유가 없다.
+                             "problems": ([{"name": "앱 파일", "detail": "켠 뒤에 %s 가 바뀌었습니다 — 앱을 껐다 켜야 적용됩니다 (지금은 옛 코드가 돌고 있습니다)" % ", ".join(_stale[:4])}] if (_stale := stale_source()) else [])
+                                         + [{"name": p["name"], "detail": p["detail"]} for p in (_health_last.get("problems") or []) if p["name"] != "앱 파일"],
                              "hasGhToken": bool(cfg.get("ghToken")),
                              "updateRepo": cfg.get("updateRepo") or UPDATE_REPO or ""})
             return True
@@ -1837,8 +1979,13 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         out["hls"] = []
                 self._json(200, out)
+            except YtGone as e:
+                # 지워졌거나 비공개인 영상. 앱이 기다리지 않고 바로 다음 곡으로 넘어가도록
+                # 404 + gone 으로 알린다 (502 로 보내면 "서버 오류" 취급을 받는다).
+                self._json(404, {"message": "이 영상은 더 이상 볼 수 없습니다 (지워졌거나 비공개)",
+                                 "gone": True, "detail": str(e)[-200:]})
             except Exception as e:
-                msg = str(e)
+                msg = _yt_err(e)
                 code = 503 if "engine not installed" in msg else 502
                 self._json(code, {"message": msg[-400:]})
             return True
@@ -2157,15 +2304,43 @@ class Handler(BaseHTTPRequestHandler):
             if not b64 or not re.fullmatch(r"[\w.\-]{3,60}", model):
                 self._json(400, {"message": "bad request"})
                 return True
+            # 채점 지시. 기준점 없이 점수만 물으면 비전 모델은 거의 항상 8~9 를 준다.
+            # 그래서 (1) 결함을 먼저 나열시키고 (2) 손가락을 숫자로 세게 하고
+            # (3) 점수 구간을 못박고 (4) 종합이 최저 항목을 못 넘게 한다.
             sysmsg = (
-                "You grade AI-generated anime illustrations for defects. Answer ONLY with compact JSON, no markdown. "
-                'Schema: {"hands":{"score":0-10,"note":"..."},"anatomy":{"score":0-10,"note":"..."},'
-                '"style":{"score":0-10,"note":"..."},"artifacts":{"score":0-10,"note":"..."},'
-                '"prompt_follow":{"score":0-10,"note":"..."},"overall":0-10,"summary":"..."} '
-                "10 = flawless, 0 = badly broken. hands = finger count/shape correctness (count visible fingers; "
-                "5 per hand is correct). anatomy = limbs, joints, proportions. style = is the drawing style coherent "
-                "or does it collapse/melt. artifacts = noise, smearing, jpeg-like mush, duplicated parts. "
-                "prompt_follow = does the image match the given prompt. Write notes in Korean, one short sentence each."
+                "You are a harsh QA inspector for AI-generated anime illustrations. Your job is to FIND DEFECTS, "
+                "not to appreciate the art. Answer ONLY with compact JSON, no markdown.\n"
+                "\nWORK IN THIS ORDER — do not score before you have looked:\n"
+                "1. Find every visible hand. For EACH hand, count the fingers you can actually see and write the "
+                "number. A correct hand shows at most 5 (4 fingers + 1 thumb). Fused, missing, extra, bent-backwards, "
+                "or blob-like fingers are defects. If hands are hidden or cropped out, say so.\n"
+                "2. Check limbs and joints: arm/leg count, elbows and knees bending the wrong way, limbs merging into "
+                "the body or into each other, a limb that does not connect to a shoulder/hip, twisted torso, "
+                "mismatched left/right, wrong number of ears/eyes, asymmetric eyes.\n"
+                "3. Check for melted or incoherent regions, duplicated parts, smearing, garbled text or patterns, "
+                "objects that pass through the body, clothing that has no consistent structure.\n"
+                "4. List everything you found in \"defects\" (Korean, short phrases). Only then assign scores.\n"
+                "\nSCALE — be strict. Most AI-generated images have at least one real defect; 9-10 must be RARE.\n"
+                "10 = would pass professional review with no retouching.\n"
+                " 9 = one trivial nitpick a viewer would not notice.\n"
+                " 7 = noticeable on a close look, still usable.\n"
+                " 5 = obvious at a glance to an ordinary viewer.\n"
+                " 3 = clearly broken; the image would need to be regenerated.\n"
+                " 1 = badly deformed.\n"
+                "If you listed a defect for a category, that category CANNOT score above 7. "
+                "If the defect is visible at a glance, it CANNOT score above 5.\n"
+                "\nSchema: {\"defects\":[\"...\"],\"hands\":{\"score\":0-10,\"note\":\"...\"},"
+                "\"anatomy\":{\"score\":0-10,\"note\":\"...\"},\"style\":{\"score\":0-10,\"note\":\"...\"},"
+                "\"artifacts\":{\"score\":0-10,\"note\":\"...\"},"
+                "\"prompt_follow\":{\"score\":0-10,\"note\":\"...\"},\"overall\":0-10,\"summary\":\"...\"}\n"
+                "hands = finger count and shape. In the hands note, WRITE THE COUNT you saw (e.g. \"왼손 6개\"). "
+                "anatomy = limbs, joints, proportions, symmetry. style = does the drawing style hold together or "
+                "collapse. artifacts = noise, smearing, mush, duplicated parts, garbled text. "
+                "prompt_follow = does the image match the given prompt.\n"
+                "\"overall\" MUST NOT be higher than the lowest of the five scores. A broken hand alone caps the "
+                "whole image. Do not average.\n"
+                "Write \"defects\", every note and \"summary\" in Korean, one short sentence each. "
+                "If you found nothing wrong, say so plainly rather than inventing a defect."
             )
             parts = [{"inline_data": {"mime_type": "image/png", "data": b64}}]
             parts.append({"text": ("프롬프트: " + prompt) if prompt else "프롬프트 정보 없음 — prompt_follow 는 5 로 두고 나머지만 판정."})
@@ -2174,7 +2349,10 @@ class Handler(BaseHTTPRequestHandler):
                 "contents": [{"role": "user", "parts": parts}],
                 # 2.5 계열은 "생각(thinking)" 토큰이 maxOutputTokens 를 같이 먹는다.
                 # 900 으로 두면 생각하다 한도를 다 써서 JSON 이 잘리거나 아예 비어 나온다.
-                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 4096, "responseMimeType": "application/json"},
+                # 결함을 하나씩 나열하게 시킨 뒤로는 생각도 답도 길어져서 8192 로 올렸다
+                # (모자라면 "길이 제한에 걸려 잘렸습니다" 로 실패한다).
+                # temperature 는 0 — 채점은 매번 같은 답이 나와야 비교가 된다.
+                "generationConfig": {"temperature": 0, "maxOutputTokens": 8192, "responseMimeType": "application/json"},
             }
             url = ("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % model)
             req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),

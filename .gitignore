@@ -14,8 +14,10 @@ vendor/
 __pycache__/
 *.pyc
 
-# ── 배포본에 넣기 위해 복사되는 사본 (원본은 data/) ──
-assets/tags_kr.seed.json.gz
+# assets/tags_kr.seed.json.gz 는 이제 저장소에 넣는다.
+# 예전에는 data/ 의 사본일 뿐이라 제외했지만, 지금은 한글 별칭을 손질해 넣은 결과물이다.
+# 제외해 두면 소스로 쓰는 분들이 받는 zip 에 이 파일이 없어서
+# 한글 태그 검색이 통째로 빠진다 (exe 사용자만 받게 된다).
 
 # ── 기타 ──
 *.log
