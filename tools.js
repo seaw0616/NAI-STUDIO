@@ -1288,7 +1288,7 @@ async function runUpscale(it, scale) {
     // NAI 프론트엔드 기준 업스케일은 api.novelai.net (BackendUrl) 에 남아 있음
     const res = await apiFetch('/api/ai/upscale', { method: 'POST', headers: authHeaders(true), body: JSON.stringify({ image: await blobToB64(it.blob), width: it.w, height: it.h, scale }) });
     if (!res.ok) throw await apiError(res);
-    for (const b of await respImages(res)) { const item = await addToHistory(b, it.meta, `업스케일 ${scale}×`); if (S.autoSaveOn) autoSave(item); }
+    for (const b of await respImages(res)) { const item = await addToHistory(b, it.meta || { parameters: {} }, `업스케일 ${scale}×`); if (S.autoSaveOn) autoSave(item); }
     setGenStatus('업스케일 완료'); refreshAnlas().catch(() => {});
   } catch (e) { setGenStatus('오류: ' + e.message); toast(e.message, 'err'); }
   finally { R.gen = false; $('#btnGen').disabled = false; }
@@ -1342,7 +1342,7 @@ async function runDirector(req, label, srcItem) {
        다른 이미지를 올려두면 엉뚱한 이미지의 프롬프트·씬·파일명이 붙었다. */
     const it = srcItem || curItem();
     let last = null;
-    for (const b of await respImages(res)) { const item = await addToHistory(b, it ? it.meta : { parameters: {} }, label); last = item; if (S.autoSaveOn) autoSave(item); }
+    for (const b of await respImages(res)) { const item = await addToHistory(b, (it && it.meta) || { parameters: {} }, label); last = item; if (S.autoSaveOn) autoSave(item); }
     // 스마트 툴 탭에서 돌렸으면 결과를 그 화면에 바로 올려준다 (연달아 툴을 걸 수 있게).
     // 예전엔 히스토리에만 들어가서, 방금 만든 결과가 아니라 원본에 다음 툴이 걸렸다.
     if (last && S.mode === 'tools' && typeof stSet === 'function') stSet(last.blob, last.meta);
@@ -1560,7 +1560,7 @@ async function runRepro(file) {
       const j = orig;
       // 비교 대상은 "방금 보낸 것"(원본 그대로라 당연히 같다)이 아니라
       // "앱이 평소대로 보냈을 것" 이어야 어디서 갈라지는지가 보인다
-      const mine = normal || item.meta.parameters || {};
+      const mine = normal || (item.meta && item.meta.parameters) || {};
       const keys = [...new Set([...Object.keys(j), ...Object.keys(mine)])].filter(k => !/^(image|mask|reference_|director_|signed_hash|request_type)/.test(k)).sort();
       const cell = (s, i, isDiff) => { s = String(s); if (!isDiff || i < 0) return esc(s.length > 400 ? s.slice(0, 400) + '…' : s); const a = s.slice(Math.max(0, i - 60), i), b = s.slice(i, i + 160); return (i > 60 ? '…' : '') + esc(a) + '<mark class="dmark">' + esc(b) + (s.length > i + 160 ? '…' : '') + '</mark>'; };
       // 한쪽에만 있는 키는 NAI 가 메타에 안 적는 것/앱이 아직 모르는 것이라 "차이" 로 세지 않는다.

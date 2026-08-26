@@ -821,7 +821,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.0'   /* 12.0 준비 빌드 — 공개는 12.0 으로 나간다 */;   // 화면 표시용 앱 버전 (상단)
+const APP_VERSION = '12.1'   /* 12.0 준비 빌드 — 공개는 12.0 으로 나간다 */;   // 화면 표시용 앱 버전 (상단)
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 async function tryHealth(base) {
   try {
@@ -1467,6 +1467,11 @@ function maybeAutoJudge(it) {
   }).catch(e => { logErr('자동 채점 실패: ' + e.message); });
 }
 async function addToHistory(blob, meta, label) {
+  /* meta 없이 불리는 경로가 실제로 있다 — 스마트 툴은 원본의 meta 를 그대로 넘기는데
+     원본에 meta 가 없으면 undefined 가 그대로 온다.
+     예전에는 바로 다음 줄에서 터졌다("Cannot read properties of undefined (reading 'parameters')").
+     그림은 만들어졌는데 저장도 표시도 안 되고 오류만 떴다. */
+  meta = (meta && typeof meta === 'object') ? meta : { parameters: {} };
   const p = meta.parameters || {};
   const [w, h] = await blobSize(blob).catch(() => [p.width, p.height]);
   const item = { blob, meta, seed: p.seed, model: meta.model, w, h, fav: false, t: Date.now(), label: label || '', sceneId: meta.sceneId || null,
@@ -2595,13 +2600,14 @@ function init() {
   $('#tSeed').onclick = () => { const it = curItem(); if (it && it.seed != null) { fixSeed(it.seed); toast('시드 고정: ' + it.seed); } };
   $('#tCopy').onclick = () => { const it = curItem(); if (!it) return;
     openModal('복사', body => {
-      const p = it.meta.parameters || {};
+      const m = it.meta || {};          // meta 없이 저장된 옛 항목도 있다
+      const p = m.parameters || {};
       body.innerHTML = `<div class="row"><button class="btn sm" id="cpPrompt">프롬프트만 복사</button><button class="btn sm" id="cpUc">네거티브만 복사</button><button class="btn sm" id="cpAll">전체 설정(JSON) 복사</button><button class="btn sm" id="cpSeed">시드 복사</button></div>
-        <pre>${escHtml(it.meta.input || '')}</pre>`;
+        <pre>${escHtml(m.input || '')}</pre>`;
       const cp = async (t, m) => { try { await navigator.clipboard.writeText(t); toast(m + ' 복사됨'); closeModal(); } catch (e) { toast('클립보드 실패: ' + e.message, 'err'); } };
-      body.querySelector('#cpPrompt').onclick = () => cp(it.meta.input || '', '프롬프트');
+      body.querySelector('#cpPrompt').onclick = () => cp(m.input || '', '프롬프트');
       body.querySelector('#cpUc').onclick = () => cp(p.negative_prompt || '', '네거티브');
-      body.querySelector('#cpAll').onclick = () => cp(JSON.stringify(it.meta, null, 2), '설정 JSON');
+      body.querySelector('#cpAll').onclick = () => cp(JSON.stringify(m, null, 2), '설정 JSON');
       body.querySelector('#cpSeed').onclick = () => cp(String(it.seed), '시드');
     });
   };
