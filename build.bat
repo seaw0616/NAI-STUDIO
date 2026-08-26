@@ -22,12 +22,19 @@ if not exist ".build-venv\Scripts\python.exe" (
 )
 
 echo.
-echo [2/4] 태그 사전을 배포본에 넣는 중...
-if exist "data\tags_kr.json.gz" (
-  copy /y "data\tags_kr.json.gz" "assets\tags_kr.seed.json.gz" >nul
-  echo       완료
+echo [2/4] 태그 사전 확인...
+rem  주의: 예전에는 여기서 data\tags_kr.json.gz 로 assets\tags_kr.seed.json.gz 를 무조건 덮어썼다.
+rem  배포용 사전에는 한글 별칭을 손질해 넣어 뒀다 - 그러면 빌드 한 번에 통째로 날아간다.
+rem  배포용이 이미 있으면 그대로 쓰고, 없을 때만 작업용에서 가져온다.
+if exist "assets\tags_kr.seed.json.gz" (
+  echo       배포용 사전 있음 - 그대로 씁니다
 ) else (
-  echo       data\tags_kr.json.gz 가 없습니다 - 앱을 한 번 실행해 사전을 받아두세요
+  if exist "data\tags_kr.json.gz" (
+    copy /y "data\tags_kr.json.gz" "assets\tags_kr.seed.json.gz" >nul
+    echo       작업용 사전을 배포용으로 복사했습니다
+  ) else (
+    echo       사전이 없습니다 - 앱을 한 번 실행해 받아두세요
+  )
 )
 
 echo.

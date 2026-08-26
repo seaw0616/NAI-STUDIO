@@ -40,8 +40,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 VERSION = 17
-RELEASE = "12.0"   # 12.0 준비 빌드. 공개 번호(11.23)를 태우지 않으려고 11.99.N 을 쓴다            # 배포 버전. GitHub 릴리스 태그 "v11.22" 과 짝을 이룬다.
-UPDATE_REPO = ""            # "사용자명/저장소" — 비어 있으면 설정에서 넣는다 (config.json 의 updateRepo)
+RELEASE = "12.1"   # 12.0 준비 빌드. 공개 번호(11.23)를 태우지 않으려고 11.99.N 을 쓴다            # 배포 버전. GitHub 릴리스 태그 "v11.22" 과 짝을 이룬다.
+# 이 앱이 배포되는 저장소. 비워 두면 ⬆ 업데이트 버튼이 아예 안 뜬다 —
+# 사용자가 ⚙설정에 직접 타이핑해 넣기 전까지는 새 버전이 나온 줄도 모른다.
+# 실제로 그 때문에 옛 버전을 계속 쓰시는 분들이 있었다. 기본값을 박아 둔다.
+# (다른 저장소를 쓰려면 ⚙설정의 "업데이트 저장소" 가 이 값을 덮는다)
+UPDATE_REPO = "seaw0616/NAI-STUDIO"
 FROZEN = getattr(sys, "frozen", False)          # PyInstaller 로 묶인 단일 exe 인가
 if FROZEN:
     # 앱 파일(html/js/css/assets)은 exe 안에 들어있고, 실행 시 임시폴더(_MEIPASS)에 풀린다.
