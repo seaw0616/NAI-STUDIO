@@ -658,18 +658,32 @@ async function ytPlayDirect(item) {
     er.innerHTML = `<div>${esc('스트림을 가져오지 못했습니다: ' + e.message)}</div><div class="row" style="justify-content:center;margin-top:6px"><button class="btn sm" id="ytDrEmbed">임베드로 재생</button>${S.ytQueue.length ? '<button class="btn sm" id="ytDrNext2">⏭ 다음 곡</button>' : ''}<button class="btn sm" id="ytDrUpd">엔진 업데이트</button></div>`;
     er.querySelector('#ytDrEmbed').onclick = () => { clearTimeout(YT._skipT); S.ytMode = 'embed'; ytPlay(item, true); S.ytMode = 'direct'; };
     const nb2 = er.querySelector('#ytDrNext2'); if (nb2) nb2.onclick = () => { clearTimeout(YT._skipT); ytNext(); };
-    er.querySelector('#ytDrUpd').onclick = async () => { clearTimeout(YT._skipT); toast('엔진 업데이트 중…'); const r = await apiFetch('/yt/engine', { method: 'POST' }); const j = await r.json(); toast(j.installed ? '업데이트 완료 ' + j.version : '실패'); ytPlayDirect(item); };
+    er.querySelector('#ytDrUpd').onclick = async () => { clearTimeout(YT._skipT); toast('엔진 업데이트 중…'); const r = await apiFetch('/yt/engine', { method: 'POST' }); const j = await r.json(); toast(j.updated ? ('업데이트 완료 ' + j.version) : (j.log || '갱신할 수 없습니다'), j.updated ? '' : 'err'); ytPlayDirect(item); };
     logErr('스트림 준비 실패 ' + item.id + ' ' + e.message);
     ytAutoSkip('스트림을 가져오지 못했습니다');
   }
 }
+/* 대기열 상한. 없으면 재생목록을 부를 때마다 무한히 쌓이고,
+   그 전부가 설정(state.json)에 실려 매 저장마다 서버로 오간다. */
+const YT_QUEUE_MAX = 500;
 async function ytPlayList(item) { // 재생목록 → 서버가 항목을 풀어 대기열로
   toast('재생목록을 불러오는 중…');
   try {
     const r = await apiFetch('/yt/playlist?list=' + encodeURIComponent(item.list)); if (!r.ok) throw await apiError(r);
     const j = await r.json(); const items = j.items || [];
     if (!items.length) { toast('재생목록이 비어 있거나 비공개입니다', 'err'); return; }
-    S.ytQueue = items.slice(1).concat(S.ytQueue || []); save(); renderYtQueue(); toast(`재생목록 "${(j.title || '').slice(0, 30)}" ${items.length}곡 — 첫 곡부터 재생 (기존 대기열은 뒤에 유지)`);
+    /* 예전에는 여기만 중복 검사도 상한도 없었다(824·894 행엔 있다).
+       같은 재생목록을 두 번 부르면 대기열이 그대로 두 배가 됐다. */
+    const have = new Set((S.ytQueue || []).map(q => q.id));
+    const add = items.slice(1).filter(it => it && it.id && !have.has(it.id));
+    S.ytQueue = add.concat(S.ytQueue || []);
+    const over = S.ytQueue.length - YT_QUEUE_MAX;
+    if (over > 0) S.ytQueue.length = YT_QUEUE_MAX;
+    save(); renderYtQueue();
+    const dup = items.length - 1 - add.length;
+    toast(`재생목록 "${(j.title || '').slice(0, 30)}" ${items.length}곡 중 ${add.length}곡 추가 — 첫 곡부터 재생` +
+      (dup > 0 ? ` (이미 있던 ${dup}곡 제외)` : '') +
+      (over > 0 ? ` · 상한 ${YT_QUEUE_MAX}곡을 넘어 뒤 ${over}곡은 뺐습니다` : ''));
     ytPlay(items[0], true);
   } catch (e) { toast('재생목록 불러오기 실패: ' + e.message, 'err'); }
 }
@@ -852,7 +866,11 @@ function ytAddMany(items, label) {
     body.querySelector('#qNo').onclick = () => closeModal();
   });
 }
-function ytEnqueue(item) { S.ytQueue.push(item); save(); renderYtQueue(); toast(`대기열 ${S.ytQueue.length}번째에 추가: ` + (item.title || '')); }
+function ytEnqueue(item) {
+  if (S.ytQueue.some(q => q.id === item.id)) { toast('이미 대기열에 있습니다: ' + (item.title || '')); return; }
+  if (S.ytQueue.length >= YT_QUEUE_MAX) { toast(`대기열이 가득 찼습니다 (${YT_QUEUE_MAX}곡) — 먼저 정리해 주세요`, 'err'); return; }
+  S.ytQueue.push(item); save(); renderYtQueue(); toast(`대기열 ${S.ytQueue.length}번째에 추가: ` + (item.title || ''));
+}
 function ytRemember(item) { // 최근 재생 기록 (최대 200곡) — 대기열에서 빠져도 여기 남음
   if (!item || !(item.id || item.list)) return;
   S.ytHistory = (S.ytHistory || []).filter(h => !(h.id && h.id === item.id) && !(h.list && !h.id && h.list === item.list));
@@ -1302,8 +1320,9 @@ const DIRECTOR = [
 // NAI 웹 번들 확정 19종 (여기 없는 감정은 서버가 받지 않는다)
 const EMOTIONS = ['neutral', 'happy', 'sad', 'angry', 'scared', 'surprised', 'shy', 'disgusted', 'smug', 'bored', 'laughing', 'irritated', 'aroused', 'embarrassed', 'worried', 'love', 'determined', 'hurt', 'playful'];
 function dtCostLabel(it) {
-  const c = typeof directorToolCost === 'function' ? directorToolCost(it.w, it.h, R.tier === 3) : null;
-  return c == null ? '' : (c === 0 ? 'Opus 무료' : '◈ ' + c + ' 소모');
+  const c = typeof directorToolCost === 'function' ? directorToolCost(it.w, it.h, R.tier === 3, R.opusUsage) : null;
+  // 한도를 못 읽었으면 '무료' 라고 단정하지 않는다 — 실제로는 Anlas 가 나갈 수 있다
+  return c == null ? '' : (c === 0 ? (R.opusUsage == null ? 'Opus 무료(한도 확인 불가)' : 'Opus 무료') : '◈ ' + c + ' 소모');
 }
 function openDirector() {
   const it = curItem(); if (!it) { toast('먼저 이미지를 선택하세요', 'err'); return; }
@@ -1747,6 +1766,18 @@ function openHealth() {
 /* ─────────────── 전체 백업 / 복원 (ZIP) ─────────────── */
 const CRC_T = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
 function crc32(u8, crc) { crc = (crc == null ? 0xFFFFFFFF : crc); for (let i = 0; i < u8.length; i++) crc = CRC_T[(crc ^ u8[i]) & 0xFF] ^ (crc >>> 8); return crc; }
+/* Blob 을 조각내어 CRC 를 누적한다. 한 번에 한 조각(1MB)만 메모리에 올라온다.
+   crc32 는 이미 이어받기(두 번째 인자)를 지원하므로 그대로 쓸 수 있다. */
+async function crc32Blob(blob) {
+  const CH = 1 << 20;
+  let crc = 0xFFFFFFFF;
+  for (let o = 0; o < blob.size; o += CH) {
+    const part = new Uint8Array(await blob.slice(o, Math.min(o + CH, blob.size)).arrayBuffer());
+    crc = crc32(part, crc);
+    if (o % (CH * 16) === 0) await new Promise(r => setTimeout(r));   // 메인 스레드를 놓아 준다
+  }
+  return crc;
+}
 async function zipBuild(files) { // files: [{name, blob|u8}] → Blob (STORE, ZIP64 미사용 → 4GB 미만)
   /* ZIP64 를 안 쓰므로 오프셋·크기는 4바이트, 파일 수는 2바이트가 한계다.
      넘으면 값이 잘려 나가는데, 그래도 파일은 만들어지고 "완료" 로 보인다 —
@@ -1756,8 +1787,14 @@ async function zipBuild(files) { // files: [{name, blob|u8}] → Blob (STORE, ZI
   const u16 = v => [v & 255, (v >> 8) & 255], u32 = v => [v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >>> 24) & 255];
   const dt = new Date(); const dosT = (dt.getHours() << 11) | (dt.getMinutes() << 5) | (dt.getSeconds() >> 1), dosD = ((dt.getFullYear() - 1980) << 9) | ((dt.getMonth() + 1) << 5) | dt.getDate();
   for (const f of files) {
-    const name = enc.encode(f.name); const data = f.u8 || new Uint8Array(await f.blob.arrayBuffer());
-    const crc = (crc32(data) ^ 0xFFFFFFFF) >>> 0, size = data.length;
+    /* 예전에는 여기서 이미지마다 `new Uint8Array(await f.blob.arrayBuffer())` 로 전체를 펼쳐
+       parts 에 끝까지 붙들고 있었다. 히스토리가 수백 장이면 총량의 두 배가 한 탭에 잡혀
+       "백업이 가장 필요한 시점" 에 탭이 죽었다. 4GB·65535장 검사는 ZIP 포맷 한계일 뿐 메모리와 무관하다.
+       이제 Blob 조각을 그대로 넘기고(Blob 생성자가 Blob 을 받는다) CRC 만 조각내어 훑는다. */
+    const name = enc.encode(f.name);
+    const data = f.u8 || f.blob;
+    const size = f.u8 ? f.u8.length : f.blob.size;
+    const crc = ((f.u8 ? crc32(f.u8) : await crc32Blob(f.blob)) ^ 0xFFFFFFFF) >>> 0;
     const lh = new Uint8Array([0x50, 0x4b, 3, 4, ...u16(20), ...u16(0x800), ...u16(0), ...u16(dosT), ...u16(dosD), ...u32(crc), ...u32(size), ...u32(size), ...u16(name.length), ...u16(0), ...name]);
     if (off + lh.length + size > 0xFFFFFFFF) throw new Error('백업이 4GB를 넘습니다 — 즐겨찾기만 담거나 이미지를 빼고 만들어 주세요');
     parts.push(lh, data);
@@ -1768,6 +1805,9 @@ async function zipBuild(files) { // files: [{name, blob|u8}] → Blob (STORE, ZI
   const eocd = new Uint8Array([0x50, 0x4b, 5, 6, ...u16(0), ...u16(0), ...u16(files.length), ...u16(files.length), ...u32(cdSize), ...u32(off), ...u16(0)]);
   return new Blob([...parts, ...cds, eocd], { type: 'application/zip' });
 }
+/* 백업 파일의 스키마 버전. 지금까지 쓰기만 하고 읽는 곳이 없어서,
+   더 새로운 앱에서 만든 백업을 옛 앱에 그대로 넣어도 아무 경고가 없었다. */
+const BACKUP_VER = 9;
 function openBackup() {
   openModal('📦 전체 백업 / 복원', body => {
     const nHist = R.hist.length, favN = R.hist.filter(h => h.fav).length;
@@ -1790,7 +1830,7 @@ function openBackup() {
       const st = body.querySelector('#bkSt'); st.textContent = '만드는 중…';
       try {
         const files = [];
-        const meta = { app: 'NAI Studio', version: 9, at: new Date().toISOString(), state: S };
+        const meta = { app: 'NAI Studio', version: BACKUP_VER, at: new Date().toISOString(), state: S };
         const warn = [];   // 조용히 빠뜨리면 "백업 있음" 이라 믿고 지우게 된다 → 빠진 건 반드시 알린다
         try { meta.vibelib = await vibeLibAll(); } catch (e) { warn.push('바이브 라이브러리'); }   // 유료 인코딩이 든 바이브 라이브러리도 함께
         if (body.querySelector('#bkTok').checked) {
@@ -1825,11 +1865,12 @@ function openBackup() {
       const pv = body.querySelector('#bkPreview'); pv.innerHTML = '<div class="hint">읽는 중…</div>';
       try {
         let state = null, config = null, histIdx = [], histFiles = {}, vibelib = null;
-        if (/\.json$/i.test(f.name)) { const j = JSON.parse(await f.text()); state = j.state || j; config = j.config || null; vibelib = j.vibelib || null; }
+        let bkVer = null;
+        if (/\.json$/i.test(f.name)) { const j = JSON.parse(await f.text()); state = j.state || j; config = j.config || null; vibelib = j.vibelib || null; bkVer = j.version; }
         else {
           const entries = await unzip(await f.arrayBuffer());
           for (const e of entries) {
-            if (e.name === 'nai-studio-backup.json') { const j = JSON.parse(new TextDecoder().decode(e.data)); state = j.state; config = j.config || null; vibelib = j.vibelib || null; }
+            if (e.name === 'nai-studio-backup.json') { const j = JSON.parse(new TextDecoder().decode(e.data)); state = j.state; config = j.config || null; vibelib = j.vibelib || null; bkVer = j.version; }
             else if (e.name === 'history/index.json') histIdx = JSON.parse(new TextDecoder().decode(e.data));
             else if (e.name.startsWith('history/')) histFiles[e.name] = e.data;
           }
@@ -1837,6 +1878,10 @@ function openBackup() {
         if (!state) throw new Error('백업 파일 형식이 아닙니다');
         pv.innerHTML = `<div class="style-card"><b>백업 내용</b>
           <div class="hint">청크 ${(state.chunks||[]).length} · 스타일 ${(state.styles||[]).length} · 캐릭터 ${(state.characters||[]).length} · 씬 ${(state.scenes||[]).length} · 바이브 ${(vibelib||[]).length} · 유튜브 대기열 ${(state.ytQueue||[]).length}/기록 ${(state.ytHistory||[]).length} · 이미지 ${histIdx.length}장${config ? ' · 토큰/연결정보 포함' : ''}${state.savedAt ? ' · ' + new Date(state.savedAt).toLocaleString() : ''}</div>
+          ${(typeof bkVer === 'number' && bkVer > BACKUP_VER)
+            ? `<div class="hint" style="color:var(--warn,#e0a030)">⚠ 이 백업은 더 새로운 버전의 앱에서 만들어졌습니다 (백업 v${bkVer} · 이 앱 v${BACKUP_VER}).
+                 앱을 먼저 업데이트하지 않으면 이 앱이 모르는 설정은 버려집니다.</div>`
+            : ''}
           <div class="row"><button class="btn primary sm" id="bkMerge">합치기 (기존 유지 + 추가)</button><button class="btn sm danger" id="bkReplace">덮어쓰기 (설정 전부 교체)</button><span class="hint" id="bkRSt"></span></div></div>`;
         const restore = async replace => {
           const rst = pv.querySelector('#bkRSt'); rst.textContent = '복원 중…';
@@ -1848,7 +1893,14 @@ function openBackup() {
           untomb('char', (state.characters || []).map(c => c.name));
           untomb('scene', (state.scenes || []).map(s => s.id));
           untomb('cat', state.chunkCats || []);
-          if (replace) { const del = S.deleted; S = { ...DEFAULTS, ...state }; S.deleted = { ...(state.deleted || {}), ...del }; }
+          if (replace) {
+            /* normalizeState 를 반드시 태운다. 예전 백업에 지금은 없는 모델 id 가 들어 있으면
+               아래 syncUI 가 던지고, 복원이 이미지 절반만 들어간 상태에서 멎었다.
+               부팅 경로에는 이 정규화가 있는데 복원 경로에만 없었다. */
+            const del = S.deleted;
+            S = normalizeState({ ...DEFAULTS, ...state });
+            S.deleted = { ...(state.deleted || {}), ...del };
+          }
           else {
             /* 이름 비교는 프롬프트에서 청크를 찾을 때와 같은 기준(normKey)이어야 한다.
                toLowerCase 만 보면 "작가 랜덤" 과 "작가_랜덤" 이 서로 다른 것으로 남아
@@ -1858,7 +1910,7 @@ function openBackup() {
               ? normKey(a) === normKey(b)
               : String(a || '').toLowerCase() === String(b || '').toLowerCase());
             const mergeBy = (a, b, key) => { const out = [...(a || [])]; (b || []).forEach(x => { if (!out.some(y => sameKey(y[key], x[key]))) out.push(x); }); return out; };
-            S.chunks = mergeBy(S.chunks, state.chunks, 'name'); S.styles = mergeBy(S.styles, state.styles, 'name'); S.characters = mergeBy(S.characters, state.characters, 'name');
+            S.chunks = mergeBy(S.chunks, state.chunks, 'name'); S.styles = mergeBy(S.styles, state.styles, 'id');   // 서버 _STATE_LISTS 와 같은 키여야 한다 — 여기만 name 이라 id 가 겹친 스타일이 조용히 사라졌다 S.characters = mergeBy(S.characters, state.characters, 'name');
             S.scenes = mergeBy(S.scenes, state.scenes, 'id'); S.chunkCats = [...new Set([...(S.chunkCats || []), ...(state.chunkCats || [])])];
             S.ytQueue = mergeBy(S.ytQueue, state.ytQueue, 'id'); S.ytHistory = mergeBy(S.ytHistory, state.ytHistory, 'id');
             if (!S.prompt && !Object.keys(S.secText || {}).length) { S.secText = state.secText || {}; S.prompt = state.prompt || ''; S.sections = state.sections || S.sections; }
@@ -1904,7 +1956,14 @@ function openBackup() {
           R.hist.sort((a, b) => a.t - b.t); renderHist(); if (R.hist.length) showImage(R.hist.length - 1);
           // S.mode 만 바꾸면 화면은 그대로다 — 탭 전환까지 실제로 시켜야 한다
           if (replace && typeof setMode === 'function') { try { setMode(S.mode || 'gen'); } catch (e) {} }
-          syncUI(); renderChars(); renderChunkBar(); applyTheme(); if (typeof renderStyleSelects === 'function') renderStyleSelects(); if (typeof renderYtQueue === 'function') renderYtQueue(); if (window.onHistChanged) window.onHistChanged();
+          /* 화면 갱신 중 하나가 던져도 아래 결과 문구·토스트는 떠야 한다.
+             예전엔 여기서 던지면 사용자는 '복원 중…' 만 보고 끝났다. */
+          try {
+            syncUI(); renderChars(); renderChunkBar(); applyTheme();
+            if (typeof renderStyleSelects === 'function') renderStyleSelects();
+            if (typeof renderYtQueue === 'function') renderYtQueue();
+            if (window.onHistChanged) window.onHistChanged();
+          } catch (e) { logErr('복원 후 화면 갱신 실패: ' + e.message); rwarn.push('화면 갱신(새로고침 F5 하세요)'); }
           // 저장 실패를 조용히 삼키지 않는다 — 새로고침하면 사라질 이미지이므로 알려야 한다
           rst.textContent = `✔ 복원 완료 (이미지 ${n}장${failed ? `, ${failed}장은 저장 실패 — 새로고침하면 사라집니다` : ''})`
             + (rwarn.length ? ` · ⚠ 복원 못한 것: ${rwarn.join(', ')}` : '');
@@ -2076,8 +2135,9 @@ const ST_TOOLS = [
 function renderSmartTools() {
   const list = $('#stList'); if (!list) return;
   const has = !!ST.blob;
-  const cost = has && typeof directorToolCost === 'function' ? directorToolCost(ST.w, ST.h, R.tier === 3) : null;
-  const ce = $('#stCost'); if (ce) ce.textContent = has && cost != null ? (cost === 0 ? 'Opus 무료' : '디렉터 툴 ◈' + cost) : '';
+  const cost = has && typeof directorToolCost === 'function' ? directorToolCost(ST.w, ST.h, R.tier === 3, R.opusUsage) : null;
+  const ce = $('#stCost'); if (ce) ce.textContent = has && cost != null
+    ? (cost === 0 ? (R.opusUsage == null ? 'Opus 무료(한도 확인 불가)' : 'Opus 무료') : '디렉터 툴 ◈' + cost) : '';
   list.innerHTML = '';
   for (const t of ST_TOOLS) {
     const c = document.createElement('div'); c.className = 'st-card' + (has ? '' : ' off');
@@ -2252,7 +2312,15 @@ function openAiPrompt(targetTA) {
       finally { body.querySelector('#aiGo').disabled = false; }
     };
     body.querySelector('#aiGo').onclick = go;
-    desc.onkeydown = e => { if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); go(); } };
+    /* 예전엔 버튼만 disabled 로 잠그고 Ctrl+Enter 는 그대로 go() 를 불렀다.
+       꾹 누르거나 연타하면 그 횟수만큼 Gemini 호출이 나갔다(호출당 요금). 키도 같은 잠금을 본다. */
+    desc.onkeydown = e => {
+      if (e.key === 'Enter' && e.ctrlKey && !e.repeat) {
+        e.preventDefault();
+        if (body.querySelector('#aiGo').disabled) return;
+        go();
+      }
+    };
     const put = append => {
       const v = out.value.trim(); if (!v) { toast('먼저 생성하세요', 'err'); return; }
       const ta = targetTA && document.contains(targetTA) ? targetTA : activeTA();

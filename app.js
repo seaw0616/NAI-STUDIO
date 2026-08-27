@@ -109,6 +109,10 @@ const capsOf = m => {
 const isV5 = m => (MODELS[m || S.model] || {}).ver === 50;
 /* 프롬프트 토큰 한도. V4/4.5 는 512 였지만 V5 는 Curated 703 · Full 1471 로 늘었다. */
 const tokenLimit = m => capsOf(m || S.model).tokens;
+/* 이 샘플러들에는 noise_schedule 을 보내지 않는다 — novelai.net 이 요청에서 지운다.
+   (ddim_v3 가 여기 들어 있는 게 핵심: 예전엔 V4.5 이하에서 우리만 보내고 있었다.)
+   V5 는 이 삭제 뒤에 karras 를 도로 박으므로 영향이 없다. */
+const NS_DROP = new Set(['ddim', 'plms', 'k_lms', 'nai_smea', 'nai_smea_dyn', 'ddim_v3']);
 const SAMPLERS = [
   ['k_euler_ancestral', 'Euler Ancestral'], ['k_euler', 'Euler'],
   ['k_dpmpp_2s_ancestral', 'DPM++ 2S Ancestral'], ['k_dpmpp_2m_sde', 'DPM++ 2M SDE'],
@@ -179,6 +183,24 @@ const DEFAULTS = {
 let S = { ...DEFAULTS };
 try { S = normalizeState({ ...DEFAULTS, ...(JSON.parse(localStorage.getItem('nst_state')) || {}) }); } catch (e) { S = { ...DEFAULTS }; }
 let saveTimer = null, pushTimer = null;
+/* 저장은 250ms(로컬)·1200ms(서버) 미뤄서 한다. 그 사이에 창을 닫으면 마지막 편집이 사라진다.
+   같은 브라우저로 다시 열면 로컬에서 살아나지만, 다른 브라우저·다른 PC 로 먼저 열면 없는 상태다.
+   닫히는 순간 로컬은 즉시 쓰고, 서버로는 sendBeacon 으로 보낸다
+   (unload 중에는 fetch 가 취소된다 — beacon 만 끝까지 간다). */
+function flushSave() {
+  if (!saveTimer && !pushTimer) return;
+  clearTimeout(saveTimer); saveTimer = null;
+  try { localStorage.setItem('nst_state', JSON.stringify(S)); } catch (e) {}
+  if (pushTimer) {
+    clearTimeout(pushTimer); pushTimer = null;
+    try {
+      const b = new Blob([JSON.stringify(S)], { type: 'application/json' });
+      navigator.sendBeacon(R.api + '/state', b);
+    } catch (e) {}
+  }
+}
+addEventListener('pagehide', flushSave);
+addEventListener('visibilitychange', () => { if (document.hidden) flushSave(); });
 function save() {
   chunkMapClear();   // 청크가 바뀌었을 수 있다 — 이름→청크 캐시를 버린다
   // 초기화/서버 동기화가 끝나기 전(R.booted=false)의 내부 저장은 "사용자 편집"으로 치지 않음 → 빈 브라우저가 서버 설정을 덮어쓰는 사고 방지
@@ -280,8 +302,15 @@ function tomb(kind, key) {
   if (!key) return;
   S.deleted = S.deleted || {};
   S.deleted[kind + '|' + String(key).toLowerCase()] = Date.now();
-  const ks = Object.keys(S.deleted);
-  if (ks.length > 400) { ks.sort((a, b) => S.deleted[a] - S.deleted[b]).slice(0, ks.length - 400).forEach(k => delete S.deleted[k]); }
+  /* 값이 0 인 키는 '되살리기' 표시다(아래 untomb 참고). 시간순으로 자르면 0 이 가장 먼저 잘려 나가는데,
+     그러면 서버 병합에서 옛 삭제 기록이 되살아나 이름을 되쓴 청크가 조용히 사라진다.
+     자를 때는 되살리기 표시를 빼고 진짜 삭제 기록만 대상으로 한다. */
+  const ks = Object.keys(S.deleted).filter(k => S.deleted[k]);
+  if (Object.keys(S.deleted).length > 400 && ks.length) {
+    ks.sort((a, b) => S.deleted[a] - S.deleted[b])
+      .slice(0, Math.max(0, Object.keys(S.deleted).length - 400))
+      .forEach(k => delete S.deleted[k]);
+  }
 }
 /* 삭제 기록을 걷어낸다 — 그 이름을 "다시 쓰기로 했다" 는 뜻.
    값을 지우는 게 아니라 0 으로 둬야 서버 병합에서도 옛 기록을 이긴다
@@ -392,7 +421,12 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
       return false;
     }
     S = base;
-    localStorage.setItem('nst_state', JSON.stringify(S));
+    /* 사이트 데이터가 막혀 있으면(브라우저 설정·사생활 보호 모드) 여기서 예외가 난다.
+       예전에는 감싸지 않아서, 그 한 줄 때문에 아래 syncUI·renderChars·applyTheme 가
+       통째로 안 돌고 화면과 S 가 어긋난 채로 앱이 떠 있었다.
+       바로 위 374행 주석이 이미 같은 말을 하고 있다 — 여기만 빠져 있었다. */
+    try { localStorage.setItem('nst_state', JSON.stringify(S)); }
+    catch (e) { logErr('로컬 저장 실패(설정은 서버에 있습니다): ' + e.message); }
     if (!MODELS[S.model]) S.model = DEFAULTS.model;
     syncUI(); renderChars(); applyTheme();
     if (typeof renderChunkBar === 'function') renderChunkBar();
@@ -650,6 +684,21 @@ function blobToImage(blob) {
     img.src = URL.createObjectURL(blob);
   });
 }
+/* 채점·전송용 축소. **비율을 지켜서** 줄인다 —
+   cover-crop(아래 blobToB64Resized)을 쓰면 가장자리의 손·발이 잘려 나가
+   "손가락 6개" 같은 걸 보라고 보내는 채점이 오히려 그 부분을 못 보게 된다.
+   업스케일한 그림(예: 4096px)을 원본 그대로 보내면 호출 한 번의 요금이 몇 배로 뛴다. */
+async function blobToB64Max(blob, maxSide) {
+  const img = await blobToImage(blob).catch(() => null);
+  if (!img || Math.max(img.width, img.height) <= maxSide) return blobToB64(blob);
+  const r = maxSide / Math.max(img.width, img.height);
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(img.width * r));
+  c.height = Math.max(1, Math.round(img.height * r));
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  const b = await new Promise(res => c.toBlob(res, 'image/png'));
+  return blobToB64(b || blob);
+}
 async function blobToB64Resized(blob, w, h) { // cover-crop
   const img = await blobToImage(blob);
   const c = document.createElement('canvas'); c.width = w; c.height = h;
@@ -687,10 +736,19 @@ function idb() {
       if (!db.objectStoreNames.contains('hist')) db.createObjectStore('hist', { keyPath: 'id', autoIncrement: true });
     };
     rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error);
+    /* 다음에 스키마 버전을 올릴 때, 옛 버전 탭이 하나라도 열려 있으면 여기로 떨어진다.
+       onblocked 에서는 onsuccess 도 onerror 도 오지 않는다 —
+       처리하지 않으면 이 Promise 가 영원히 안 끝나고, await idb() 뒤가 통째로 멈춘다
+       (히스토리가 빈 채로 있고 저장도 안 되는데 오류 하나 안 뜬다). */
+    rq.onblocked = () => rej(new Error('다른 탭에서 이 앱이 열려 있어 이미지 저장소를 열지 못했습니다 — 다른 탭을 닫고 새로고침하세요'));
   });
 }
-async function idbSet(k, v) { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(v, k); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
-async function idbGet(k) { const db = await idb(); return new Promise((res, rej) => { const rq = db.transaction('kv').objectStore('kv').get(k); rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error); }); }
+/* onabort 가 반드시 있어야 한다. 공간이 모자라면 트랜잭션은 **커밋 단계에서** abort 되는데,
+   그때는 요청 오류(onerror)가 오지 않는다 → resolve 도 reject 도 안 되어 Promise 가 영원히 매달린다.
+   await 하던 쪽(바이브 라이브러리 저장, 백업 복원)이 통째로 멈추고 오류 하나 안 뜬다.
+   바로 아래 histPut 에는 이미 달려 있다 — 여기만 빠져 있었다. */
+async function idbSet(k, v) { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(v, k); tx.oncomplete = res; tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error || new Error('저장 공간이 부족합니다')); }); }
+async function idbGet(k) { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction('kv'); const rq = tx.objectStore('kv').get(k); rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error); tx.onabort = () => rej(tx.error || new Error('읽기가 중단되었습니다')); }); }
 /* put 요청이 받아들여진 것과 실제로 저장된 것은 다르다. 공간이 모자라면 커밋 단계에서
    트랜잭션이 abort 되는데, 예전엔 rq.onsuccess 에서 이미 성공으로 처리해 버려
    그 실패가 통째로 삼켜졌다("저장됨" 이라고 표시된 뒤 새로고침하면 이미지가 없다).
@@ -821,7 +879,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.1';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.2';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 async function tryHealth(base) {
   try {
@@ -963,6 +1021,13 @@ function authHeaders(json) {
 }
 async function apiFetch(path, opts) {
   if (!R.srvOk) { await probeServer(); setSrvUI(R.srvOk, R.srvInfo); if (!R.srvOk) throw new Error('로컬 서버에 연결할 수 없습니다 — start.bat을 실행하세요'); }
+  /* 세션 열쇠. 서버가 켜질 때 만들어 이 페이지 안에만 심어 준 값이다.
+     토큰·API 키 원문을 꺼내는 요청은 서버가 이 값을 확인한다 —
+     같은 PC 에서 도는 다른 프로그램은 127.0.0.1 에 닿아도 이 값을 알 수 없다. */
+  if (window.__NST_KEY) {
+    opts = { ...(opts || {}) };
+    opts.headers = { ...(opts.headers || {}), 'X-NST-Key': window.__NST_KEY };
+  }
   let res;
   try { res = await fetch(R.api + path, opts); }
   catch (e) {
@@ -1112,29 +1177,33 @@ function buildPayload(ov) {
     /* V5 가 안 받는 것들. 보내면 거절당하거나 조용히 무시된다 —
        novelai.net 도 요청을 만들 때 능력치를 보고 같은 키들을 지운다. */
     if (!caps.noiseSchedule) delete p.noise_schedule;
-    /* 능력치표만 보면 V5 는 noise_schedule 을 안 받는 것처럼 보이지만(NAI 표에도 false),
-       웹은 그렇게 지운 뒤 V5 계열에 한해 karras 를 무조건 도로 박는다. 인페인트도 포함.
-       실제 V5 생성 메타 81건이 전부 "noise_schedule": "karras" 였다. */
-    if (info.ver >= 50) p.noise_schedule = 'karras';
-    /* 이 두 값은 NAI 웹이 **조건부로만** 넣는다 —
-         sampler === k_euler_ancestral && noise_schedule !== 'native'
-       예전에는 앱이 모든 요청에 무조건 넣었다. 다른 샘플러를 쓰면 웹과 다른 요청이 되고,
-       이 값들은 샘플링 노이즈에 관여하므로 같은 시드여도 그림이 갈린다.
-       noise_schedule 이 확정된 뒤에 판단해야 하므로 여기에 둔다. */
-    if (p.sampler === 'k_euler_ancestral' && p.noise_schedule !== 'native') {
-      p.deliberate_euler_ancestral_bug = false;
-      p.prefer_brownian = true;
-    }
     if (!caps.cfgDelay) delete p.skip_cfg_above_sigma;
     if (caps.transparency && S.transparent) { p.straight_alpha = true; p.tag_hint_transparent_background = true; }
   } else {
     p.params_version = 1;
     p.sm = !!S.smea && S.sampler !== 'ddim_v3'; p.sm_dyn = !!S.smea && !!S.smeaDyn && S.sampler !== 'ddim_v3';
     p.uncond_scale = S.ucStrength;
-    ['autoSmea', 'use_coords', 'characterPrompts', 'skip_cfg_above_sigma', 'deliberate_euler_ancestral_bug', 'prefer_brownian',
+    /* deliberate_euler_ancestral_bug·prefer_brownian 은 여기서 지우지 않는다 —
+       NAI 의 정리 사슬에서 그 두 값은 **모델을 가리지 않고** 샘플러만 보고 붙는다.
+       V3 에서만 빼면 novelai.net 과 다른 요청이 되어 같은 시드에도 그림이 갈린다. */
+    ['autoSmea', 'use_coords', 'characterPrompts', 'skip_cfg_above_sigma',
       'normalize_reference_strength_multiple', 'inpaintImg2ImgStrength', 'image_format'].forEach(k => delete p[k]);
     if (S.variety) p.skip_cfg_above_sigma = varietySigma(m, w, h);
   }
+  /* ── 여기부터는 novelai.net 이 **모델을 가리지 않고** 같은 순서로 도는 마무리 단계다.
+        (_app-d4b965a7fb59e75a.js · 빌드 6750aa2-production 에서 확인, 2026-08-28)
+
+          ② NS_DROP.has(sampler)                          → noise_schedule 삭제
+          ③ sampler==k_euler_ancestral && ns!=='native'    → deab=false, prefer_brownian=true
+          ⑤ v5                                             → noise_schedule='karras'
+
+        순서가 중요하다. ⑤ 가 ② 뒤에 오기 때문에 V5 는 ddim_v3 로도 결국 karras 를 받는다. */
+  if (NS_DROP.has(p.sampler)) delete p.noise_schedule;
+  if (p.sampler === 'k_euler_ancestral' && p.noise_schedule !== 'native') {
+    p.deliberate_euler_ancestral_bug = false;
+    p.prefer_brownian = true;
+  }
+  if (info.ver >= 50) p.noise_schedule = 'karras';
   /* 재현 검증용 — 원본 PNG 에 적힌 파라미터를 마지막에 그대로 덮는다.
      NAI 가 새로 추가한 필드(cfg_sched_eligibility 등)처럼 앱이 아직 모르는 것까지
      빠짐없이 보내야 "같은 씨앗에 같은 그림" 인지 진짜로 확인할 수 있다. */
@@ -1302,9 +1371,13 @@ function anlasEstimate(o) {
   return { perImage, generation, charRef, vibeEncoding, free,
            total: generation + charRef + vibeEncoding };
 }
-function directorToolCost(w, h, isOpus) {
+/* opusLeft: Opus 무료 잔여 %(R.opusUsage). 0 이면 무료가 아니라 실제로 Anlas 가 나간다.
+   null(=한도를 못 읽음)이면 확정할 수 없다 — 그럴 땐 0 을 돌려주되 화면에서 '확인 불가' 라고 말한다.
+   생성 쪽 추정(app.js:1364)은 이미 이 값을 보는데 디렉터·스마트 툴만 안 봐서
+   무료 한도가 바닥난 뒤에도 계속 "Opus 무료" 라고 표시했다. */
+function directorToolCost(w, h, isOpus, opusLeft) {
   const px = w * h;
-  if (isOpus && px <= 409600) return 0;
+  if (isOpus && px <= 409600 && opusLeft !== 0) return 0;
   if (px <= 262144) return 1; if (px <= 409600) return 2; if (px <= 524288) return 3; if (px <= 786432) return 5;
   return 7;
 }
@@ -1325,11 +1398,24 @@ async function doGenerate(ov, label) {
     R.abort = new AbortController();
     let blobs;
     if (S.stream !== false && !ov.noStream) {
-      blobs = await generateStreaming(body);   // 실시간 미리보기 (msgpack 스트림)
+      /* 실시간 미리보기 (msgpack 스트림).
+         스트림 형식은 NAI 가 언제든 바꿀 수 있고 파서는 우리가 손으로 짠 것이다.
+         한 번 어긋나면 생성이 통째로 막히므로 반드시 빠져나갈 길을 둔다.
+
+         다만 되는대로 재시도하면 안 된다 — NAI 는 **요청을 받아들인 시점에** Anlas 를 뺀다.
+         받아들여진 뒤에 깨진 것을 다시 보내면 돈이 두 번 나간다.
+         그래서 두 갈래로 나눈다:
+           · 받아들여지지 않았다(404/405/501·응답 자체가 없음) → 돈이 안 나갔다 → 바로 일반 방식으로 다시
+           · 받아들여진 뒤에 깨졌다                          → 이번 장은 포기하되, **다음부터** 일반 방식 */
+      try {
+        blobs = await generateStreaming(body);
+      } catch (e) {
+        if (!e || !e.streamUnusable) { streamOff('깨짐: ' + ((e && e.message) || '')); throw e; }
+        streamOff('쓸 수 없음: ' + e.message);
+        blobs = await generatePlain(body);
+      }
     } else {
-      const res = await apiFetch('/img/ai/generate-image', { method: 'POST', headers: authHeaders(true), body: JSON.stringify(body), signal: R.abort.signal });
-      if (!res.ok) throw await apiError(res);
-      blobs = await respImages(res);
+      blobs = await generatePlain(body);
     }
     if (!blobs.length) throw new Error('응답에 이미지가 없습니다');
     let item = null; const meta = metaOf(body, ov);
@@ -1391,6 +1477,26 @@ function hidePreview() {
   if (R._prevUrl) { URL.revokeObjectURL(R._prevUrl); R._prevUrl = null; }
   if (!R.hist.length) $('#viewerEmpty').hidden = false;
 }
+/* 미리보기 없이 한 번에 받는 방식. 스트림이 막혔을 때 돌아갈 곳이기도 하다. */
+async function generatePlain(body) {
+  const res = await apiFetch('/img/ai/generate-image', {
+    method: 'POST', headers: authHeaders(true),
+    body: JSON.stringify(body), signal: R.abort && R.abort.signal,
+  });
+  if (!res.ok) throw await apiError(res);   // 거절 = 받아들여지지 않음 = 과금 안 됨
+  try { return await respImages(res); }
+  catch (e) { e.charged = true; throw e; }  // 200 을 받은 뒤의 실패 = 이미 과금됨
+}
+
+/* 스트림을 끄고 사람에게 알린다. 조용히 끄면 "미리보기가 왜 안 뜨지" 로만 남는다. */
+function streamOff(why) {
+  if (S.stream === false) return;
+  S.stream = false; save();
+  logErr('실시간 미리보기 끔 (' + why + ')');
+  toast('실시간 미리보기를 끄고 일반 방식으로 바꿨습니다 — 그림은 계속 나옵니다. ⚙설정에서 다시 켤 수 있습니다');
+  if (typeof syncUI === 'function') syncUI();
+}
+
 async function generateStreaming(body) {
   const payload = { ...body, parameters: { ...body.parameters, stream: 'msgpack' } };
   const steps = payload.parameters.steps;
@@ -1400,8 +1506,15 @@ async function generateStreaming(body) {
     method: 'POST', headers: { ...authHeaders(true), Accept: 'application/x-msgpack' },
     body: JSON.stringify(payload), signal: R.abort && R.abort.signal,
   });
-  if (!res.ok) throw await apiError(res);
-  if (!res.body) throw new Error('스트리밍 응답 없음');
+  if (!res.ok) {
+    const err = await apiError(res);
+    /* 이 상태값들은 "요청을 받지도 않았다" 는 뜻이다 — 스트림 경로만 사라졌을 뿐
+       계정도 프롬프트도 멀쩡하다. 돈이 안 나갔으니 일반 방식으로 바로 다시 보내도 된다.
+       401·402·429 처럼 계정·요금 문제는 여기 넣으면 안 된다. 다시 보내도 똑같이 막힌다. */
+    if (res.status === 404 || res.status === 405 || res.status === 501) err.streamUnusable = true;
+    throw err;
+  }
+  if (!res.body) { const e = new Error('스트리밍 응답이 비어 있습니다'); e.streamUnusable = true; throw e; }
   $('#btnCancel').hidden = false;
   const reader = res.body.getReader();
   let buf = new Uint8Array(0); const finals = []; let finished = false;
@@ -1436,7 +1549,7 @@ async function generateStreaming(body) {
        NAI 는 요청을 받아들인 시점에 배치 전체분 Anlas 를 빼기 때문에, 여기서 버리면
        돈은 나갔는데 남는 게 하나도 없다. 취소는 "더 이상 기다리지 않겠다" 는 뜻이지
        "이미 나온 것도 버리라" 는 뜻이 아니다. */
-    if (!finals.length) throw e;
+    if (!finals.length) { e.charged = true; throw e; }   // 응답을 받기 시작한 뒤의 실패 = 이미 과금됨
     if (e.name === 'AbortError') R._cancelledWith = finals.length;
     logErr('스트림 중단(받은 ' + finals.length + '장 사용): ' + e.message);
   } finally {
@@ -1444,7 +1557,12 @@ async function generateStreaming(body) {
     if (!finished) { try { await reader.cancel(); } catch (e) {} }
     try { reader.releaseLock(); } catch (e) {}
   }
-  if (!finals.length) throw new Error('스트림에서 최종 이미지를 받지 못했습니다');
+  if (!finals.length) {
+    /* 여기까지 왔다는 건 NAI 가 요청을 받아들였다는 뜻이다 = 이미 Anlas 가 빠졌다.
+       자동 짤뽑이 이걸 모르고 다시 보내면 실패할 때마다 돈이 나간다. */
+    const e = new Error('스트림에서 최종 이미지를 받지 못했습니다');
+    e.charged = true; throw e;
+  }
   return finals;
 }
 
@@ -1480,23 +1598,36 @@ async function addToHistory(blob, meta, label) {
   catch (e) { item.unsaved = true; logErr('히스토리 저장 실패: ' + e.message); toast('이미지를 브라우저 저장소에 못 넣었습니다 (공간 부족?) — 새로고침하면 사라집니다', 'err'); }
   item.url = URL.createObjectURL(blob);
   R.hist.push(item);
-  await pruneHistory(); renderHist(); showImage(R.hist.length - 1);
+  await pruneHistory(item); renderHist(); showImage(R.hist.length - 1);
   return item;
 }
 /* 히스토리 상한. 넘으면 즐겨찾기가 아닌 것 중 오래된 것부터 지운다.
    예전엔 아무 말 없이 지웠는데, 자동 저장이 꺼져 있으면 디스크에도 없어 그대로 사라진다.
    상한이 있다는 사실 자체가 어디에도 안 적혀 있었다 → 지웠으면 알린다. */
-async function pruneHistory() {
+/* keep: 방금 추가한 항목. 절대 지우면 안 된다.
+   예전에는 이 인자가 없어서, 히스토리 400장이 전부 ⭐인 상태에서 새로 뽑으면
+   **방금 만든 그 그림**이 유일한 비-⭐이라 곧바로 지워졌다.
+   Anlas 는 나갔는데 그림은 사라지고, 화면엔 직전 ⭐가 떠서 "엉뚱한 게 나왔다" 로 보였다.
+   게다가 안내는 "오래된 1장을 지웠습니다 (⭐즐겨찾기는 안 지웁니다)" 라고 정반대로 말했다. */
+async function pruneHistory(keep) {
   const MAX = 400;
   let n = 0, savedAll = true;
   while (R.hist.length > MAX) {
-    const idx = R.hist.findIndex(h => !h.fav); if (idx < 0) break;
+    const idx = R.hist.findIndex(h => !h.fav && h !== keep); if (idx < 0) break;
     const [old] = R.hist.splice(idx, 1); URL.revokeObjectURL(old.url);
     if (typeof LIB !== 'undefined' && LIB.sel) LIB.sel.delete(old);
     if (old.id != null) histDel(old.id).catch(() => {});
     if (!old.saved) savedAll = false;      // 디스크에 남긴 적 없는 이미지
     if (R.cur > idx) R.cur--;
     n++;
+  }
+  /* 지울 수 있는 게 없어 상한을 못 지키는 상태(대부분 ⭐가 400장을 채운 경우).
+     ⭐를 말없이 지우지 않는 건 옳지만, 계속 쌓이면 브라우저 저장 공간이 차서
+     "이미지가 저장되지 않습니다" 로 나타난다. 조용히 두지 말고 알린다. */
+  if (R.hist.length > MAX && !R._favWarned) {
+    R._favWarned = true;
+    toast(`히스토리가 ${R.hist.length}장입니다 (상한 ${MAX}) — ⭐즐겨찾기가 상한을 채워 더 정리할 수 없습니다. ` +
+      '필요 없는 별표를 풀거나 📦백업 후 지워 주세요', 'err');
   }
   if (n) {
     R._pruned = (R._pruned || 0) + n;
@@ -1511,11 +1642,24 @@ async function pruneHistory() {
   }
 }
 async function loadHistory() {
-  try {
-    const all = await histAll(); all.sort((a, b) => a.t - b.t);
-    R.hist = all.map(r => ({ ...r, url: URL.createObjectURL(r.blob) }));
-    renderHist(); if (R.hist.length) showImage(R.hist.length - 1);
-  } catch (e) { console.warn('hist load fail', e); }
+  let all;
+  try { all = await histAll(); }
+  catch (e) {
+    /* 예전엔 console.warn 하나로 삼켰다. 사용자에겐 "이미지가 전부 사라졌다" 로만 보이는데
+       실제로는 저장소를 못 연 것뿐일 수 있다(다른 탭이 잡고 있거나 공간 부족).
+       조용히 지나가면 빈 히스토리 위에 계속 써서 진짜로 덮어써 버린다. */
+    logErr('히스토리 불러오기 실패: ' + e.message);
+    toast('저장된 이미지를 불러오지 못했습니다 — 사라진 게 아닙니다. 다른 탭을 닫고 새로고침(F5) 해보세요. ' +
+      '그래도 안 되면 이 상태로 계속 쓰지 마시고 알려주세요: ' + e.message, 'err');
+    return;
+  }
+  all.sort((a, b) => a.t - b.t);
+  R.hist = [];
+  for (const r of all) {      // 레코드 한 건이 깨져도 나머지는 살린다
+    try { R.hist.push({ ...r, url: URL.createObjectURL(r.blob) }); }
+    catch (e) { logErr('이미지 한 건 건너뜀 (id=' + r.id + '): ' + e.message); }
+  }
+  renderHist(); if (R.hist.length) showImage(R.hist.length - 1);
 }
 function visibleHist() { const idx = []; R.hist.forEach((h, i) => { if (!S.histFavOnly || h.fav) idx.push(i); }); return idx; }
 function renderHist() {
@@ -1691,6 +1835,12 @@ async function autoLoopBody() {
     $('#autoProg').textContent = `${R.auto.done}${total ? '/' + total : ''} 생성 중…`;
     try { await doGenerate(ov ? { ...ov } : undefined); R.auto.done++; errStreak = 0; }
     catch (e) {
+      /* 이미 요금이 빠진 실패는 다시 보내면 안 된다 — NAI 는 요청을 받아들인 시점에 Anlas 를 뺀다.
+         예전에는 이걸 구분하지 않아 최대 5번까지 재요청했고, 그때마다 돈이 나갔다. */
+      if (e && e.charged) {
+        toast('요금이 이미 빠진 실패입니다 — 더 쓰지 않도록 자동 짤뽑을 멈춥니다: ' + (e.message || ''), 'err');
+        break;
+      }
       errStreak++; if (errStreak >= 5) { toast('오류 5연속 — 자동 짤뽑 중지', 'err'); break; }
       const msg = String(e.message || '');
       if (msg.includes('429')) await sleep(15000);
@@ -1830,6 +1980,8 @@ async function openMaskEditor() {
     paint.addEventListener('pointerdown', e => { drawing = true; last = null; paint.setPointerCapture(e.pointerId); stroke(...pos(e)); });
     paint.addEventListener('pointermove', e => { if (drawing) stroke(...pos(e)); });
     paint.addEventListener('pointerup', () => { drawing = false; last = null; });
+    // 펜·터치는 떼는 대신 '취소' 로 끝나기도 한다. 안 받으면 그 뒤로 손을 안 대도 계속 그려진다.
+    paint.addEventListener('pointercancel', () => { drawing = false; last = null; });
     ctl.querySelector('#mErase').onclick = e => { erase = !erase; e.target.textContent = '지우개: ' + (erase ? 'ON' : 'OFF'); };
     ctl.querySelector('#mClear').onclick = () => px.clearRect(0, 0, cw, ch);
     ctl.querySelector('#mSave').onclick = () => { const blank = !px.getImageData(0, 0, cw, ch).data.some((v, i) => i % 4 === 3 && v > 0); R.maskCanvas = blank ? null : paint; updateI2IUI(); closeModal(); };
@@ -1868,7 +2020,18 @@ async function addVibe(blob) {
 }
 /* 바이브 라이브러리 — 인코딩 결과(모델·IE별)를 저장해 재사용 (인코딩 Anlas 절약) · .naiv4vibe 가져오기 */
 async function vibeLibAll() { return (await idbGet('vibelib')) || []; }
-async function vibeLibSave(list) { await idbSet('vibelib', list); }
+/* 라이브러리 항목은 원본 이미지를 base64(원본의 1.33배)로 들고 있는데 개수·용량 상한이 없었다.
+   R.vibes 슬롯에는 4개 제한이 있는데 여기만 없어서, 계속 넣으면 브라우저 저장 할당량을 조용히
+   밀어 올리다가 어느 날 "이미지가 저장되지 않습니다" 로 터진다. 백업 JSON 도 같이 부푼다. */
+const VIBELIB_MAX = 60, VIBELIB_WARN_MB = 150, VIBELIB_MAX_MB = 400;
+async function vibeLibSave(list) {
+  const mb = list.reduce((a, r) => a + ((r && r.image ? r.image.length : 0) + (r && r.thumb ? r.thumb.length : 0)), 0) / 1048576;
+  if (list.length > VIBELIB_MAX || mb > VIBELIB_MAX_MB) {
+    throw new Error(`바이브 라이브러리가 한도를 넘었습니다 (${list.length}개 · ${mb.toFixed(0)}MB · 한도 ${VIBELIB_MAX}개 · ${VIBELIB_MAX_MB}MB) — 쓰지 않는 항목을 지워 주세요`);
+  }
+  await idbSet('vibelib', list);
+  if (mb > VIBELIB_WARN_MB) toast(`바이브 라이브러리가 ${mb.toFixed(0)}MB 입니다 — 계속 늘면 이미지 저장이 실패할 수 있습니다`, 'err');
+}
 /* 라이브러리는 '읽고 → 고치고 → 쓰기' 라, 여러 파일을 한 번에 넣으면 모두 같은 옛 목록을
    읽어가 마지막 하나만 남는다. 갱신은 한 줄로 세워서 처리한다. */
 let _vibeLibQ = Promise.resolve();
@@ -1889,7 +2052,10 @@ async function saveVibeToLib(v) {
   if (!rec) { rec = { id: uid(), name, thumb: null, image: v.b64, encodings: {} }; lib.push(rec); }
   const th = await makeThumb(v.b64, 96); rec.thumb = th || rec.thumb;
   if (v.enc) rec.encodings[S.model + '|' + v.ie] = v.enc;
-  await vibeLibSave(lib); v.libName = name; toast('바이브 라이브러리에 저장: ' + name);
+  // 한도 초과·저장 공간 부족을 조용히 삼키면 "저장한 줄 알았는데 없다" 가 된다
+  try { await vibeLibSave(lib); }
+  catch (e) { toast('바이브 저장 실패: ' + e.message, 'err'); return; }
+  v.libName = name; toast('바이브 라이브러리에 저장: ' + name);
 }
 async function makeThumb(b64, size) {
   try { const img = await blobToImage(new Blob([b64ToU8(b64)], { type: 'image/png' })); const c = document.createElement('canvas'); const r = Math.max(size / img.width, size / img.height); c.width = Math.round(img.width * r); c.height = Math.round(img.height * r); c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); return c.toDataURL('image/jpeg', 0.8); } catch (e) { return null; }
@@ -2253,6 +2419,7 @@ function openSettings() {
       <div class="mtitle">태그 삽입</div>
       <label class="ck"><input type="checkbox" id="mUnderscore"> 태그를 언더스코어(_) 그대로 삽입 (기본: 공백 변환 — NAI 권장)</label>
       <label class="ck"><input type="checkbox" id="mShowChunks"> 청크 칩을 프롬프트 아래에 항상 표시 (기본: 칸에 커서가 있을 때만 떠서 보임)</label>
+      <label class="ck"><input type="checkbox" id="mStream"> 생성 중 실시간 미리보기 (msgpack 스트림) <span class="hint">— 끄면 다 그려진 뒤 한 번에 받습니다. NAI 가 스트림 형식을 바꿔 그림이 안 나올 때 여기서 끄세요.</span></label>
       <hr>
       <div class="mtitle">NAI 웹과 동일하게 재현하기</div>
       <div class="hint">NAI 웹에서 만든 PNG를 아래에 드롭하면 프롬프트·시드·스텝·가이던스·UC 프리셋·Variety 등이 <b>전부 그대로</b> 복원됩니다. 그 상태로 생성하면 NAI 웹과 같은 결과가 나와야 정상입니다 (다르면 알려주세요).</div>
@@ -2268,7 +2435,10 @@ function openSettings() {
         서버: <b>${R.srvOk ? '연결됨 ' + (R.api || location.origin) : '연결 안 됨'}</b> · 서버 저장 토큰: <b>${R.srvToken ? '있음 ' + (R.srvTokenHint || '') : '없음'}</b> · 브라우저 토큰: <b>${getToken() ? '있음' : '없음'}</b>${R.lastErr ? ' · 마지막 API 오류: <b>' + escHtml(R.lastErr) + '</b>' : ''}
         ${errs ? '<div class="errlog"><b>최근 오류</b>' + errs + '<button class="btn xs" id="mCopyErr">오류 로그 복사</button></div>' : ''}`;
       const cb = diag.querySelector('#mCopyErr');
-      if (cb) cb.onclick = () => navigator.clipboard.writeText(ERRLOG.map(e => e.t + ' ' + e.msg).join('\n') + '\n' + navigator.userAgent + '\n' + location.href).then(() => toast('복사됨 — 붙여넣어 주세요'));
+      if (cb) cb.onclick = () => navigator.clipboard.writeText(ERRLOG.map(e => e.t + ' ' + e.msg).join('\n') + '\n' + navigator.userAgent + '\n' + location.href)
+        .then(() => toast('복사됨 — 붙여넣어 주세요'))
+        // 도움을 요청하려는 바로 그 순간에 아무 반응이 없으면 안 된다
+        .catch(() => toast('복사하지 못했습니다 — 위 목록을 직접 선택해 복사해 주세요', 'err'));
     };
     showDiag();
     const updSt = body.querySelector('#mUpdState');
@@ -2351,15 +2521,44 @@ function openSettings() {
       tg.appendChild(d);
     }
     const us = body.querySelector('#mUnderscore'); us.checked = !!S.tagUnderscore; us.onchange = () => { S.tagUnderscore = us.checked; save(); };
+    const stm = body.querySelector('#mStream'); stm.checked = S.stream !== false;
+    stm.onchange = () => { S.stream = stm.checked; save(); toast(stm.checked ? '실시간 미리보기 켬' : '실시간 미리보기 끔 — 다 그려진 뒤 한 번에 받습니다'); };
     const sc = body.querySelector('#mShowChunks'); sc.checked = !!S.showChunkBars; sc.onchange = () => { S.showChunkBars = sc.checked; document.body.classList.toggle('show-chunks', sc.checked); save(); };
     body.querySelector('#mBackup').onclick = () => openBackup();
     body.querySelector('#mExport').onclick = () => downloadBlob(new Blob([JSON.stringify(S, null, 2)], { type: 'application/json' }), 'nai-studio-settings.json');
     body.querySelector('#mImport').onclick = () => pickFiles(false, async f => {
-      try { S = { ...DEFAULTS, ...JSON.parse(await f.text()) }; save(); syncUI(); renderChars(); if (window.renderChunkBar) renderChunkBar(); applyTheme(); toast('설정을 가져왔습니다'); closeModal(); }
-      catch (e) { toast('설정 파일이 아닙니다', 'err'); }
+      /* 순서가 중요하다. 예전에는 S 를 먼저 갈아끼우고 나서 syncUI 를 불렀다 —
+         파일이 이상하거나 지금은 없는 모델 id 가 들어 있으면 syncUI 가 던지는데,
+         그때는 이미 S 가 그 이상한 값으로 바뀐 뒤였다. "설정 파일이 아닙니다" 라고
+         말하면서 정작 설정은 망가뜨린 셈이다. 검증까지 끝난 뒤에만 바꾼다. */
+      let next;
+      try { next = normalizeState({ ...DEFAULTS, ...JSON.parse(await f.text()) }); }
+      catch (e) { toast('설정 파일이 아닙니다', 'err'); return; }
+      const prev = S;
+      try { S = next; save(); syncUI(); renderChars(); if (window.renderChunkBar) renderChunkBar(); applyTheme(); toast('설정을 가져왔습니다'); closeModal(); }
+      catch (e) { S = prev; try { syncUI(); } catch (e2) {} toast('설정을 적용하지 못해 되돌렸습니다: ' + e.message, 'err'); }
     }, '.json');
     const pd = body.querySelector('#mPngDrop'); bindDrop(pd, f => importFromPng(f)); pd.onclick = () => pickFiles(false, f => importFromPng(f), 'image/png');
   });
+}
+
+/* 파이어폭스에는 캔버스가 통째로 검게 렌더링되는 고질 버그가 있다(NAI 웹도 이걸 감지해 알려 준다).
+   걸리면 히스토리 썸네일이 전부 검게 나오고, 캔버스를 쓰는 인페인트 마스크·이미지 넣기도 망가진다.
+   원인이 앱이 아니라서 아무리 찾아도 안 나온다 — 브라우저를 다시 켜면 대개 낫는다.
+   1×1 캔버스에 흰색을 칠해 보고 검게 읽히면 그 상태다. */
+function checkCanvasBug() {
+  try {
+    const c = document.createElement('canvas'); c.width = c.height = 1;
+    const x = c.getContext('2d', { willReadFrequently: true });
+    if (!x) return;
+    x.fillStyle = '#fff'; x.fillRect(0, 0, 1, 1);
+    const d = x.getImageData(0, 0, 1, 1).data;
+    if (d[0] < 200 && d[1] < 200 && d[2] < 200) {
+      logErr('캔버스 버그 감지 (읽은 값 ' + [d[0], d[1], d[2]].join(',') + ')');
+      toast('브라우저 캔버스가 정상 작동하지 않습니다 — 썸네일이 검게 보이거나 인페인트가 안 될 수 있습니다. ' +
+        '브라우저를 완전히 껐다 켜면 대개 해결됩니다 (파이어폭스에서 알려진 문제입니다)', 'err');
+    }
+  } catch (e) { /* 감지 실패는 그냥 넘어간다 — 이것 때문에 앱이 안 뜨면 안 된다 */ }
 }
 
 /* ─────────────── UI 동기화 ─────────────── */
@@ -2657,6 +2856,7 @@ function init() {
   if (typeof initTools === 'function') initTools();
   if (typeof initScenes === 'function') initScenes();
   setMode(S.mode || 'main'); applyTheme();
+  checkCanvasBug();   // 썸네일이 전부 검게 나오는 브라우저 상태를 미리 알린다
   loadHistory().then(() => { if (window.onHistChanged) window.onHistChanged(); });
   srvLoop(); naiStatusLoop();
   $('#naiStat').onclick = openNaiStatus;
@@ -2919,7 +3119,7 @@ async function judgeImage(it, opts) {
     if (wait > 0) await sleep(wait);
     const model = S.aiModel || 'gemini-2.5-flash';
     const res = await apiFetch('/ai/judge', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: await blobToB64(it.blob), prompt: (it.meta && it.meta.input) || '', model }) });
+      body: JSON.stringify({ image: await blobToB64Max(it.blob, 1024), prompt: (it.meta && it.meta.input) || '', model }) });
     JQ.last = Date.now();
     const j = await res.json().catch(() => ({}));
     if (!res.ok) { const err = new Error(j.message || ('HTTP ' + res.status)); err.detail = j; throw err; }
