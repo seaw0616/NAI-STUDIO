@@ -40,7 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 VERSION = 17
-RELEASE = "12.1"   # 12.0 준비 빌드. 공개 번호(11.23)를 태우지 않으려고 11.99.N 을 쓴다            # 배포 버전. GitHub 릴리스 태그 "v11.22" 과 짝을 이룬다.
+RELEASE = "12.1"   # 배포 버전. GitHub 릴리스 태그 "v12.1" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
 # 이 앱이 배포되는 저장소. 비워 두면 ⬆ 업데이트 버튼이 아예 안 뜬다 —
 # 사용자가 ⚙설정에 직접 타이핑해 넣기 전까지는 새 버전이 나온 줄도 모른다.
 # 실제로 그 때문에 옛 버전을 계속 쓰시는 분들이 있었다. 기본값을 박아 둔다.

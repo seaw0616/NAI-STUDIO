@@ -1806,7 +1806,9 @@ function openBackup() {
           for (const h of items) {
             const fn = 'history/' + (h.name || ('img_' + (i + 1) + '.png'));
             files.push({ name: fn, blob: h.blob });
-            idx.push({ file: fn, meta: h.meta, seed: h.seed, model: h.model, w: h.w, h: h.h, fav: !!h.fav, t: h.t, label: h.label, sceneId: h.sceneId || null, name: h.name });
+            /* judge 를 함께 담는다. 채점은 한 장에 Gemini 호출 1회 = 요금 1회다.
+               여기서 빠뜨리면 복원한 사람은 돈을 다시 내고 채점해야 한다. */
+            idx.push({ file: fn, meta: h.meta, seed: h.seed, model: h.model, w: h.w, h: h.h, fav: !!h.fav, t: h.t, label: h.label, sceneId: h.sceneId || null, name: h.name, judge: h.judge || null });
             i++; if (i % 20 === 0) st.textContent = `이미지 담는 중… ${i}/${items.length}`;
           }
           files.push({ name: 'history/index.json', u8: new TextEncoder().encode(JSON.stringify(idx)) });
@@ -1893,6 +1895,8 @@ function openBackup() {
             if (!replace && R.hist.some(h => h.seed === it.seed && h.t === it.t)) continue;
             const blob = new Blob([data], { type: 'image/png' });
             const rec = { blob, meta: it.meta || {}, seed: it.seed, model: it.model, w: it.w, h: it.h, fav: !!it.fav, t: it.t || Date.now(), name: it.name || it.file.split('/').pop(), label: it.label || '', sceneId: it.sceneId || null };
+            // 옛 백업엔 judge 가 없다 — 있을 때만 붙인다 (없는 채로 두면 그냥 미채점 이미지다)
+            if (it.judge && typeof it.judge === 'object') rec.judge = it.judge;
             try { rec.id = await histPut({ ...rec }); } catch (e) { failed++; }
             rec.url = URL.createObjectURL(blob); R.hist.push(rec); n++;
             if (n % 20 === 0) rst.textContent = `이미지 복원 중… ${n}/${histIdx.length}`;
