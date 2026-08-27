@@ -26,6 +26,8 @@ import re
 import csv
 import time
 import base64
+import secrets
+import hmac
 import gzip
 import hashlib
 import json
@@ -40,7 +42,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 VERSION = 17
-RELEASE = "12.1"   # 배포 버전. GitHub 릴리스 태그 "v12.1" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
+# 켤 때마다 새로 만드는 열쇠. 파일에 남기지 않는다(남기면 읽어가면 그만이다).
+# 이 값은 우리가 내주는 index.html 안에만 심긴다 → 그 페이지를 실제로 연 브라우저만 알 수 있다.
+# 같은 PC 의 다른 프로그램은 127.0.0.1 에 닿을 수는 있어도 이 값은 모른다.
+SESSION_KEY = secrets.token_urlsafe(24)
+
+RELEASE = "12.2"   # 배포 버전. GitHub 릴리스 태그 "v12.2" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
 # 이 앱이 배포되는 저장소. 비워 두면 ⬆ 업데이트 버튼이 아예 안 뜬다 —
 # 사용자가 ⚙설정에 직접 타이핑해 넣기 전까지는 새 버전이 나온 줄도 모른다.
 # 실제로 그 때문에 옛 버전을 계속 쓰시는 분들이 있었다. 기본값을 박아 둔다.
@@ -85,18 +92,34 @@ def load_cfg(strict=False):
     return {}
 
 
+_cfg_lock = threading.Lock()
+
+
 def save_cfg(cfg):
-    """설정을 원자적으로 쓴다 — 쓰다가 끊겨도 이전 파일이 남는다."""
+    """설정을 원자적으로 쓴다 — 쓰다가 끊겨도 이전 파일이 남는다.
+
+    서버는 ThreadingHTTPServer 라 요청이 동시에 들어온다. 예전에는 잠금이 없고
+    임시파일 이름이 고정(config.json.tmp)이라, 탭 두 개가 같은 순간에 설정을 저장하면
+    한쪽이 쓰는 중인 임시파일을 다른 쪽이 덮어쓰고 그걸 os.replace 로 올릴 수 있었다.
+    잠금 + 유일한 임시파일 이름 두 가지로 막는다."""
     DATA.mkdir(exist_ok=True)
-    tmp = CONFIG.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-    for i in range(5):
+    with _cfg_lock:
+        tmp = CONFIG.with_suffix(".json.tmp.%d.%d" % (os.getpid(), threading.get_ident()))
         try:
+            tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+            for i in range(5):
+                try:
+                    os.replace(str(tmp), str(CONFIG))
+                    return
+                except (PermissionError, OSError):
+                    time.sleep(0.08 * (i + 1))
             os.replace(str(tmp), str(CONFIG))
-            return
-        except PermissionError:
-            time.sleep(0.08 * (i + 1))
-    os.replace(str(tmp), str(CONFIG))
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
 PORT_CANDIDATES = [8765, 8766, 8767, 8768, 8769]
 _LF = bytes([10])
 _CRLF = bytes([13, 10])   # 배치 파일 줄바꿈 (LF 로 쓰면 cmd 가 줄을 합쳐 읽는다)
@@ -128,6 +151,19 @@ if str(VENDOR) not in sys.path:
     sys.path.insert(0, str(VENDOR))
 _ytdlp = None
 _yt_cache = {}   # (vid, mode) -> (expires, info)
+_YT_CACHE_MAX = 200   # 없으면 앱을 며칠 켜 두는 동안 끝없이 늘어난다 (_dan_cache 처럼 상한을 둔다)
+
+
+def _yt_cache_put(key, val):
+    """넣고, 넘치면 만료된 것부터 → 그래도 넘치면 오래된 것부터 버린다."""
+    with _yt_lock:
+        _yt_cache[key] = val
+        if len(_yt_cache) > _YT_CACHE_MAX:
+            now = time.time()
+            for k in [k for k, v in _yt_cache.items() if v[0] <= now]:
+                _yt_cache.pop(k, None)
+            while len(_yt_cache) > _YT_CACHE_MAX:
+                _yt_cache.pop(min(_yt_cache, key=lambda k: _yt_cache[k][0]), None)
 _yt_lock = threading.Lock()
 
 
@@ -147,8 +183,12 @@ def yt_engine_install():
     import subprocess
     global _ytdlp
     if FROZEN:
-        # 단일 exe 에는 pip 가 없다. 엔진은 이미 번들돼 있으므로 설치할 것이 없다.
-        return (bool(yt_engine()), "단일 실행 파일에는 재생 엔진이 이미 포함돼 있습니다")
+        # 단일 exe 에는 pip 가 없다 — 여기서는 무엇도 갱신할 수 없다.
+        # 예전에는 성공(True)으로 돌려줘서 화면에 "업데이트 완료" 가 떴다.
+        # 유튜브가 추출 방식을 바꿔 엔진이 낡으면, 사용자는 버튼을 눌러도 "완료" 만 보고
+        # 왜 계속 안 되는지 알 수 없었다. 사실대로 말한다.
+        return (False, "이 버전(단일 실행 파일)에는 재생 엔진이 안에 들어 있어 따로 갱신할 수 없습니다 — "
+                       "재생이 계속 안 되면 앱 자체를 새 버전으로 업데이트해 주세요")
     VENDOR.mkdir(exist_ok=True)
     cmd = [sys.executable, "-m", "pip", "install", "-U", "--target", str(VENDOR), "yt-dlp"]
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -272,6 +312,24 @@ def _merge_state(cur, inc):
             seen.add(k)
         out[name] = res
 
+    # judgeLog 는 "쌓기만 하는" 기록이다 — 지우는 UI 가 없고, 한 줄이 Gemini 호출 한 번(=요금 한 번)이다.
+    # 위 네 목록과 달리 병합 대상이 아니어서, 탭을 두 개 열어 두면 나중에 저장한 쪽이
+    # 자기가 아는 만큼으로 통째로 덮어썼다 → 다른 탭이 만든 채점 추세가 조용히 사라졌다.
+    # id(없으면 t+seed) 기준 합집합 → 시간순 → 클라이언트와 같은 300개 컷.
+    aj, bj = inc.get("judgeLog"), cur.get("judgeLog")
+    if isinstance(aj, list) and isinstance(bj, list):
+        merged, seen = [], set()
+        for x in list(aj) + list(bj):
+            if not isinstance(x, dict):
+                continue
+            k = ("id:%s" % x["id"]) if x.get("id") is not None else ("ts:%s|%s" % (x.get("t"), x.get("seed")))
+            if k in seen:
+                continue
+            seen.add(k)
+            merged.append(x)
+        merged.sort(key=lambda r: r.get("t") or 0)
+        out["judgeLog"] = merged[-300:]
+
     ac, bc = inc.get("chunkCats"), cur.get("chunkCats")
     if isinstance(ac, list) and isinstance(bc, list):
         cats, s = [], set()
@@ -343,8 +401,14 @@ def update_check_cached(max_age=600):
                 d = update_check()
                 _upd_cache["data"] = d
                 _upd_cache["t"] = time.time()
+                _upd_cache["fail"] = 0
             except Exception:
-                _upd_cache["t"] = time.time() - max_age + 60   # 실패하면 1분 뒤 재시도
+                # 실패하면 점점 더 뜸하게 (1 → 2 → 4 … 최대 30분).
+                # 예전엔 무조건 1분이라, 익명 한도(시간당 60회)에 걸리면 정확히 그 속도로
+                # 계속 두드려 스스로 한도를 유지하며 영영 빠져나오지 못했다.
+                _upd_cache["fail"] = min((_upd_cache.get("fail") or 0) + 1, 5)
+                back = 60 * (2 ** (_upd_cache["fail"] - 1))
+                _upd_cache["t"] = time.time() - max_age + min(back, 1800)
             finally:
                 _upd_cache["busy"] = False
 
@@ -765,8 +829,7 @@ def _yt_hls_variants(vid):
         out.append({"h": h, "itag": str(f.get("format_id")),
                     "u": base64.urlsafe_b64encode(u.encode()).decode().rstrip("=")})
     out.sort(key=lambda x: -x["h"])
-    with _yt_lock:
-        _yt_cache[key] = (now + 1800, out)
+    _yt_cache_put(key, (now + 1800, out))   # 상한 있는 헬퍼가 잠금까지 맡는다
     return out
 
 
@@ -892,8 +955,7 @@ def yt_stream(vid, mode, fresh=False, itag=None):
            "acodec": info.get("acodec"), "vcodec": info.get("vcodec"), "channel": info.get("uploader"),
            "mode": mode, "headers": {k: v for k, v in hdrs.items() if k.lower() in ("user-agent", "referer", "origin", "cookie")},
            "expires": now + 5 * 3600}
-    with _yt_lock:
-        _yt_cache[key] = (now + 40 * 60, res)   # 40분 (유튜브 URL은 몇 시간 유효하지만 IP/클라이언트에 따라 일찍 죽기도 함)
+    _yt_cache_put(key, (now + 40 * 60, res))   # 40분 (유튜브 URL은 몇 시간 유효하지만 IP/클라이언트에 따라 일찍 죽기도 함)
     return res
 
 
@@ -1670,7 +1732,14 @@ class Handler(BaseHTTPRequestHandler):
                     return True
             cfg = load_cfg()
             tok = cfg.get("token", "")
-            if (qs.get("full") or [""])[0]:  # 백업용: 실제 값 반환 (로컬 전용)
+            if (qs.get("full") or [""])[0]:  # 백업용: 실제 값 반환
+                # 열쇠 검사. 예전에는 검사가 없어서, 같은 PC 에서 도는 아무 프로그램이나
+                # (심지어 다른 윈도우 계정이) curl 한 번으로 NAI 토큰·Gemini 키·유튜브
+                # 리프레시 토큰을 통째로 받아갈 수 있었다. 127.0.0.1 은 그 PC 의 누구에게나 열려 있다.
+                # 브라우저를 통한 유출은 Origin 검사가 이미 막고 있었지만, 브라우저 밖은 무방비였다.
+                if not hmac.compare_digest(self.headers.get("X-NST-Key") or "", SESSION_KEY):
+                    self._json(403, {"message": "이 요청은 앱 화면에서만 할 수 있습니다 — 브라우저를 새로고침(F5)한 뒤 다시 시도하세요"})
+                    return True
                 self._json(200, {k: cfg.get(k, "") for k in ("token", "ytClientId", "ytClientSecret", "ytRefresh", "geminiKey", "updateRepo", "ghToken")})
                 return True
             self._json(200, {"hasToken": bool(tok), "tokenHint": ("…" + tok[-4:]) if tok else "",
@@ -1955,7 +2024,9 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     ok, log = False, str(e)
                 y = yt_engine()
-                self._json(200 if ok else 500, {"installed": bool(y), "version": getattr(getattr(y, "version", None), "__version__", "") if y else "", "log": log})
+                self._json(200, {"installed": bool(y), "updated": bool(ok),
+                                 "version": getattr(getattr(y, "version", None), "__version__", "") if y else "",
+                                 "log": log})
                 return True
             y = yt_engine()
             global _NODE
@@ -2087,6 +2158,10 @@ class Handler(BaseHTTPRequestHandler):
             if re.fullmatch(r"[\w-]{6,20}", vid or ""):   # 추출 시 쓰던 헤더(클라이언트별 UA 등) 재사용
                 with _yt_lock:
                     c = _yt_cache.get((vid, mode))
+                # 만료 검사가 빠져 있었다. 785·884 행은 c[0] > now 를 보는데 여기만 안 봐서,
+                # 며칠 지난 itag·헤더를 그대로 재사용해 재생이 끊길 수 있었다.
+                if c and c[0] <= time.time():
+                    c = None
                 if c and c[1].get("headers"):
                     up_hdr.update(c[1]["headers"])
                 pin_itag = (c[1].get("itag") if c else "") or None
@@ -2382,6 +2457,11 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(200, {"judge": json.loads(txt)})
                 except Exception:
                     why = ("응답이 비었습니다" if not txt else "JSON 형식이 아닙니다")
+                    # 입력이 막히면 candidates 자체가 없어 finishReason 도 비어 있다.
+                    # 그러면 위 "응답이 비었습니다" 로만 보여서 왜 안 되는지 알 길이 없었다.
+                    br = ((j.get("promptFeedback") or {}).get("blockReason") or "")
+                    if br:
+                        why = "보낸 이미지·프롬프트가 Gemini 안전 필터에 걸려 판정이 거부됐습니다 (%s)" % br
                     if fin == "MAX_TOKENS":
                         why = "답이 길이 제한에 걸려 잘렸습니다"
                     elif fin in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST"):
@@ -2763,7 +2843,18 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(str(f))[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype.endswith("javascript"):
             ctype += "; charset=utf-8"
-        self._send(200, f.read_bytes(), ctype)
+        data = f.read_bytes()
+        if rel2 == "index.html":
+            # 이 페이지를 실제로 연 사람만 비밀값을 꺼낼 수 있게 열쇠를 심는다.
+            # 캐시되면 옛 열쇠가 남으므로 index.html 은 캐시하지 않는다.
+            tag = ('<script>window.__NST_KEY=%s</script>' % json.dumps(SESSION_KEY)).encode("utf-8")
+            if b"</head>" in data:
+                data = data.replace(b"</head>", tag + b"</head>", 1)
+            else:
+                data = tag + data
+            self._send(200, data, ctype, {"Cache-Control": "no-store"})
+            return True
+        self._send(200, data, ctype)
         return True
 
     def _drain(self):

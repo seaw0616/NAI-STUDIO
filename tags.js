@@ -629,7 +629,7 @@ function openTagSearch(initial) {
           desc.appendChild(document.createTextNode(r[5] || '(설명 없음)'));
         };
         d.onclick = e => {
-          if (e.shiftKey) { navigator.clipboard.writeText(fmtTag(r[0])).then(() => toast('복사: ' + fmtTag(r[0]))); return; }
+          if (e.shiftKey) { navigator.clipboard.writeText(fmtTag(r[0])).then(() => toast('복사: ' + fmtTag(r[0]))).catch(() => toast('복사하지 못했습니다', 'err')); return; }
           insertIntoPrompt(fmtTag(r[0])); toast('삽입: ' + fmtTag(r[0]));
         };
         list.appendChild(d);
