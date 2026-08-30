@@ -185,6 +185,23 @@ function tagSearchLocal(q, limit, cat, maxCand, wantScores) {
     return out;
   };
 
+  /* 카테고리별 행 번호 목록. 한 번 만들어 두고 사전이 커지면 다시 만든다.
+     null 을 돌려주면 '전체' 라는 뜻이라 기존 scan(null) 과 같게 동작한다. */
+  const catRows = c => {
+    if (c == null) return null;
+    const cache = TAGDB._byCat;
+    if (!cache || cache.rowsLen !== rows.length) {
+      const m = new Map();
+      for (let i = 0; i < rows.length; i++) {
+        const k = rows[i][1];
+        let a = m.get(k); if (!a) { a = []; m.set(k, a); }
+        a.push(i);
+      }
+      TAGDB._byCat = { rowsLen: rows.length, m };
+    }
+    return TAGDB._byCat.m.get(c) || [];
+  };
+
   // 인덱스로 후보를 좁혀 먼저 훑고(대부분 여기서 끝난다), 결과가 모자랄 때만 전체 스캔으로 폴백.
   // 인덱스는 "단어 시작" 기준이라 단어 중간에 걸리는 일치(예: eyes 안의 yes)는 폴백이 잡는다.
   let out = null;
@@ -199,8 +216,11 @@ function tagSearchLocal(q, limit, cat, maxCand, wantScores) {
     keepList.unshift({ q: qq, cat, rowsLen: rows.length, cand });
     TAGDB.narrows = keepList.slice(0, 4);
   };
+  /* 한 글자짜리도 받는다. 예전엔 두 글자부터만 저장·사용해서,
+     한글을 칠 때(흰 → 흰머 → 흰머리) '흰머' 가 좁혀 들어갈 곳이 없어
+     단어마다 22만 행 전수 스캔을 두 번 했다. */
   const nw = (TAGDB.narrows || []).filter(x =>
-    x.cat === cat && x.rowsLen === rows.length && x.q.length >= 2 && q.startsWith(x.q))
+    x.cat === cat && x.rowsLen === rows.length && x.q.length >= 1 && q.startsWith(x.q))
     .sort((a, b) => b.q.length - a.q.length)[0];
   let narrowed = false;
   if (nw) {
@@ -240,11 +260,14 @@ function tagSearchLocal(q, limit, cat, maxCand, wantScores) {
       }
       TAGDB.deadQ = null;
     }
+    /* 카테고리가 정해져 있으면 그 카테고리 행만 훑는다.
+       예전엔 scan(null) 로 22만 행을 전부 돌며 아닌 것을 버리기만 했다 —
+       작가 칩(cat=1)이면 13만 행이 순수한 낭비였다. */
     const keep = [];
-    const full = scan(null, keep);
+    const full = scan(catRows(cat), keep);
     /* 전체를 훑었으니 이 후보 목록은 완전하다 — 다음 글자부터는 여기서만 찾으면 된다.
        상한에 걸려 끊겼으면 목록이 불완전하므로 저장하지 않는다. */
-    if (!capped && q.length >= 2) remember(q, keep);
+    if (!capped && q.length >= 1) remember(q, keep);   // 한 글자도 저장 — 다음 글자가 여기서 좁혀 든다
     if (full.length) {
       // 인덱스 결과와 합치되 같은 행이 두 번 들어가지 않게
       const seen = new Set((out || []).map(x => x[1]));

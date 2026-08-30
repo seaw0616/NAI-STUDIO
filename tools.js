@@ -262,7 +262,15 @@ function openChunkManager(focus, onlyCat) {
           const [n, t] = [d.children[0], d.children[1]];
           n.value = c.name; t.value = c.text;
           n.onchange = () => { const nv = n.value.trim().replace(/\s+/g, '_'); const dup = S.chunks.find(x => x !== c && normKey(x.name) === normKey(nv)); if (dup) { toast('같은 이름의 청크가 이미 있습니다: ' + dup.name, 'err'); n.value = c.name; return; } const oldName = c.name; c.name = nv; if (oldName && normKey(oldName) !== normKey(nv)) tomb('chunk', oldName); untomb('chunk', nv); save(); renderChunkBar(); };
-          t.oninput = () => { c.text = t.value; save(); renderChunkBar(); drawMode(); };
+          /* 칩 띠를 글자마다 다시 그리면 안 된다 — 청크 77개를 매번 새로 만드는데,
+             그때 화면엔 77행짜리 이 창이 떠 있어서 배치 계산이 통째로 다시 돈다.
+             실측 글자당 42ms(최대 396ms). 편집 중에 칩 띠가 실시간으로 맞을 이유는 없다. */
+          let barT = null;
+          t.oninput = () => {
+            c.text = t.value; save();
+            clearTimeout(barT);
+            barT = setTimeout(() => { renderChunkBar(); drawMode(); }, 200);
+          };
           /* 여러 줄일 때만: 자동 판별 결과를 보여 주고, 틀렸으면 사람이 뒤집을 수 있게 한다.
              자동 판별은 쉼표 이어쓰기 신호를 보는 것이라 대개 맞지만 절대적이지는 않다. */
           const mode = document.createElement('div');
