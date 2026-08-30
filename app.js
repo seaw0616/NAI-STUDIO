@@ -519,11 +519,42 @@ function ts() {
    없는 이름은 그대로 두고, 자기 참조는 깊이 가드로 멈춘다.                        */
 const SEQ = {};                       // 조각별 순차 카운터
 function resetSeqCounters() { for (const k in SEQ) delete SEQ[k]; }
-function fragLines(name) {            // 청크 → 조각 줄 목록 (여러 줄일 때만 조각으로 취급)
+/* 청크 본문의 실제 줄 목록 (주석·빈 줄 제외) */
+function chunkLines(c) {
+  return String((c && c.text) || '').split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+}
+/* 여러 줄 청크가 "후보 목록" 인가, "한 덩어리를 줄바꿈으로 나눠 쓴 것" 인가.
+
+   예전에는 줄이 2개 이상이면 무조건 후보 목록으로 봤다. 그래서 캐릭터 하나를
+   여러 줄로 나눠 적은 청크가 생성할 때마다 **그중 한 줄만** 들어갔다.
+   (9줄짜리 캐릭터 청크에서 ",3::dominant::, pink nipple," 한 줄만 나가거나,
+    쉼표뿐인 줄이 뽑혀 아무것도 안 들어가기도 했다.)
+
+   구분 신호는 분명하다 — 첫 줄이 아닌 줄이 쉼표로 시작하거나 쉼표뿐인 줄이 있으면
+   그건 앞 줄에 이어붙이려고 쓴 것이지 서로 대신할 후보가 아니다.
+   c.frag 로 사용자가 직접 정했으면 그 뜻을 우선한다. */
+function chunkIsFrag(c) {
+  const lines = chunkLines(c);
+  if (lines.length < 2) return false;
+  if (typeof (c && c.frag) === 'boolean') return c.frag;   // 사람이 정했으면 그대로
+
+  // ① 이어쓰기 신호 — 앞 줄에 붙이려고 쓴 것이 분명하다
+  if (lines.slice(1).some(l => l.startsWith(','))) return false;
+  if (lines.some(l => !l.replace(/[,\s]/g, ''))) return false;
+
+  /* ② 줄 안에 쉼표가 있으면 그 줄 자체가 이미 태그 목록이다 → 한 덩어리를 나눠 쓴 것.
+        후보 목록은 줄마다 후보가 하나씩이라 줄 안에 쉼표가 없다(예: artist:이름).
+        한 줄이라도 여러 태그를 담고 있으면 한 덩어리로 본다 — 애매할 때 안전한 쪽. */
+  return !lines.some(l => l.replace(/[,\s]+$/, '').includes(','));
+}
+/* 한 덩어리 청크를 한 줄로 이어붙인다. 줄 앞뒤 쉼표를 정리해 ",," 가 생기지 않게 한다. */
+function chunkBlockText(c) {
+  return chunkLines(c).map(l => l.replace(/^[,\s]+/, '').replace(/[,\s]+$/, '')).filter(Boolean).join(', ');
+}
+function fragLines(name) {            // 청크 → 후보 줄 목록 (진짜 후보 목록일 때만)
   const c = S.chunks.find(c => normKey(c.name) === normKey(name));
-  if (!c) return null;
-  const lines = String(c.text || '').split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
-  return lines.length > 1 ? lines : null;
+  if (!c || !chunkIsFrag(c)) return null;
+  return chunkLines(c);
 }
 function expandWild(s, peek, depth) {
   depth = depth || 0;
@@ -549,7 +580,8 @@ function expandWild(s, peek, depth) {
          한다 — 예전엔 꺾쇠째 남아 "<작태>" 가 그대로 프롬프트에 실려 나갔다. */
       const one = S.chunks.find(c => normKey(c.name) === normKey(name));
       if (!one) return m;             // 없는 이름은 원본 유지
-      return expandWild(chunksKeepTags(String(one.text || '').trim()), peek, depth + 1);
+      // 여러 줄이어도 후보 목록이 아니면 통째로 넣는다 (줄 사이 쉼표는 정리)
+      return expandWild(chunksKeepTags(chunkBlockText(one) || String(one.text || '').trim()), peek, depth + 1);
     }
     let line;
     if (seq) {
@@ -598,7 +630,20 @@ function chunkByName() {
 }
 function chunkMapClear() { _chunkByName = null; }
 const chunkKeyOf = tok => normKey(String(tok).replace(/^-?[\d.]+::/, '').replace(/::$/, '').replace(/^@/, ''));
-function chunkMap() { const m = {}; for (const c of S.chunks) if (c.name) m[normKey(c.name)] = c.text; return m; }
+/* 이름만 적었을 때 무엇으로 바꿀지.
+     한 줄 청크        → 그 내용
+     한 덩어리(여러 줄) → 쉼표를 정리해 이어붙인 내용
+     후보 목록         → <이름> 으로 넘긴다. 그래야 expandWild 가 한 줄만 뽑는다.
+   (예전엔 이름만 적으면 114줄짜리 작가랜덤이 통째로 프롬프트에 실려 나갔다.) */
+function chunkMap() {
+  const m = {};
+  for (const c of S.chunks) {
+    if (!c.name) continue;
+    m[normKey(c.name)] = chunkIsFrag(c) ? '<' + c.name + '>'
+      : (chunkLines(c).length > 1 ? chunkBlockText(c) : c.text);
+  }
+  return m;
+}
 function expandChunks(s, depth, active) {
   /* 청크 안에서 다른 청크를 부르는 건 되지만, 자기 자신(또는 돌아오는 참조)은 막아야 한다.
      예전엔 바꾼 결과를 처음부터 다시 훑어서, 이름을 본문에 포함한 청크가 깊이 한도(5)만큼
