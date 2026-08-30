@@ -47,14 +47,19 @@ function renderChunkBar(target) {
       const b = document.createElement('button'); b.className = 'chip';
       b.innerHTML = `<span class="cdot" style="background:${catColor(cat)}"></span>`;
       b.appendChild(document.createTextNode(c.name));
-      /* 여러 줄짜리는 '조각' 이다 — <이름> 으로 넣어야 생성할 때마다 한 줄씩 뽑힌다.
-         예전엔 이름만 넣어서 118줄짜리 작가랜덤이 통째로 프롬프트에 들어갔다. */
-      const multi = (c.text || '').split('\n').filter(x => x.trim()).length > 1;
-      b.title = c.text + (multi
-        ? '\n\n여러 줄 조각 — 클릭: <이름> 삽입 (생성할 때마다 한 줄 랜덤) · Alt+클릭: 전체 내용 그대로'
-        : '\n\n클릭: 청크 태그 삽입 (생성 시 내용으로 치환) · Alt+클릭: 내용 그대로') + ' · 우클릭: 편집';
+      /* '후보 목록' 만 <이름> 으로 넣는다 — 그래야 생성할 때마다 한 줄씩 뽑힌다.
+         예전엔 줄이 2개 이상이면 무조건 후보로 봐서, 캐릭터 하나를 여러 줄로 나눠 적은
+         청크가 매번 그중 한 줄만 실려 나갔다(결과가 통째로 어긋났다).
+         이제 chunkIsFrag 가 쉼표 이어쓰기 신호를 보고 가른다. */
+      const frag = typeof chunkIsFrag === 'function' && chunkIsFrag(c);
+      const nline = typeof chunkLines === 'function' ? chunkLines(c).length : 1;
+      b.title = c.text + (frag
+        ? '\n\n후보 목록 (' + nline + '줄) — 클릭: <이름> 삽입 (생성할 때마다 한 줄만 뽑힘) · Alt+클릭: 전체 내용 그대로'
+        : (nline > 1
+          ? '\n\n한 덩어리 (' + nline + '줄) — 클릭: 이름 삽입 (생성 시 전체가 한 줄로 이어져 들어감) · Alt+클릭: 내용 그대로'
+          : '\n\n클릭: 청크 태그 삽입 (생성 시 내용으로 치환) · Alt+클릭: 내용 그대로')) + ' · 우클릭: 편집';
       b.onclick = e => { if (target && target.dataset.ta) R.lastTA = $('#' + target.dataset.ta);
-        insertIntoPrompt(e.altKey ? c.text : (multi ? '<' + c.name + '>' : c.name)); };
+        insertIntoPrompt(e.altKey ? c.text : (frag ? '<' + c.name + '>' : c.name)); };
       b.oncontextmenu = e => { e.preventDefault(); chunkMenu(e, c); };
       bar.appendChild(b);
     }
@@ -257,7 +262,31 @@ function openChunkManager(focus, onlyCat) {
           const [n, t] = [d.children[0], d.children[1]];
           n.value = c.name; t.value = c.text;
           n.onchange = () => { const nv = n.value.trim().replace(/\s+/g, '_'); const dup = S.chunks.find(x => x !== c && normKey(x.name) === normKey(nv)); if (dup) { toast('같은 이름의 청크가 이미 있습니다: ' + dup.name, 'err'); n.value = c.name; return; } const oldName = c.name; c.name = nv; if (oldName && normKey(oldName) !== normKey(nv)) tomb('chunk', oldName); untomb('chunk', nv); save(); renderChunkBar(); };
-          t.oninput = () => { c.text = t.value; save(); renderChunkBar(); };
+          t.oninput = () => { c.text = t.value; save(); renderChunkBar(); drawMode(); };
+          /* 여러 줄일 때만: 자동 판별 결과를 보여 주고, 틀렸으면 사람이 뒤집을 수 있게 한다.
+             자동 판별은 쉼표 이어쓰기 신호를 보는 것이라 대개 맞지만 절대적이지는 않다. */
+          const mode = document.createElement('div');
+          mode.className = 'hint'; mode.style.cssText = 'grid-column:1/-1;padding:2px 0 6px';
+          d.appendChild(mode);
+          const drawMode = () => {
+            const nl = typeof chunkLines === 'function' ? chunkLines(c).length : 1;
+            if (nl < 2) { mode.textContent = ''; return; }
+            const isFrag = chunkIsFrag(c);
+            const auto = typeof c.frag !== 'boolean';
+            mode.innerHTML = nl + '줄 · 지금 <b>' + (isFrag ? '후보 목록 (한 줄만 뽑힘)' : '한 덩어리 (전부 들어감)')
+              + '</b>' + (auto ? ' <span class="hint">(자동 판별)</span>' : '') + ' ';
+            const btn = document.createElement('button');
+            btn.className = 'btn sm'; btn.textContent = isFrag ? '한 덩어리로 바꾸기' : '후보 목록으로 바꾸기';
+            btn.onclick = () => { c.frag = !isFrag; save(); renderChunkBar(); drawMode(); };
+            mode.appendChild(btn);
+            if (!auto) {
+              const r = document.createElement('button');
+              r.className = 'btn sm'; r.textContent = '자동으로';
+              r.onclick = () => { delete c.frag; save(); renderChunkBar(); drawMode(); };
+              mode.appendChild(r);
+            }
+          };
+          drawMode();
           bindCatSelect(d.querySelector('#ckc_' + i), v => { c.cat = v; save(); renderChunkBar(); draw(); });
           d.querySelector('button.ic').onclick = () => { tomb('chunk', c.name); S.chunks.splice(i, 1); save(); renderChunkBar(); draw(); };
           rows.appendChild(d);
