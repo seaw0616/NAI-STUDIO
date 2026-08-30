@@ -213,7 +213,12 @@ function save() {
      저장은 화면 그리기가 어떻게 되든 반드시 일어나야 한다. */
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => { try { localStorage.setItem('nst_state', JSON.stringify(S)); } catch (e) { logErr('로컬 저장 실패: ' + e.message); } }, 250);
-  try { if (typeof updatePreview === 'function') updatePreview(); } catch (e) { logErr('미리보기 갱신 실패(저장은 계속됨): ' + e.message); }
+  /* 미리보기는 **미뤄서** 갱신한다.
+     예전엔 여기서 곧바로 updatePreview() 를 불렀다. save() 는 글자 하나마다 불리는데,
+     그 안에서 청크 77개 치환 + T5 토큰 세기 + 중복 검사를 매번 다시 했다.
+     실측 6.8ms — 입력 한 번의 프레임 예산(16ms)을 혼자서 절반 가까이 먹었다.
+     보여주기용 숫자라 몇십 ms 늦어도 아무 문제가 없다. */
+  schedulePreview();
   if (R.booted) {
     clearTimeout(pushTimer);
     // force: 사용자가 "일부러" 비운 경우. 서버의 빈-프롬프트 보호는 사고를 막으려는 것이지
@@ -687,10 +692,26 @@ function previewFinal() {
   if (S.autoNsfw !== false && !NSFW_EXEMPT.includes(S.model) && getUcText(S.model, ucIdx()) && !p.toLowerCase().includes('nsfw') && !/^nsfw\b/i.test(uc)) uc = uc ? 'nsfw, ' + uc : 'nsfw';
   return { p, uc };
 }
+/* 미리보기 갱신을 한 박자 미룬다. 연타하는 동안에는 한 번도 돌지 않는다.
+   토글·설정 변경처럼 '지금 당장 맞아야 하는' 자리는 updatePreview() 를 직접 부른다. */
+let pvTimer = null;
+function schedulePreview() {
+  clearTimeout(pvTimer);
+  pvTimer = setTimeout(() => {
+    try { updatePreview(); } catch (e) { logErr('미리보기 갱신 실패: ' + e.message); }
+  }, 180);
+}
 function updatePreview() {
-  const box = $('#pvBox'); if (!box || box.hidden) return;
+  clearTimeout(pvTimer);
+  const box = $('#pvBox'), wrap = $('#pvWrap');
+  if (!box) return;
+  /* 펼쳐져 있는지 여부. 예전엔 box.hidden 을 봤는데 box 는 <details> 안이라
+     접어도 hidden 이 false 였다 — 조기 반환이 한 번도 걸리지 않았다.
+     다만 #pvInfo 는 <summary> 안이라 접어도 보이므로, 접혔을 때는
+     '본문 두 줄'만 건너뛰고 요약 숫자는 그대로 갱신한다. */
+  const open = !wrap || wrap.open;
   const { p, uc } = previewFinal();
-  $('#pvPrompt').textContent = p; $('#pvUc').textContent = uc;
+  if (open) { $('#pvPrompt').textContent = p; $('#pvUc').textContent = uc; }
   const nChunks = (getMainPrompt().match(/[^,\n{}\[\]<>|]+/g) || []).filter(t => isChunkToken(t)).length;
   const nFrag = (getMainPrompt().match(/<[^<>]+>/g) || []).length;
   // 토큰 수 — 한도는 모델마다 다르다 (V4/4.5 512 · V5 Curated 703 · V5 Full 1471)
@@ -1068,8 +1089,13 @@ async function apiFetch(path, opts) {
   if (!R.srvOk) { await probeServer(); setSrvUI(R.srvOk, R.srvInfo); if (!R.srvOk) throw new Error('로컬 서버에 연결할 수 없습니다 — start.bat을 실행하세요'); }
   /* 세션 열쇠. 서버가 켜질 때 만들어 이 페이지 안에만 심어 준 값이다.
      토큰·API 키 원문을 꺼내는 요청은 서버가 이 값을 확인한다 —
-     같은 PC 에서 도는 다른 프로그램은 127.0.0.1 에 닿아도 이 값을 알 수 없다. */
-  if (window.__NST_KEY) {
+     같은 PC 에서 도는 다른 프로그램은 127.0.0.1 에 닿아도 이 값을 알 수 없다.
+
+     **필요한 요청에만** 붙인다. 모든 요청에 붙이면, 페이지 주소와 API 주소의
+     표기가 갈릴 때(localhost 로 열고 127.0.0.1 로 부르는 경우 등) 요청마다
+     예비 요청(preflight)이 하나씩 더 붙어 느려진다. 지금 열쇠가 필요한 곳은
+     설정 원문을 꺼내는 /config 뿐이다. */
+  if (window.__NST_KEY && /^\/config(\?|$)/.test(path)) {
     opts = { ...(opts || {}) };
     opts.headers = { ...(opts.headers || {}), 'X-NST-Key': window.__NST_KEY };
   }
@@ -1707,11 +1733,10 @@ async function loadHistory() {
   renderHist(); if (R.hist.length) showImage(R.hist.length - 1);
 }
 function visibleHist() { const idx = []; R.hist.forEach((h, i) => { if (!S.histFavOnly || h.fav) idx.push(i); }); return idx; }
-function renderHist() {
-  const g = $('#histGrid'); g.innerHTML = '';
-  const idx = visibleHist();
-  for (let k = idx.length - 1; k >= 0; k--) {
-    const i = idx[k], it = R.hist[i];
+/* 카드 한 장을 만든다. renderHist 와 refreshHistCard 가 같은 것을 쓰도록 뽑아 둔다. */
+function histCardEl(i) {
+  {
+    const it = R.hist[i];
     const d = document.createElement('div'); d.className = 'hitem' + (i === R.cur ? ' cur' : '') + (it.saved ? ' saved' : ''); d.dataset.i = i;
     const img = document.createElement('img'); img.src = it.url; img.loading = 'lazy'; img.title = (it.label ? it.label + ' · ' : '') + `seed ${it.seed}` + (it.saved ? ' · 💾 저장됨' : '');
     d.appendChild(img);
@@ -1720,10 +1745,32 @@ function renderHist() {
     // 채점해 둔 점수를 카드에도 — 어떤 그림이 문제였는지 목록에서 바로 보이게
     if (it.judge && it.judge.overall != null) { const j = document.createElement('span'); j.className = 'jdg' + judgeCls(it.judge.overall); j.textContent = '🔬' + it.judge.overall; j.title = judgeTip(it.judge); d.appendChild(j); }
     d.onclick = () => showImage(i);
-    g.appendChild(d);
+    return d;
   }
+}
+function renderHist() {
+  const g = $('#histGrid'); if (!g) return;
+  g.innerHTML = '';
+  const idx = visibleHist();
+  for (let k = idx.length - 1; k >= 0; k--) g.appendChild(histCardEl(idx[k]));
   $('#histCount').textContent = R.hist.length ? `(${idx.length}${S.histFavOnly ? '/' + R.hist.length : ''})` : '';
   $('#histFavOnly').style.color = S.histFavOnly ? 'var(--gold)' : '';
+}
+/* 카드 한 장만 다시 만든다 (★·💾·🔬 배지가 바뀌었을 때) */
+function refreshHistCard(i) {
+  const g = $('#histGrid'); if (!g || i == null || i < 0 || i >= R.hist.length) return;
+  const old = g.querySelector('.hitem[data-i="' + i + '"]');
+  if (old) old.replaceWith(histCardEl(i));
+}
+/* '지금 보는 칸' 표시만 옮긴다.
+   예전엔 showImage 마지막에서 renderHist() 를 불러 400장을 통째로 다시 만들었다.
+   ←/→ 를 누르고 있으면 초당 20~30번씩 1000~2000개 노드를 만들고 버렸다. */
+function histMarkCur(i) {
+  const g = $('#histGrid'); if (!g) return;
+  const prev = g.querySelector('.hitem.cur');
+  if (prev && +prev.dataset.i !== i) prev.classList.remove('cur');
+  const now = g.querySelector('.hitem[data-i="' + i + '"]');
+  if (now) now.classList.add('cur');
 }
 function showImage(i) {
   if (i < 0 || i >= R.hist.length) return;
@@ -1738,7 +1785,8 @@ function showImage(i) {
   paintSavedUI(it);
   if (it.saved) { const s = document.createElement('span'); s.textContent = it.saved.how === 'download' ? '💾 다운로드함' : '💾 저장됨'; s.title = it.saved.how === 'download' ? '브라우저 다운로드로 넘겼습니다 — 실제로 받아졌는지는 앱이 알 수 없습니다' : ''; s.style.color = 'var(--green)'; $('#viewerMeta').appendChild(s); }
   if (it.judge && it.judge.overall != null) { const s = document.createElement('span'); s.textContent = '🔬 ' + it.judge.overall + '/10'; s.title = judgeTip(it.judge); s.style.color = it.judge.overall <= 4 ? 'var(--red)' : it.judge.overall <= 6 ? 'var(--gold)' : 'var(--green)'; $('#viewerMeta').appendChild(s); }
-  renderHist();
+  histMarkCur(i);      // 목록 전체가 아니라 표시만 옮긴다
+  refreshHistCard(i);  // 이 카드의 ★·💾·🔬 배지는 맞춰 둔다
 }
 const curItem = () => (R.cur >= 0 && R.cur < R.hist.length) ? R.hist[R.cur] : null;
 function stepImage(d) {
@@ -1786,7 +1834,10 @@ function paintSavedUI(it) {
 async function toggleFav(item) {
   const it = item || curItem(); if (!it) return;
   it.fav = !it.fav; persistItem(it);
-  if (R.cur >= 0 && R.hist[R.cur]) showImage(R.cur); else renderHist();
+  const at = R.hist.indexOf(it);
+  if (S.histFavOnly) renderHist();          // '즐겨찾기만 보기' 면 목록에서 들어오고 나간다 → 전체
+  else if (at >= 0) refreshHistCard(at);    // 아니면 그 카드 한 장이면 된다
+  if (R.cur >= 0 && R.hist[R.cur]) showImage(R.cur);
   if (window.onHistChanged) window.onHistChanged();
 }
 async function deleteItem(it, silent) {   // silent: 일괄 삭제용 — 화면 갱신을 건너뛰고 마지막에 한 번만 (대량 삭제 프리즈 방지)
@@ -1796,11 +1847,14 @@ async function deleteItem(it, silent) {   // silent: 일괄 삭제용 — 화면
   if (it.id != null) histDel(it.id).catch(() => {});
   if (R.cur >= i) R.cur = Math.min(R.cur - (R.cur > i ? 1 : 0), R.hist.length - 1);
   if (silent) return;
-  if (R.cur >= 0) showImage(R.cur); else { clearViewer(); renderHist(); }
+  // 지운 뒤에는 뒤 카드들의 data-i 가 전부 한 칸씩 밀린다 → 전체를 다시 그려야 한다
+  renderHist();
+  if (R.cur >= 0) showImage(R.cur); else clearViewer();
   if (window.onHistChanged) window.onHistChanged();
 }
 function refreshAfterBulk() {   // 일괄 작업 후 한 번만 갱신
-  if (R.cur >= 0 && R.hist[R.cur]) showImage(R.cur); else { clearViewer(); renderHist(); }
+  renderHist();
+  if (R.cur >= 0 && R.hist[R.cur]) showImage(R.cur); else clearViewer();
   if (window.onHistChanged) window.onHistChanged();
 }
 async function deleteCur() { const it = curItem(); if (it) deleteItem(it); }

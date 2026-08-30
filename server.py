@@ -1511,7 +1511,7 @@ class Handler(BaseHTTPRequestHandler):
             # file:// 로 연 앱의 "읽기" 만 허용 (_origin_ok 가 쓰기를 걸러낸다)
             self.send_header("Access-Control-Allow-Origin", "null")
         self.send_header("Vary", "Origin")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, Range")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, Range, X-NST-Key")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
     def _send(self, code, body, ctype="application/json", extra=None):
