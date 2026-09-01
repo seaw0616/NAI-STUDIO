@@ -85,11 +85,11 @@ const MODELS = {
    특히 V5 는 바이브 트랜스퍼·캐릭터 레퍼런스·노이즈 스케줄·Variety+ 를 받지 않는다. */
 const CAPS = {
   50: { vibe: false, charRef: false, noiseSchedule: false, cfgDelay: false, cfgRescale: true,
-        transparency: true, maxChars: 32, freePos: true, autoText: true, tokens: 1471, tokensCurated: 703 },
+        transparency: true, maxChars: 32, freePos: true, autoText: true, text: true, tokens: 1471, tokensCurated: 703 },
   45: { vibe: true, charRef: true, noiseSchedule: true, cfgDelay: true, cfgRescale: true,
-        transparency: false, maxChars: 6, freePos: false, tokens: 512 },
+        transparency: false, maxChars: 6, freePos: false, text: true, tokens: 512 },
   40: { vibe: true, charRef: false, noiseSchedule: true, cfgDelay: true, cfgRescale: true,
-        transparency: false, maxChars: 6, freePos: false, tokens: 512 },
+        transparency: false, maxChars: 6, freePos: false, text: true, tokens: 512 },
   30: { vibe: true, charRef: false, noiseSchedule: true, cfgDelay: true, cfgRescale: true,
         transparency: false, maxChars: 0, freePos: false, tokens: 225 },
 };
@@ -689,7 +689,11 @@ function previewFinal() {
   const st = getStyle(S.activeStyle);
   // peek=true — 미리보기는 <*조각> 순차 카운터를 소모하지 않는다 (실제 생성 때 밀리면 안 됨)
   let p = expandAll(joinParts(st && st.prefix, getMainPrompt(), st && st.suffix), true);
-  if (S.quality) p += getQuality(S.model);
+  {
+    let qs = S.quality ? String(getQuality(S.model) || '').replace(/^\s*,\s*/, '') : '';
+    if (capsOf(S.model).transparency && S.transparent) qs = qs ? 'transparent background, ' + qs : 'transparent background';
+    if (qs) p = addQualityTag(p, qs, capsOf(S.model));
+  }
   const pvRest = joinParts(st && expandAll(st.uc || '', true), expandAll(S.uc.trim(), true));
   const pvPre = ((MODELS[modelOf(S.model)] || {}).ucs || [])[ucIdx()] || {};
   let uc = (pvPre.onlyIfEmpty && pvRest.trim()) ? pvRest : joinParts(getUcText(S.model, ucIdx()), pvRest);
@@ -1272,6 +1276,52 @@ function autoTextV5(prompt, chars, useCoords) {
   return head.length > 0 ? head + ', ' + tail : tail;
 }
 
+
+/* ─── 품질 태그를 붙이는 자리 ───────────────────────────────────
+   NAI(번들 모듈 41179 g())는 맨 끝에 붙이지 않는다.
+     · '|' 로 나눈 첫 조각에만 붙인다 (캐릭터 프롬프트를 받는 모델)
+     · 그 조각 안에서도 'text:' 앞까지에만 붙인다 (글자 그리기를 받는 모델)
+   'text:' 뒤는 그려 넣을 글자라, 맨 끝에 붙이면 "no text" 가 그 안으로 들어간다. */
+const Q_TEXT_MARK = /(?:^|\s|[,.:[\]{}、。])text:(?!:)/i;
+/* '|' 로 나누되 '||' 로 감싼 구간의 '|' 는 구분자로 보지 않는다. 조각은 최대 6개.
+   (번들 모듈 51964 의 s() 를 그대로 옮긴 것) */
+function qSplitSegs(str) {
+  const P1 = '\uD800\uDFB9', P2 = '\uD808\uDD37';
+  const t = String(str || '').split('||').map((x, i) => i % 2 === 1 ? x.split('|').join(P1) : x).join(P2);
+  const parts = t.split('|');
+  const out = parts.slice(0, 5);
+  if (parts.length > 5) out.push(parts.slice(5).join('|'));
+  return out.map(x => x.split(P1).join('|').split(P2).join('||'));
+}
+function addQualityTag(prompt, q, caps) {
+  q = String(q || '').replace(/^\s*,\s*/, '').trim();
+  if (!q) return prompt;
+  const put = seg => {
+    seg = seg == null ? '' : seg;
+    if (caps && caps.text) {
+      const m = seg.match(Q_TEXT_MARK);
+      if (m) {
+        const parts = seg.split(Q_TEXT_MARK);
+        parts[0] = parts[0] ? parts[0] + ', ' + q : q;
+        return parts.join(m[0]);
+      }
+    }
+    return seg ? seg + ', ' + q : q;
+  };
+  if (!caps || !caps.maxChars) {
+    /* 캐릭터 프롬프트를 안 받는 모델(V3 계열)은 프롬프트 믹싱이라
+       '|' 로 나눈 **모든** 조각에 붙인다. 조각 끝의 :가중치 는 건드리지 않는다. */
+    return String(prompt || '').split('|').map(seg => {
+      const w = seg.match(/(:[\d.]+$)/);
+      const body = w ? seg.slice(0, -w[0].length) : seg;
+      return put(body) + (w ? w[0] : '');
+    }).join('|');
+  }
+  const segs = qSplitSegs(prompt);
+  segs[0] = put(segs[0]);
+  return segs.join('|');
+}
+
 function buildPayload(ov) {
   ov = ov || {};
   const m = ov.model || S.model, info = MODELS[m];
@@ -1279,11 +1329,19 @@ function buildPayload(ov) {
   R.lastSeed = seed;
   const style = ov.style !== undefined ? ov.style : getStyle(S.activeStyle);
   let prompt = ov.prompt != null ? ov.prompt : expandAll(joinParts(style && style.prefix, getMainPrompt(), style && style.suffix));
-  /* 투명 배경은 플래그만으로는 안 걸린다. NAI 웹은 프롬프트에 "transparent background" 를
-     직접 끼워 넣고(퀄리티 태그보다 앞), tag_hint_transparent_background 는 서버가 해석하지
-     않는 단순 전달용 힌트다. 앱은 플래그만 보내서 배경이 안 지워지고 있었다. */
-  if (!ov.noQuality && capsOf(m).transparency && S.transparent) prompt += ', transparent background';
-  if (S.quality && !ov.noQuality) prompt += getQuality(m);
+  /* 투명 배경 + 품질 태그는 **한 덩어리로** 붙인다.
+     NAI 는 투명 배경을 품질 프리셋의 suffix 앞에 끼워 넣고(번들 rr()),
+     그 덩어리를 addQualityTag 가 정하는 자리에 넣는다.
+     따로 붙이면 'text:' 가 있는 프롬프트에서 자리가 어긋난다.
+     (tag_hint_transparent_background 는 서버가 해석하지 않는 전달용 힌트라
+      프롬프트에 글자를 직접 넣어야 배경이 지워진다.) */
+  {
+    let qs = (S.quality && !ov.noQuality) ? String(getQuality(m) || '').replace(/^\s*,\s*/, '') : '';
+    if (!ov.noQuality && capsOf(m).transparency && S.transparent) {
+      qs = qs ? 'transparent background, ' + qs : 'transparent background';
+    }
+    if (qs) prompt = addQualityTag(prompt, qs, capsOf(m));
+  }
   /* onlyIfEmpty 프리셋(V3 계열의 '없음' = lowres)은 사용자가 네거티브를 직접 적었으면 쓰지 않는다.
      novelai.net 도 그렇게 한다 — none 일 때는 사용자 입력이 있으면 프리셋 문구를 버린다. */
   const ucRest = ov.ucExtra != null ? ov.ucExtra : joinParts(style && expandAll(style.uc || ''), expandAll(S.uc.trim()));
