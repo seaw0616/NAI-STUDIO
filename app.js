@@ -43,25 +43,27 @@ const UC = {
     { id: 4, name: '없음', text: '' },
   ],
   v4full: [
-    { id: 0, name: 'Heavy', text: 'blurry, lowres, error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, multiple views, logo, too many watermarks' },
-    { id: 1, name: 'Light', text: 'blurry, lowres, error, worst quality, bad quality, jpeg artifacts, very displeasing' },
+    { id: 0, name: 'Heavy', text: 'blurry, lowres, error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, multiple views, logo, too many watermarks, white blank page, blank page' },
+    { id: 1, name: 'Light', text: 'blurry, lowres, error, worst quality, bad quality, jpeg artifacts, very displeasing, white blank page, blank page' },
     { id: 4, name: '없음', text: '' },
   ],
   v4cur: [
-    { id: 0, name: 'Heavy', text: 'blurry, lowres, error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, logo, dated, signature, multiple views' },
-    { id: 1, name: 'Light', text: 'blurry, lowres, error, worst quality, bad quality, jpeg artifacts, very displeasing' },
+    { id: 0, name: 'Heavy', text: 'blurry, lowres, error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, logo, dated, signature, multiple views, gigantic breasts, white blank page, blank page' },
+    { id: 1, name: 'Light', text: 'blurry, lowres, error, worst quality, bad quality, jpeg artifacts, very displeasing, logo, dated, signature, white blank page, blank page' },
     { id: 4, name: '없음', text: '' },
   ],
   v3: [
     { id: 0, name: 'Heavy', text: 'lowres, {bad}, error, fewer, extra, missing, worst quality, jpeg artifacts, bad quality, watermark, unfinished, displeasing, chromatic aberration, signature, extra digits, artistic error, username, scan, [abstract]' },
     { id: 1, name: 'Light', text: 'lowres, jpeg artifacts, worst quality, watermark, blurry, very displeasing' },
     { id: 3, name: 'Human Focus', text: 'lowres, {bad}, error, fewer, extra, missing, worst quality, jpeg artifacts, bad quality, watermark, unfinished, displeasing, chromatic aberration, signature, extra digits, artistic error, username, scan, [abstract], bad anatomy, bad hands, @_@, mismatched pupils, heart-shaped pupils, glowing eyes' },
-    { id: 4, name: '없음', text: '' },
+    /* V3 계열의 '없음' 은 빈 값이 아니라 lowres 다. 다만 NAI 는 사용자가 네거티브를
+       직접 적었으면 이 값을 쓰지 않는다 → onlyIfEmpty. */
+    { id: 4, name: '없음', text: 'lowres', onlyIfEmpty: true },
   ],
   furry3: [
     { id: 0, name: 'Heavy', text: '{{worst quality}}, [displeasing], {unusual pupils}, guide lines, {{unfinished}}, {bad}, url, artist name, {{tall image}}, mosaic, {sketch page}, comic panel, impact (font), [dated], {logo}, ych, {what}, {where is your god now}, {distorted text}, repeated text, {floating head}, {1994}, {widescreen}, absolutely everyone, sequence, {compression artifacts}, hard translated, {cropped}, {commissioner name}, unknown text, high contrast' },
     { id: 1, name: 'Light', text: '{worst quality}, guide lines, unfinished, bad, url, tall image, widescreen, compression artifacts, unknown text' },
-    { id: 4, name: '없음', text: '' },
+    { id: 4, name: '없음', text: 'lowres', onlyIfEmpty: true },
   ],
 };
 /* ver: 50=V5, 45=V4.5, 40=V4, 30=V3.
@@ -72,9 +74,9 @@ const MODELS = {
      4.5 Curated 인페인트로 보낸다 (공식 저널: "The curated inpainting model is still cooking"). */
   'nai-diffusion-5-curated':       { name: 'NAI Diffusion V5 Curated', kind: '✨', scale: 7, ver: 50, inpaint: 'nai-diffusion-4-5-curated-inpainting',  quality: ', very aesthetic, masterpiece, no text', quality2: ', very aesthetic, amazing quality, no text', ucs: UC.v5 },
   'nai-diffusion-4-5-full':        { name: 'NAI Diffusion V4.5 Full', kind: '👤', scale: 5, ver: 45, inpaint: 'nai-diffusion-4-5-full-inpainting',    quality: ', very aesthetic, masterpiece, no text', ucs: UC.v45full },
-  'nai-diffusion-4-5-curated':     { name: 'NAI Diffusion V4.5 Curated', kind: '👤', scale: 5, ver: 45, inpaint: 'nai-diffusion-4-5-curated-inpainting', quality: ', masterpiece, no text, -0.8::feet::, rating:general', ucs: UC.v45cur },
+  'nai-diffusion-4-5-curated':     { name: 'NAI Diffusion V4.5 Curated', kind: '👤', scale: 5, ver: 45, inpaint: 'nai-diffusion-4-5-curated-inpainting', quality: ', very aesthetic, masterpiece, no text, -0.8::feet::, rating:general', ucs: UC.v45cur },
   'nai-diffusion-4-full':          { name: 'NAI Diffusion V4 Full', kind: '👤', scale: 5.5, ver: 40, inpaint: 'nai-diffusion-4-full-inpainting',        quality: ', no text, best quality, very aesthetic, absurdres', ucs: UC.v4full },
-  'nai-diffusion-4-curated-preview': { name: 'NAI Diffusion V4 Curated', kind: '👤', scale: 5.5, ver: 40, inpaint: 'nai-diffusion-4-curated-inpainting', quality: ', rating:general, amazing quality, very aesthetic, absurdres', ucs: UC.v4cur },
+  'nai-diffusion-4-curated-preview': { name: 'NAI Diffusion V4 Curated', kind: '👤', scale: 5.5, ver: 40, inpaint: 'nai-diffusion-4-curated-inpainting', quality: ', rating:general, best quality, very aesthetic, absurdres', ucs: UC.v4cur },
   'nai-diffusion-3':               { name: 'NAI Diffusion Anime V3', kind: '👤', scale: 5, ver: 30, inpaint: 'nai-diffusion-3-inpainting',            quality: ', best quality, amazing quality, very aesthetic, absurdres', ucs: UC.v3 },
   'nai-diffusion-furry-3':         { name: 'NAI Diffusion Furry V3', kind: '🐾', scale: 6.2, ver: 30, inpaint: 'nai-diffusion-furry-3-inpainting',      quality: ', {best quality}, {amazing quality}', ucs: UC.furry3 },
 };
@@ -83,7 +85,7 @@ const MODELS = {
    특히 V5 는 바이브 트랜스퍼·캐릭터 레퍼런스·노이즈 스케줄·Variety+ 를 받지 않는다. */
 const CAPS = {
   50: { vibe: false, charRef: false, noiseSchedule: false, cfgDelay: false, cfgRescale: true,
-        transparency: true, maxChars: 32, freePos: true, tokens: 1471, tokensCurated: 703 },
+        transparency: true, maxChars: 32, freePos: true, autoText: true, tokens: 1471, tokensCurated: 703 },
   45: { vibe: true, charRef: true, noiseSchedule: true, cfgDelay: true, cfgRescale: true,
         transparency: false, maxChars: 6, freePos: false, tokens: 512 },
   40: { vibe: true, charRef: false, noiseSchedule: true, cfgDelay: true, cfgRescale: true,
@@ -149,7 +151,7 @@ const DEFAULTS = {
   model: 'nai-diffusion-4-5-full', w: 832, h: 1216, n: 1,
   steps: 23, scale: 5, rescale: 0, sampler: 'k_euler_ancestral', schedule: 'karras',
   seed: '', randomSeed: true,
-  quality: true, ucPreset: 0, variety: false, decrisper: false, autoNsfw: true, stream: true, slashWild: false,
+  quality: true, ucPreset: 0, variety: false, decrisper: false, autoNsfw: true, stream: true, autoText: true, slashWild: false,
   smea: false, smeaDyn: false, ucStrength: 1, legacyUc: false, aiChoice: true,
   prompt: '', uc: '', chars: [],
   singleBox: false, secText: {}, autoMode: 'random', chunkCats: [],
@@ -688,7 +690,17 @@ function previewFinal() {
   // peek=true — 미리보기는 <*조각> 순차 카운터를 소모하지 않는다 (실제 생성 때 밀리면 안 됨)
   let p = expandAll(joinParts(st && st.prefix, getMainPrompt(), st && st.suffix), true);
   if (S.quality) p += getQuality(S.model);
-  let uc = joinParts(getUcText(S.model, ucIdx()), st && expandAll(st.uc || '', true), expandAll(S.uc.trim(), true));
+  const pvRest = joinParts(st && expandAll(st.uc || '', true), expandAll(S.uc.trim(), true));
+  const pvPre = ((MODELS[modelOf(S.model)] || {}).ucs || [])[ucIdx()] || {};
+  let uc = (pvPre.onlyIfEmpty && pvRest.trim()) ? pvRest : joinParts(getUcText(S.model, ucIdx()), pvRest);
+  /* V5 는 따옴표로 감싼 글자를 모아 "teXt: ..." 를 자동으로 붙인다 —
+     미리보기에도 보여야 사용자가 무엇이 나가는지 안다. */
+  if (capsOf(S.model).autoText && S.autoText !== false) {
+    const cs = (S.chars || []).filter(c => (c.prompt || '').trim())
+      .map(c => ({ prompt: expandAll(c.prompt.trim(), true), enabled: true,
+                   center: { x: c.x != null ? c.x : 0.5, y: c.y != null ? c.y : 0.5 } }));
+    p = autoTextV5(p, cs, !S.aiChoice && (S.chars || []).some(c => c.x != null));
+  }
   if (S.autoNsfw !== false && !NSFW_EXEMPT.includes(S.model) && getUcText(S.model, ucIdx()) && !p.toLowerCase().includes('nsfw') && !/^nsfw\b/i.test(uc)) uc = uc ? 'nsfw, ' + uc : 'nsfw';
   return { p, uc };
 }
@@ -1199,6 +1211,67 @@ const isV4 = () => MODELS[S.model].ver >= 40;
 // Variety+ (skip_cfg_above_sigma) — NAI 웹 실캡처 확정: V4.5 계열은 계수 58, 그 외 19. 반올림하지 않는다.
 // 검증: 1216×832 → 58 정확히, 1024×1024 → 59.04722600415217
 function varietySigma(m, w, h) { return (String(m).includes('nai-diffusion-4-5') ? 58 : 19) * Math.sqrt(w * h / (832 * 1216)); }
+
+/* ─── V5 autoText ───────────────────────────────────────────────
+   novelai.net 은 V5(능력표 autoText=true)에서만 프롬프트를 한 번 더 가공한다.
+   따옴표로 감싼 글자를 모아 "teXt: ..." 를 뒤에 붙인다 — V5 의 글자 그리기 기능이다.
+   (번들 모듈 51964 · 호출부 7416 청크. 우리 앱에는 이 단계가 아예 없었다.) */
+const AT_HAS_TEXT = /(?:^|\s|[,.:[\]{}、。])text:(?!:)/i;
+const AT_QUOTES = { '"': '"', '\u201C': '\u201D', '\u300C': '\u300D', "'": "'", '\u2018': '\u2019' };
+const AT_CJK = /[\u3000-\u303F\u3040-\u309F\u30A0-\u30FF\uFF00-\uFF9F\u4E00-\u9FAF\u3400-\u4DBF]/gu;
+
+/* 따옴표로 감싼 조각을 뽑는다.
+   아포스트로피(')는 앞이 구분자일 때만 여는 따옴표로 본다 —
+   안 그러면 another's 의 ' 가 열림으로 잡혀 엉뚱한 걸 뽑는다. */
+function atQuoted(str) {
+  const s = String(str || ''), out = [];
+  const wordish = ch => ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
+  const sepish = ch => ch === undefined || /[\s,.]/.test(ch);
+  let i = 0;
+  while (i < s.length) {
+    const close = AT_QUOTES[s[i]];
+    if (close === undefined || (s[i] === "'" && !sepish(s[i - 1]))) { i++; continue; }
+    const apo = (close === "'" || close === '\u2019');
+    let j = i + 1;
+    while (j < s.length && (s[j] !== close || (apo && wordish(s[j + 1])))) j++;
+    if (j >= s.length) { i++; continue; }
+    const inner = s.slice(i + 1, j).trim();
+    if (inner.length) out.push(inner);
+    i = j + 1;
+  }
+  return out;
+}
+/* 좌표를 쓸 때는 위→아래로 줄을 묶고 줄 안에서 왼→오른쪽으로 정렬한다 (번들의 b()) */
+function atOrder(chars) {
+  const rows = arr => {
+    if (arr.length <= 1) return [arr];
+    const span = arr[arr.length - 1].center.y - arr[0].center.y;
+    let gap = -1, at = 1;
+    for (let i = 1; i < arr.length; i++) {
+      const d = arr[i].center.y - arr[i - 1].center.y;
+      if (d > gap) { gap = d; at = i; }
+    }
+    if (span <= 0.15 && gap <= 0.1) return [arr];
+    return [...rows(arr.slice(0, at)), ...rows(arr.slice(at))];
+  };
+  return rows([...chars].sort((a, b) => a.center.y - b.center.y))
+    .flatMap(r => r.sort((a, b) => a.center.x - b.center.x));
+}
+function autoTextV5(prompt, chars, useCoords) {
+  const cs = (chars || []).filter(c => (c.enabled === undefined || c.enabled) && (c.prompt || '').length > 0);
+  if (AT_HAS_TEXT.test(prompt) || cs.some(c => AT_HAS_TEXT.test(c.prompt))) return prompt;
+  const groups = [atQuoted(prompt), ...(useCoords ? atOrder(cs) : cs).map(c => atQuoted(c.prompt))];
+  const all = groups.flat().join('');
+  // 일본어·중국어가 3할을 넘으면 각 묶음을 뒤집는다 (세로쓰기 순서)
+  const cjk = (all.match(AT_CJK) || []).length;
+  if (all.length && cjk / all.length > 0.3) groups.forEach(g => g.reverse());
+  const bits = groups.flat();
+  if (!bits.length) return prompt;
+  const head = String(prompt || '').replace(/[\s,]+$/, '');
+  const tail = 'teXt: ' + bits.join('\n\n');
+  return head.length > 0 ? head + ', ' + tail : tail;
+}
+
 function buildPayload(ov) {
   ov = ov || {};
   const m = ov.model || S.model, info = MODELS[m];
@@ -1211,7 +1284,12 @@ function buildPayload(ov) {
      않는 단순 전달용 힌트다. 앱은 플래그만 보내서 배경이 안 지워지고 있었다. */
   if (!ov.noQuality && capsOf(m).transparency && S.transparent) prompt += ', transparent background';
   if (S.quality && !ov.noQuality) prompt += getQuality(m);
-  let uc = ov.uc != null ? ov.uc : joinParts(getUcText(m, ucIdx(m)), ov.ucExtra != null ? ov.ucExtra : joinParts(style && expandAll(style.uc || ''), expandAll(S.uc.trim())));
+  /* onlyIfEmpty 프리셋(V3 계열의 '없음' = lowres)은 사용자가 네거티브를 직접 적었으면 쓰지 않는다.
+     novelai.net 도 그렇게 한다 — none 일 때는 사용자 입력이 있으면 프리셋 문구를 버린다. */
+  const ucRest = ov.ucExtra != null ? ov.ucExtra : joinParts(style && expandAll(style.uc || ''), expandAll(S.uc.trim()));
+  const ucPre = (info.ucs[ucIdx(m)] || {});
+  let uc = ov.uc != null ? ov.uc
+    : ((ucPre.onlyIfEmpty && ucRest.trim()) ? ucRest : joinParts(getUcText(m, ucIdx(m)), ucRest));
   // NAI 웹 숨은 규칙: 프롬프트에 nsfw 가 없으면 네거티브 맨 앞에 "nsfw, " 자동 추가 (Curated 모델·UC 프리셋 "없음" 제외)
   if (ov.uc == null && S.autoNsfw !== false && !NSFW_EXEMPT.includes(m) && getUcText(m, ucIdx(m)) && !prompt.toLowerCase().includes('nsfw') && !/^nsfw\b/i.test(uc)) uc = uc ? 'nsfw, ' + uc : 'nsfw';
   const caps = capsOf(m);
@@ -1239,12 +1317,20 @@ function buildPayload(ov) {
     })),
     negative_prompt: uc,
   };
+  /* NAI 는 능력표 autoText 가 켜진 모델(V5)에서만, v4_prompt 를 만들기 직전에 이걸 돌린다.
+     S.autoText 를 false 로 두면 끌 수 있다(설정). */
+  if (caps.autoText && S.autoText !== false && ov.prompt == null) {
+    prompt = autoTextV5(prompt, p.characterPrompts, useCoords);
+  }
   const body = { input: prompt, model: m, action: 'generate', parameters: p };
   if (info.ver >= 40) {
     p.v4_prompt = { caption: { base_caption: prompt, char_captions: p.characterPrompts.map(c => ({ char_caption: c.prompt, centers: [c.center] })) }, use_coords: useCoords, use_order: true };
     p.v4_negative_prompt = { caption: { base_caption: uc, char_captions: p.characterPrompts.map(c => ({ char_caption: c.uc, centers: [c.center] })) } };
-    // legacy_uc 는 NAI 웹이 보내지 않는다 → 켠 경우에만 명시적으로 추가
-    if (S.legacyUc) { p.legacy_uc = true; p.v4_negative_prompt.legacy_uc = true; }
+    /* legacy_uc 는 NAI 웹이 **항상** 보낸다 (기본 false).
+       예전 주석은 "보내지 않는다" 였는데 번들을 뜯어보니 사실이 아니었다 —
+       v4_negative_prompt.legacy_uc = legacy_uc 로 무조건 실린다. */
+    p.v4_negative_prompt.legacy_uc = !!S.legacyUc;
+    if (S.legacyUc) p.legacy_uc = true;
     /* V5 가 안 받는 것들. 보내면 거절당하거나 조용히 무시된다 —
        novelai.net 도 요청을 만들 때 능력치를 보고 같은 키들을 지운다. */
     if (!caps.noiseSchedule) delete p.noise_schedule;
@@ -2518,6 +2604,7 @@ function openSettings() {
       <div class="mtitle">태그 삽입</div>
       <label class="ck"><input type="checkbox" id="mUnderscore"> 태그를 언더스코어(_) 그대로 삽입 (기본: 공백 변환 — NAI 권장)</label>
       <label class="ck"><input type="checkbox" id="mShowChunks"> 청크 칩을 프롬프트 아래에 항상 표시 (기본: 칸에 커서가 있을 때만 떠서 보임)</label>
+      <label class="ck"><input type="checkbox" id="mAutoText"> V5 글자 그리기 자동 처리 <span class="hint">— 프롬프트에 따옴표로 감싼 글자가 있으면 novelai.net 처럼 <b>teXt:</b> 를 자동으로 붙입니다 (V5 전용). 끄면 붙이지 않습니다.</span></label>
       <label class="ck"><input type="checkbox" id="mStream"> 생성 중 실시간 미리보기 (msgpack 스트림) <span class="hint">— 끄면 다 그려진 뒤 한 번에 받습니다. NAI 가 스트림 형식을 바꿔 그림이 안 나올 때 여기서 끄세요.</span></label>
       <hr>
       <div class="mtitle">NAI 웹과 동일하게 재현하기</div>
@@ -2620,6 +2707,8 @@ function openSettings() {
       tg.appendChild(d);
     }
     const us = body.querySelector('#mUnderscore'); us.checked = !!S.tagUnderscore; us.onchange = () => { S.tagUnderscore = us.checked; save(); };
+    const atx = body.querySelector('#mAutoText'); atx.checked = S.autoText !== false;
+    atx.onchange = () => { S.autoText = atx.checked; save(); updatePreview(); toast(atx.checked ? 'V5 글자 그리기 자동 처리 켬' : '끔 — teXt: 를 붙이지 않습니다'); };
     const stm = body.querySelector('#mStream'); stm.checked = S.stream !== false;
     stm.onchange = () => { S.stream = stm.checked; save(); toast(stm.checked ? '실시간 미리보기 켬' : '실시간 미리보기 끔 — 다 그려진 뒤 한 번에 받습니다'); };
     const sc = body.querySelector('#mShowChunks'); sc.checked = !!S.showChunkBars; sc.onchange = () => { S.showChunkBars = sc.checked; document.body.classList.toggle('show-chunks', sc.checked); save(); };
