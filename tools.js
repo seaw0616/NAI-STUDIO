@@ -1517,6 +1517,177 @@ async function openMetaViewer(blob, title) {
   });
 }
 
+
+/* ─────────────── 이미지 메타 보기 / 가져다 쓰기 ─────────────── */
+
+/* 파일(PNG)이든 히스토리 항목이든 같은 모양으로 꺼낸다.
+   NAI PNG 는 Comment 청크에 JSON 이 들어 있고, 우리가 만든 이미지는 it.meta 에 있다. */
+async function readImageMeta(src) {
+  const out = { prompt: '', uc: '', params: {}, model: '', source: '', hasMeta: false, item: null };
+  if (src && src.meta) {                       // 히스토리 항목
+    out.item = src;
+    const p = (src.meta && src.meta.parameters) || {};
+    out.prompt = src.meta.input || p.prompt || '';
+    out.uc = p.negative_prompt || p.uc || '';
+    out.params = p; out.model = src.meta.model || src.model || '';
+    out.hasMeta = !!(out.prompt || Object.keys(p).length);
+    return out;
+  }
+  const u8 = new Uint8Array(await src.arrayBuffer());
+  const chunks = await pngTextChunks(u8);
+  const cmt = chunks.find(c => c.key === 'Comment');
+  out.source = (chunks.find(c => c.key === 'Source') || {}).text || '';
+  if (cmt) {
+    try {
+      const j = JSON.parse(cmt.text);
+      out.params = j;
+      out.prompt = j.prompt || (j.v4_prompt && j.v4_prompt.caption && j.v4_prompt.caption.base_caption) || '';
+      out.uc = j.uc != null ? j.uc
+        : (j.v4_negative_prompt && j.v4_negative_prompt.caption && j.v4_negative_prompt.caption.base_caption) || '';
+      out.hasMeta = true;
+    } catch (e) { /* 형식이 다르면 아래에서 '메타 없음' 으로 처리된다 */ }
+  }
+  out.model = out.source;
+  return out;
+}
+
+/* 텍스트를 청크로 저장한다. 이름이 겹치면 뒤에 번호를 붙인다. */
+function saveTextAsChunk(text, suggest, cat) {
+  text = String(text || '').trim();
+  if (!text) { toast('저장할 내용이 없습니다', 'err'); return; }
+  let name = prompt('청크 이름', suggest || '');
+  if (name == null) return;
+  name = name.trim().replace(/\s+/g, '_');
+  if (!name) { toast('이름이 필요합니다', 'err'); return; }
+  if (S.chunks.some(c => normKey(c.name) === normKey(name))) {
+    let n = 2;
+    while (S.chunks.some(c => normKey(c.name) === normKey(name + '_' + n))) n++;
+    name = name + '_' + n;
+  }
+  const c = cat || '기본';
+  addChunkCat(c);
+  S.chunks.push({ name, text, cat: c, createdAt: Date.now() });
+  untomb('chunk', name);
+  save(); renderChunkBar();
+  toast('청크로 저장했습니다: ' + name + ' (칩 띠에서 눌러 쓰세요)');
+}
+
+/* 이미지 한 장의 메타를 보여 주고, 거기서 바로 가져다 쓰게 한다.
+   nav 가 있으면 ‹ › 로 앞뒤 사진을 넘길 수 있다. */
+async function openImageMeta(src, opts) {
+  opts = opts || {};
+  let m;
+  try { m = await readImageMeta(src); }
+  catch (e) { toast('이미지를 읽지 못했습니다: ' + e.message, 'err'); return; }
+  const nav = opts.nav || null;
+  const url = (m.item && m.item.url) || (src instanceof Blob ? URL.createObjectURL(src) : '');
+  const tmpUrl = !m.item && url;
+
+  openModal(opts.title || '이미지 정보', body => {
+    const p = m.params || {};
+    const bits = [
+      m.model && ('모델 ' + String(m.model).replace('NovelAI Diffusion ', 'V')),
+      (p.width && p.height) ? (p.width + '×' + p.height) : (m.item ? m.item.w + '×' + m.item.h : ''),
+      p.seed != null ? ('시드 ' + p.seed) : (m.item && m.item.seed != null ? ('시드 ' + m.item.seed) : ''),
+      p.steps ? (p.steps + '스텝') : '',
+      p.scale != null ? ('가이던스 ' + p.scale) : '',
+      p.sampler || '',
+      p.noise_schedule || '',
+      p.cfg_rescale ? ('rescale ' + p.cfg_rescale) : '',
+    ].filter(Boolean);
+
+    body.innerHTML =
+      '<div class="im-wrap">' +
+        (url ? '<div class="im-pic"><img src="' + url + '"></div>' : '') +
+        '<div class="im-side">' +
+          (nav ? '<div class="row im-nav"><button class="btn sm" id="imPrev">‹ 이전</button>' +
+                 '<span class="hint" id="imPos">' + (nav.index + 1) + ' / ' + nav.total + '</span>' +
+                 '<button class="btn sm" id="imNext">다음 ›</button></div>' : '') +
+          '<div class="hint im-bits">' + bits.map(esc).join(' · ') + '</div>' +
+          (m.hasMeta ? '' : '<div class="hint" style="color:var(--red)">이 파일에는 생성 정보가 없습니다 (메타데이터가 지워졌거나 NAI 이미지가 아닙니다)</div>') +
+          '<div class="mtitle">프롬프트</div>' +
+          '<pre class="im-t" id="imP"></pre>' +
+          '<div class="row">' +
+            '<button class="btn sm primary" id="imPIns">프롬프트 칸에 넣기</button>' +
+            '<button class="btn sm" id="imPChunk">청크로 저장</button>' +
+            '<button class="btn sm" id="imPCopy">복사</button>' +
+          '</div>' +
+          '<div class="mtitle">네거티브</div>' +
+          '<pre class="im-t" id="imU"></pre>' +
+          '<div class="row">' +
+            '<button class="btn sm" id="imUIns">네거티브 칸에 넣기</button>' +
+            '<button class="btn sm" id="imUChunk">청크로 저장</button>' +
+            '<button class="btn sm" id="imUCopy">복사</button>' +
+          '</div>' +
+          '<div class="row" style="margin-top:8px">' +
+            '<button class="btn sm" id="imApply">⤴ 설정 전부 불러오기</button>' +
+            (m.item ? '<button class="btn sm" id="imMain">↗ 메인 뷰어에서 열기</button>' +
+                      '<button class="btn sm" id="imI2i">↪ i2i로</button>' +
+                      '<button class="btn sm" id="imFav"></button>' +
+                      '<button class="btn sm" id="imSave">💾 저장</button>' +
+                      '<button class="btn sm danger" id="imDel">🗑 삭제</button>' : '') +
+          '</div>' +
+          '<details class="im-raw"><summary class="hint">설정 전문 (JSON)</summary><pre class="im-t" id="imRaw"></pre></details>' +
+        '</div>' +
+      '</div>';
+
+    body.querySelector('#imP').textContent = m.prompt || '(없음)';
+    body.querySelector('#imU').textContent = m.uc || '(없음)';
+    body.querySelector('#imRaw').textContent = (() => {
+      try { return JSON.stringify(p, null, 2); } catch (e) { return String(p); }
+    })();
+
+    const cp = async (t, what) => {
+      try { await navigator.clipboard.writeText(t); toast(what + ' 복사됨'); }
+      catch (e) { toast('복사하지 못했습니다 — 직접 선택해 복사해 주세요', 'err'); }
+    };
+    body.querySelector('#imPIns').onclick = () => { closeModal(); insertIntoPrompt(m.prompt); };
+    body.querySelector('#imPChunk').onclick = () => saveTextAsChunk(m.prompt, '', '기본');
+    body.querySelector('#imPCopy').onclick = () => cp(m.prompt, '프롬프트');
+    body.querySelector('#imUIns').onclick = () => {
+      const ta = document.querySelector('#uc');
+      if (!ta) { toast('네거티브 칸을 찾지 못했습니다', 'err'); return; }
+      if (typeof setMode === 'function' && S.mode !== 'main') setMode('main');
+      ta.value = (ta.value.trim() ? ta.value.trim() + ', ' : '') + m.uc;
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      closeModal(); toast('네거티브 칸에 넣었습니다');
+    };
+    body.querySelector('#imUChunk').onclick = () => saveTextAsChunk(m.uc, '', '기본');
+    body.querySelector('#imUCopy').onclick = () => cp(m.uc, '네거티브');
+    body.querySelector('#imApply').onclick = () => {
+      if (m.item) { applyMeta(m.item.meta); closeModal(); if (typeof setMode === 'function') setMode('main'); }
+      else { importFromPng(src); }
+    };
+    if (m.item) {
+      const h = m.item;
+      body.querySelector('#imFav').textContent = h.fav ? '★ 즐겨찾기 해제' : '☆ 즐겨찾기';
+      body.querySelector('#imFav').onclick = () => { toggleFav(h); closeModal(); if (window.renderLibrary) renderLibrary(); };
+      body.querySelector('#imSave').onclick = () => saveItem(h, S.stripOnSave);
+      body.querySelector('#imMain').onclick = () => { closeModal(); setMode('main'); showImage(R.hist.indexOf(h)); };
+      body.querySelector('#imI2i').onclick = () => { setI2I(h.blob); closeModal(); setMode('main'); toast('i2i 소스로 설정됨'); };
+      body.querySelector('#imDel').onclick = () => { deleteItem(h); closeModal(); if (window.renderLibrary) renderLibrary(); };
+    }
+    if (nav) {
+      const go = d => { const t = nav.at(nav.index + d); if (t) openImageMeta(t.item, { title: opts.title, nav: t.nav }); };
+      body.querySelector('#imPrev').onclick = () => go(-1);
+      body.querySelector('#imNext').onclick = () => go(1);
+      body.querySelector('#imPrev').disabled = nav.index <= 0;
+      body.querySelector('#imNext').disabled = nav.index >= nav.total - 1;
+      /* ←/→ 로도 넘긴다. 창이 닫히면 리스너를 떼야 메인 뷰어의 ←/→ 와 겹치지 않는다. */
+      const key = e => {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        if (/^(INPUT|TEXTAREA)$/.test((e.target && e.target.tagName) || '')) return;
+        e.preventDefault(); e.stopPropagation(); go(e.key === 'ArrowRight' ? 1 : -1);
+      };
+      document.addEventListener('keydown', key, true);
+      R._imNavKey = () => document.removeEventListener('keydown', key, true);
+    }
+  }, true, () => {
+    if (R._imNavKey) { R._imNavKey(); R._imNavKey = null; }
+    if (tmpUrl) URL.revokeObjectURL(tmpUrl);
+  });
+}
+
 function openNaiImport() {
   openModal('NAI 웹 설정 그대로 재현하기', body => {
     body.innerHTML = `<div class="hint">NAI 웹에서 만든 PNG(원본, 메타데이터 있는 파일)를 넣으면 <b>프롬프트·네거티브·시드·스텝·가이던스·리스케일·샘플러·노이즈 스케줄·UC 프리셋·Variety·Decrisper·SMEA·캐릭터·크기·모델</b>이 전부 복원되고 시드가 고정됩니다.</div>
@@ -1524,9 +1695,13 @@ function openNaiImport() {
         <div class="drop" id="niDrop" style="width:100%;min-height:90px;font-size:13px">설정만 복원<br><span class="hint">PNG 드롭 또는 클릭</span></div>
         <div class="drop" id="niRepro" style="width:100%;min-height:90px;font-size:13px;border-color:var(--acc)">🔬 재현 검증<br><span class="hint">PNG 드롭 → 같은 설정·시드로 1장 생성해 픽셀 비교</span></div>
       </div>
+      <div class="drop" id="niPeek" style="width:100%;min-height:70px;font-size:13px">📄 먼저 보고 고르기<br><span class="hint">이미지 드롭 → 프롬프트·네거티브·설정을 보고, 필요한 것만 프롬프트 칸에 넣거나 청크로 저장</span></div>
       <div class="hint">"느낌 탓인지" 확인하려면 <b>재현 검증</b>을 쓰세요. 같은 시드에서 두 이미지가 (거의) 같으면 앱이 NAI 웹과 동일하게 동작하는 것이고, 평소 차이는 설정(가이던스·스텝·UC 프리셋·Variety·SMEA)이나 랜덤 시드 때문입니다. Opus 무료 조건(≤1024²·≤28스텝)이면 Anlas가 들지 않습니다.</div>`;
     const d = body.querySelector('#niDrop'); bindDrop(d, f => importFromPng(f)); d.onclick = () => pickFiles(false, f => importFromPng(f), 'image/png');
     const r = body.querySelector('#niRepro'); bindDrop(r, f => runRepro(f)); r.onclick = () => pickFiles(false, f => runRepro(f), 'image/png');
+    const pk = body.querySelector('#niPeek');
+    bindDrop(pk, f => openImageMeta(f, { title: '이미지 정보 — ' + (f.name || '') }));
+    pk.onclick = () => pickFiles(false, f => openImageMeta(f, { title: '이미지 정보 — ' + (f.name || '') }), 'image/*');
   });
 }
 /* 원본 PNG 의 Comment 를 NAI 가 받는 parameters 모양으로 되돌린다.

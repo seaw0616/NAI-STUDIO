@@ -698,3 +698,18 @@ input.sc-name-in:hover, input.sc-name-in:focus { border-bottom-color: var(--acc)
 .jdefects b { display: block; margin-bottom: 4px; }
 .jdefects ul { margin: 0; padding-left: 18px; }
 .jdefects li { margin: 2px 0; }
+
+/* ── 이미지 정보 화면 (메타 보기 + 가져다 쓰기) ── */
+.im-wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 14px; align-items: start; }
+.im-pic { position: sticky; top: 0; }
+.im-pic img { width: 100%; height: auto; border-radius: 10px; border: 1px solid var(--line2); display: block; }
+.im-side { min-width: 0; }
+.im-side .mtitle { margin-top: 10px; }
+.im-nav { justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.im-t { max-height: 190px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+        background: var(--bg2); border: 1px solid var(--line2); border-radius: 8px; padding: 8px;
+        font-size: 12px; line-height: 1.5; margin: 4px 0; user-select: text; }
+.im-bits { margin-bottom: 4px; }
+.im-raw { margin-top: 10px; }
+/* 좁은 화면에서는 위아래로 */
+@media (max-width: 860px) { .im-wrap { grid-template-columns: 1fr; } .im-pic { position: static; } }

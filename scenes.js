@@ -424,6 +424,16 @@ function renderSceneGallery(sc) {
     gal.appendChild(d);
   }
 }
+/* 라이브러리에서 사진을 눌렀을 때. 지금 걸러진 목록 안에서 ‹ › 로 넘길 수 있게 한다.
+   openImageMeta 가 없으면(옛 코드) 예전 라이트박스로 떨어진다. */
+function openLibImage(h) {
+  const list = LIB.items || [];
+  const i = list.indexOf(h);
+  if (i < 0 || typeof openImageMeta !== 'function') { openLightbox(h); return; }
+  const mkNav = k => ({ index: k, total: list.length,
+    at: j => (j < 0 || j >= list.length) ? null : { item: list[j], nav: mkNav(j) } });
+  openImageMeta(h, { title: '이미지 정보', nav: mkNav(i) });
+}
 function openLightbox(h) {
   openModal('', body => {
     body.innerHTML = `<div class="lb"><img src="${h.url}"></div>
@@ -492,8 +502,10 @@ function renderLibrary() {
   $('#libFav').style.color = LIB.fav ? 'var(--gold)' : '';
   const g = $('#libGrid'); g.innerHTML = '';
   if (!items.length) { g.innerHTML = '<div class="vempty"><div class="vempty-ico">🗂</div><div class="hint">이미지가 없습니다</div></div>'; updateLibSel(); return; }
-  for (let i = items.length - 1; i >= 0; i--) {
-    const h = items[i];
+  /* 화면에 뿌리는 순서(최신 먼저)를 그대로 들고 있는다.
+     사진을 눌렀을 때 ‹ › 로 넘기는 순서가 눈에 보이는 순서와 같아야 한다. */
+  LIB.items = items.slice().reverse();
+  for (const h of LIB.items) {
     const d = document.createElement('div'); d.className = 'scg-item' + (LIB.sel.has(h) ? ' sel' : '') + (h.saved ? ' saved' : '');
     d.innerHTML = `<img loading="lazy"><button class="scg-fav">${h.fav ? '★' : '☆'}</button><input type="checkbox" class="scg-ck">${h.saved ? '<span class="svd">💾</span>' : ''}<div class="scg-cap"></div>`;
     d.querySelector('img').src = h.url;
@@ -502,7 +514,7 @@ function renderLibrary() {
     d.querySelector('.scg-fav').onclick = e => { e.stopPropagation(); toggleFav(h); renderLibrary(); };
     const ck = d.querySelector('.scg-ck'); ck.checked = LIB.sel.has(h);
     ck.onclick = e => { e.stopPropagation(); if (ck.checked) LIB.sel.add(h); else LIB.sel.delete(h); d.classList.toggle('sel', ck.checked); updateLibSel(); };
-    d.onclick = () => openLightbox(h);
+    d.onclick = () => openLibImage(h);
     g.appendChild(d);
   }
   updateLibSel();

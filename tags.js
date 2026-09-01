@@ -444,14 +444,16 @@ function acRender(items, keepSel) {
 function acPick(i) {
   const t = AC.items[i]; if (!t || !AC.ta) return;
   const ta = AC.ta, seg = acSegment(ta);   // 저장된 옛 위치가 아니라 현재 커서 기준
-  /* 여러 줄짜리 조각은 이름만 넣으면 생성할 때 전문이 통째로 나간다
-     (기본으로 들어 있는 '작가랜덤' 은 118줄이다). 청크바에서 누를 때와 똑같이
-     <이름> 으로 넣어 매번 한 줄만 뽑히게 한다. */
+  /* '후보 목록' 청크만 <이름> 으로 넣는다 — 그래야 생성할 때마다 한 줄씩 뽑힌다
+     (기본으로 들어 있는 '작가랜덤' 은 114줄이다).
+     판정은 chunkIsFrag 한 곳에서만 한다. 예전엔 여기서 '줄이 2개 이상이면 조각' 이라는
+     옛 규칙을 따로 쓰고 있어서, 칩 클릭은 고쳐졌는데 자동완성으로 고르면 여전히
+     <로드> 가 들어가 캐릭터 묘사 9줄 중 한 줄만 나갔다. */
   let tag;
   if (t.chunk) {
     const c = S.chunks.find(x => normKey(x.name) === normKey(t.tag));
-    const multi = c && (c.text || '').split('\n').filter(x => x.trim()).length > 1;
-    tag = multi ? '<' + t.tag + '>' : t.tag;
+    const frag = c && typeof chunkIsFrag === 'function' && chunkIsFrag(c);
+    tag = frag ? '<' + t.tag + '>' : t.tag;
   } else tag = fmtTag(t.tag);
   // 뒤가 이미 쉼표로 시작하면 구분자를 붙이지 않는다 (중간 삽입 시 ", ," 로 빈 태그가 생기던 문제)
   const rest = ta.value.slice(seg.pos);
