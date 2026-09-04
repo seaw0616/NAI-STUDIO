@@ -230,6 +230,10 @@ async function runScenes(list) { // list: [{scene, count}]
       updateSceneRunUI(`${scene.name} ${i + 1}/${count}`);
       try { const it = await doGenerate(sceneOv(scene), '씬: ' + scene.name); if (!it) throw new Error('생성 실패'); SR.done++; errStreak = 0; }
       catch (e) {
+        /* 이미 요금이 빠진 실패는 다시 보내면 안 된다 — NAI 는 요청을 받아들인 시점에 Anlas 를 뺀다.
+           자동 짤뽑에는 이 보호가 있었는데 씬 러너에만 빠져 있어, 스트림이 끊기면 같은 장을 최대 5번
+           다시 보내고 그때마다 돈이 나갔다. */
+        if (e && e.charged) { toast('요금이 이미 빠진 실패입니다 — 더 쓰지 않도록 씬 생성을 멈춥니다: ' + (e.message || ''), 'err'); break outer; }
         errStreak++;
         const msg = String(e.message || '');
         if (errStreak >= 5 || msg.includes('토큰') || msg.includes('Anlas')) { toast('씬 생성 중지: ' + msg, 'err'); break outer; }
@@ -317,7 +321,9 @@ function renderSceneEditor() {
   sc.chars = sc.chars || [];
   const drawChars = () => { const l = $('#scCharList'); l.innerHTML = ''; sc.chars.forEach((c, i) => l.appendChild(charCard(c, i, () => { sc.chars.splice(i, 1); save(); drawChars(); }, () => save()))); };
   drawChars();
-  $('#scAddChar').onclick = () => { if (sc.chars.length >= 6) { toast('캐릭터는 최대 6명', 'err'); return; } sc.chars.push({ prompt: '', uc: '', x: null, y: null }); save(); drawChars(); };
+  $('#scAddChar').onclick = () => { const mx = capsOf(S.model).maxChars || 0;
+    if (!mx) { toast(MODELS[modelOf(S.model)].name + ' 은 캐릭터 프롬프트를 받지 않습니다', 'err'); return; }
+    if (sc.chars.length >= mx) { toast('이 모델은 캐릭터를 최대 ' + mx + '명까지 받습니다', 'err'); return; } sc.chars.push({ prompt: '', uc: '', x: null, y: null }); save(); drawChars(); };
   $('#scCharLib').onclick = () => openCharLibrary();
   $('#scName').oninput = () => { sc.name = $('#scName').value; save(); const it = $(`.sc-item[data-id="${sc.id}"] .sc-name`); if (it) it.textContent = sc.name; };
   sz.onchange = () => { sc.size = sz.value; save(); };
@@ -362,6 +368,9 @@ function renderSceneEditor() {
     pv.textContent = on ? (m ? '' : '(비어 있음)') : '씬 프롬프트만 사용';
   };
   buildMainSecs();
+  /* 밖(서버 복구 경로)에서도 이 칸들을 다시 그릴 수 있게 걸어 둔다.
+     씬 화면이 닫혀 있으면 아무 일도 하지 않는다. */
+  window.refreshSceneMirror = () => { try { if (document.querySelector('#scMainSecs')) buildMainSecs(); } catch (e) {} };
   mu.value = S.uc || '';
   mu.addEventListener('input', () => { S.uc = mu.value; const u = $('#uc'); if (u) { u.value = mu.value; if (u._hlSync) u._hlSync(); } save(); });
   drawMainPv();

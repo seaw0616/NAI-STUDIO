@@ -47,20 +47,19 @@ function renderChunkBar(target) {
       const b = document.createElement('button'); b.className = 'chip';
       b.innerHTML = `<span class="cdot" style="background:${catColor(cat)}"></span>`;
       b.appendChild(document.createTextNode(c.name));
-      /* '후보 목록' 만 <이름> 으로 넣는다 — 그래야 생성할 때마다 한 줄씩 뽑힌다.
-         예전엔 줄이 2개 이상이면 무조건 후보로 봐서, 캐릭터 하나를 여러 줄로 나눠 적은
-         청크가 매번 그중 한 줄만 실려 나갔다(결과가 통째로 어긋났다).
-         이제 chunkIsFrag 가 쉼표 이어쓰기 신호를 보고 가른다. */
+      /* 프롬프트 칸에는 언제나 '이름' 만 넣는다.
+         후보 목록도 이름만 적으면 생성할 때마다 한 줄씩 뽑힌다 — chunkMap() 이 안에서 <이름> 으로 넘긴다.
+         예전엔 후보 목록만 '<이름>' 형태로 넣어서 사용자 프롬프트에 <> 가 섞여 지저분했다. */
       const frag = typeof chunkIsFrag === 'function' && chunkIsFrag(c);
       const nline = typeof chunkLines === 'function' ? chunkLines(c).length : 1;
       b.title = c.text + (frag
-        ? '\n\n후보 목록 (' + nline + '줄) — 클릭: <이름> 삽입 (생성할 때마다 한 줄만 뽑힘) · Alt+클릭: 전체 내용 그대로'
+        ? '\n\n후보 목록 (' + nline + '줄) — 클릭: 이름 삽입 (생성할 때마다 한 줄만 뽑힘) · Alt+클릭: 전체 내용 그대로'
         : (nline > 1
           ? '\n\n한 덩어리 (' + nline + '줄) — 클릭: 이름 삽입 (생성 시 전체가 한 줄로 이어져 들어감) · Alt+클릭: 내용 그대로'
-          : '\n\n클릭: 청크 태그 삽입 (생성 시 내용으로 치환) · Alt+클릭: 내용 그대로')) + ' · 우클릭: 편집';
+          : '\n\n클릭: 청크 이름 삽입 (생성 시 내용으로 치환) · Alt+클릭: 내용 그대로')) + ' · 우클릭: 편집';
       b.onclick = e => { if (target && target.dataset.ta) R.lastTA = $('#' + target.dataset.ta);
-        insertIntoPrompt(e.altKey ? c.text : (frag ? '<' + c.name + '>' : c.name)); };
-      b.oncontextmenu = e => { e.preventDefault(); chunkMenu(e, c); };
+        insertIntoPrompt(e.altKey ? c.text : c.name); };
+      b.oncontextmenu = e => { e.preventDefault(); chunkMenu(e, c, target); };
       bar.appendChild(b);
     }
     cc.title = '우클릭: 분류 이름 변경/삭제';
@@ -97,7 +96,10 @@ function popMenu(e, items) {
   const esc = ev => { if (ev.key === 'Escape') { m.remove(); document.removeEventListener('keydown', esc); } };
   document.addEventListener('keydown', esc);
 }
-function chunkMenu(e, c) {
+/* 우클릭 메뉴도 그 띠가 가리키는 칸(data-ta)을 좌클릭과 똑같이 존중한다 —
+   예전엔 '마지막으로 만졌던 칸' 으로 넣어서 좌클릭과 다른 칸에 들어갔다. */
+function chunkMenu(e, c, target) {
+  if (target && target.dataset && target.dataset.ta) { const el = $('#' + target.dataset.ta); if (el) R.lastTA = el; }
   const cats = chunkCats().filter(k => k !== (c.cat || '기본'));
   popMenu(e, [
     ['✎ 편집', () => openChunkManager(c)],
@@ -152,11 +154,24 @@ function initChunkFloat() {
                                                  : Math.max(4, r.top - h - 4)) + 'px';
   };
   const hideSoon = () => { clearTimeout(hideT); hideT = setTimeout(() => { if (S.chunkFloatPin) return; const a = document.activeElement; if (fl.matches(':hover') || (a && a === curTa)) return; fl.hidden = true; }, 350); };
-  document.addEventListener('focusin', e => { if (e.target.matches && e.target.matches('textarea.ac')) { clearTimeout(hideT); show(e.target); } else if (!fl.contains(e.target)) hideSoon(); });
+  /* 청크를 넣을 수 있는 칸에서만 띄운다. 예전엔 자동완성이 붙은 칸이면 무엇이든(네거티브·모달 안 칸)
+     띠를 띄워서, 거기서 칩을 누르면 보고 있지도 않은 다른 칸에 조용히 들어갔다. */
+  document.addEventListener('focusin', e => { if (e.target.matches && e.target.matches('textarea.ac') && (typeof isPromptTarget !== 'function' || isPromptTarget(e.target))) { clearTimeout(hideT); show(e.target); } else if (!fl.contains(e.target)) hideSoon(); });
   document.addEventListener('focusout', e => { if (e.target.matches && e.target.matches('textarea.ac')) hideSoon(); });
   document.addEventListener('mousedown', e => { if (!fl.hidden && !fl.contains(e.target) && !(e.target.matches && e.target.matches('textarea.ac'))) hideSoon(); });
   fl.addEventListener('mousedown', e => { if (!e.target.closest('input')) e.preventDefault(); }); // 칩 클릭 시 포커스 유지
-  window.addEventListener('scroll', () => { if (!fl.hidden && curTa) show(curTa); }, true);
+  /* 스크롤마다 칩을 전부 다시 만들 이유가 없다 — 자리만 옮기면 된다.
+     예전엔 스크롤 한 번에 (칩 수 × 청크 수) 만큼 DOM 을 새로 만들어 스크롤이 끊겼다. */
+  let _mv = 0;
+  const moveOnly = () => {
+    if (fl.hidden || !curTa || !document.contains(curTa)) return;
+    const r = curTa.getBoundingClientRect(), h = fl.offsetHeight || 120;
+    fl.style.left = Math.max(8, Math.min(r.left, innerWidth - 420)) + 'px';
+    fl.style.width = Math.max(240, Math.min(r.width, 520)) + 'px';
+    const below = innerHeight - r.bottom - 8, above = r.top - 8;
+    fl.style.top = (below >= h || below >= above ? Math.min(r.bottom + 4, innerHeight - h - 4) : Math.max(4, r.top - h - 4)) + 'px';
+  };
+  window.addEventListener('scroll', () => { if (_mv) return; _mv = requestAnimationFrame(() => { _mv = 0; moveOnly(); }); }, true);
   window.addEventListener('resize', () => { if (!fl.hidden && curTa) show(curTa); });
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && !S.chunkFloatPin) fl.hidden = true; });
   // 📌 고정: 켜면 포커스가 빠져도 띠가 남음
@@ -180,7 +195,11 @@ function initChunkFloat() {
   show = ta => { origShow(ta); if (!fl.hidden) { fl.prepend(closeBtn()); fl.prepend(window._chunkFloatPin()); } };
 }
 function saveSelectionAsChunk() {
-  const ta = activeTA();
+  /* 지금 글자를 고르고 있는 칸이 있으면 그 칸에서 가져온다 — **읽기** 는 네거티브·모달 칸이라도 안전하다.
+     activeTA() 는 '넣을 곳' 을 고르는 함수라 네거티브를 걸러내는데, 그걸 그대로 쓰면
+     네거티브 칸에서 ＋청크를 눌렀을 때 보고 있지도 않은 프롬프트 칸의 옛 선택이 저장됐다. */
+  const ae = document.activeElement;
+  const ta = (ae && ae.tagName === 'TEXTAREA' && document.contains(ae)) ? ae : activeTA();
   if (!ta) { toast('프롬프트 칸을 먼저 클릭하세요', 'err'); return; }
   let sel = ta.value.slice(ta.selectionStart, ta.selectionEnd).trim();
   const wholePrompt = !sel; if (wholePrompt) sel = ta.value.trim();
@@ -296,7 +315,9 @@ function openChunkManager(focus, onlyCat) {
           };
           drawMode();
           bindCatSelect(d.querySelector('#ckc_' + i), v => { c.cat = v; save(); renderChunkBar(); draw(); });
-          d.querySelector('button.ic').onclick = () => { tomb('chunk', c.name); S.chunks.splice(i, 1); save(); renderChunkBar(); draw(); };
+          /* '그린 시점의 인덱스' 로 지우면 안 된다 — 창이 열려 있는 동안 밖에서 청크가 늘거나 줄면
+             엉뚱한 청크가 지워진다. 항목 자체를 찾아서 지운다. */
+          d.querySelector('button.ic').onclick = () => { tomb('chunk', c.name); const k = S.chunks.indexOf(c); if (k >= 0) S.chunks.splice(k, 1); save(); renderChunkBar(); draw(); };
           rows.appendChild(d);
           if (focus && focus === c) setTimeout(() => t.focus(), 30);
         });
@@ -313,7 +334,17 @@ function openChunkManager(focus, onlyCat) {
       // 이름 비교는 프롬프트에서 청크를 찾을 때와 같은 기준이어야 한다 (대소문자·밑줄 무시).
       // 그냥 === 로 보면 "MyChunk" 와 "mychunk" 가 둘 다 들어가고, 실제로는 하나만 쓰인다.
       try { const arr = JSON.parse(await f.text()); if (!Array.isArray(arr)) throw 0;
-        for (const c of arr) if (c.name) { const ex = S.chunks.find(x => normKey(x.name) === normKey(c.name)); if (ex) Object.assign(ex, c); else S.chunks.push({ name: c.name, text: c.text || '', cat: c.cat || '', createdAt: Date.now() }); } save(); draw(); renderChunkBar(); toast('청크 ' + arr.length + '개 가져옴'); }
+        for (const c of arr) if (c.name) {
+          const ex = S.chunks.find(x => normKey(x.name) === normKey(c.name));
+          /* frag(사용자가 직접 정한 '한 덩어리/후보 목록')를 반드시 같이 옮긴다.
+             예전엔 name·text·cat·createdAt 만 담아서, 내보냈다 다시 가져오면 자동 판별로 돌아가
+             같은 청크가 반대로 동작했다(전부 들어가야 할 것이 한 줄만 나가거나 그 반대). */
+          const rec = { name: c.name, text: c.text || '', cat: c.cat || '기본' };
+          if (typeof c.frag === 'boolean') rec.frag = c.frag;
+          if (ex) { Object.assign(ex, rec); if (typeof c.frag !== 'boolean') delete ex.frag; }
+          else S.chunks.push({ ...rec, createdAt: c.createdAt || Date.now() });
+          addChunkCat(rec.cat);
+        } save(); draw(); renderChunkBar(); toast('청크 ' + arr.length + '개 가져옴'); }
       catch (e) { toast('청크 파일이 아닙니다', 'err'); }
     }, '.json');
   }, true);
@@ -1407,19 +1438,115 @@ async function runDirector(req, label, srcItem) {
   finally { R.gen = false; $('#btnGen').disabled = false; }
 }
 
+/* 메타에서 캐릭터 목록을 꺼낸다. 우리 이미지는 characterPrompts 에, novelai.net PNG 는
+   v4_prompt.caption.char_captions (+ v4_negative_prompt 쪽 char_captions) 에 들어 있다.
+   예전엔 characterPrompts 만 봐서 novelai.net 에서 받은 그림은 캐릭터가 전부 사라졌다. */
+function metaUseCoords(p) { p = p || {}; return !!(p.use_coords != null ? p.use_coords : (p.v4_prompt && p.v4_prompt.use_coords)); }
+function metaChars(p) {
+  p = p || {};
+  const useCoords = metaUseCoords(p);
+  const pos = c => (useCoords && c && c.x != null) ? { x: c.x, y: c.y } : { x: null, y: null };
+  if (Array.isArray(p.characterPrompts))
+    return p.characterPrompts.filter(c => c && (c.enabled === undefined || c.enabled) && (c.prompt || '').length)
+      .map(c => ({ prompt: c.prompt || '', uc: c.uc || '', ...pos(c.center) }));
+  const cc = (p.v4_prompt && p.v4_prompt.caption && p.v4_prompt.caption.char_captions) || [];
+  const nc = (p.v4_negative_prompt && p.v4_negative_prompt.caption && p.v4_negative_prompt.caption.char_captions) || [];
+  return cc.map((c, i) => ({ prompt: (c && c.char_caption) || '', uc: (nc[i] && nc[i].char_caption) || '', ...pos(c && c.centers && c.centers[0]) }))
+    .filter(c => c.prompt.length > 0);
+}
+const NO_META_MSG = '생성 정보가 없는 파일입니다 — 텍스트 메타도, 알파 채널에 숨은 메타도 없습니다. 디스코드·카톡·일부 저장 도구를 거치면 지워집니다. novelai.net 에서 직접 받은 원본 PNG 나 이 앱의 히스토리 이미지를 쓰세요';
+
+/* 메타의 최종 프롬프트(서버에 보낸 그대로)에서 앱이 자동으로 붙이는 것 — 품질 태그 · 투명 배경 ·
+   V5 'teXt:' 꼬리 — 를 떼어낸 "사용자가 쓴 프롬프트" 와, 그때 켜져 있던 토글을 되짚는다.
+   불러오기(applyMeta)와 정보 화면(readImageMeta)이 같이 쓴다. */
+function cleanMetaPrompt(p, modelId, rawPrompt) {
+  p = p || {};
+  const info = MODELS[modelId] || MODELS[S.model]; const caps = capsOf(modelId);
+  /* 캐릭터를 먼저 꺼낸다 — 'teXt:' 꼬리를 되돌리려면 캐릭터 프롬프트의 따옴표 글자까지 알아야 한다 */
+  const chars = metaChars(p);
+  const useCoords = metaUseCoords(p);
+  let prompt = String(rawPrompt || '');
+  /* ① V5 가 자동으로 붙인 'teXt: …' 꼬리 — 앱이 생성할 때 다시 붙이므로 떼어낸다 (novelai.net 도 그렇게 한다) */
+  /* 'V5 글자 그리기 자동 처리' 를 꺼 뒀다면 생성할 때 다시 붙여 주지 않는다 —
+     그때 떼면 그 프롬프트로 다시 뽑을 때 글자가 통째로 사라진다. */
+  if (caps.autoText && S.autoText !== false)
+    prompt = stripAutoTextV5(prompt, chars.map(c => ({ prompt: c.prompt, enabled: true, center: { x: c.x != null ? c.x : 0.5, y: c.y != null ? c.y : 0.5 } })), useCoords);
+  /* ② 품질 태그 — addQualityTag 가 넣은 자리('text:' 앞 · '|' 첫 조각)에서 떼어낸다.
+     예전엔 맨 끝(endsWith)만 봐서, 'text:' 가 있거나 teXt: 꼬리가 붙은 그림은 품질 태그가
+     프롬프트에 그대로 남고 토글만 꺼졌다 → 다시 생성하면 두 벌로 붙었다.
+     서버가 Comment 에 되돌려 준 힌트(tag_hint_qt: 0 없음 · 1 standard · 3 light,
+     tag_hint_transparent_background)가 있으면 그 프리셋부터 맞춰 본다 (novelai.net 과 같은 순서). */
+  const std = qNorm(info.quality), light = qNorm(info.quality2), cur = qNorm(getQuality(modelId));
+  const list = [];
+  if (cur && cur !== std && cur !== light) list.push({ q: cur, id: 1, keep: true });   // 직접 고친 품질 문구
+  if (std) list.push({ q: std, id: 1 });
+  if (light) list.push({ q: light, id: 3 });
+  const transp = p.tag_hint_transparent_background === true || p.straight_alpha === true;
+  const hint = typeof p.tag_hint_qt === 'number' ? p.tag_hint_qt : null;
+  const tv = x => ({ q: x.q ? 'transparent background, ' + x.q : 'transparent background', id: x.id, keep: x.keep, t: true });
+  const hinted = hint ? list.find(x => x.id === hint && !x.keep) : null;
+  let cands = [];
+  if (hint === 0 || (hint != null && !hinted)) cands = transp ? [tv({ q: '', id: 0 })] : [];   // 힌트가 '없음' — 뗄 게 없다
+  else {
+    if (hinted) cands.push(...(transp ? [tv(hinted)] : []), hinted);
+    if (transp) cands.push(...list.map(tv), tv({ q: '', id: 0 }));
+    cands.push(...list);
+  }
+  let hit = null;
+  for (const c of cands) { const r = stripQualityTag(prompt, c.q, caps); if (r !== null) { prompt = r; hit = c; break; } }
+  return { prompt, chars, useCoords, quality: !!(hit && hit.id), transparent: !!(hit && hit.t), qid: hit ? hit.id : 0, keep: !!(hit && hit.keep), stripped: prompt !== String(rawPrompt || '') };
+}
+/* 네거티브에서 UC 프리셋 문구를 찾아 떼어낸다 → { uc: 나머지, presetIdx }. 서버 힌트(tag_hint_uc_preset)가 있으면 그것부터. */
+function cleanMetaUc(p, modelId, uc) {
+  p = p || {}; uc = String(uc || '');
+  const info = MODELS[modelId] || MODELS[S.model];
+  let presetIdx = -1;
+  /* onlyIfEmpty 프리셋(V3 '없음' = lowres)은 사용자 입력이 있으면 안 붙는 값이라, 정확히 그 값일 때만 프리셋으로 본다.
+     'lowres, bad hands' 에서 lowres 를 떼면 다시 생성할 때 lowres 가 빠진다. */
+  const ucMatch = (u, t) => !!t && (u.onlyIfEmpty ? uc === t : uc.startsWith(t));
+  const ucHint = typeof p.tag_hint_uc_preset === 'number' ? p.tag_hint_uc_preset : null;
+  const hintIdx = ucHint != null ? info.ucs.findIndex(u => UC_HINT[u.id] === ucHint) : -1;
+  if (hintIdx >= 0 && !getUcText(modelId, hintIdx) && !info.ucs[hintIdx].text) presetIdx = hintIdx;   // '없음'
+  else if (hintIdx >= 0 && [getUcText(modelId, hintIdx), info.ucs[hintIdx].text].some(t => ucMatch(info.ucs[hintIdx], t))) presetIdx = hintIdx;
+  else {
+    if (p.ucPreset != null) presetIdx = info.ucs.findIndex(u => u.id === p.ucPreset);
+    // 텍스트가 일치하는 프리셋 중 가장 긴 것 (Heavy가 Human Focus의 접두어라서).
+    // 프리셋을 편집한 경우도 잡도록 "지금 쓰는 값"을 먼저 보고 내장 텍스트로 폴백한다.
+    let byText = -1, bestLen = 0;
+    info.ucs.forEach((u, i) => {
+      for (const t of [getUcText(modelId, i), u.text]) {
+        if (ucMatch(u, t) && t.length > bestLen) { bestLen = t.length; byText = i; break; }
+      }
+    });
+    if (byText >= 0) presetIdx = byText;
+  }
+  if (presetIdx >= 0) {
+    for (const t of [getUcText(modelId, presetIdx), info.ucs[presetIdx].text]) {
+      if (ucMatch(info.ucs[presetIdx], t)) { uc = uc.slice(t.length).replace(/^,\s*/, ''); break; }
+    }
+  }
+  else presetIdx = info.ucs.length - 1; // 없음
+  return { uc, presetIdx };
+}
+
 /* ─────────────── 메타 → 설정 적용 (NAI PNG 재현) ─────────────── */
 function applyMeta(meta) {
   if (!meta) { toast('설정 정보가 없습니다', 'err'); return; }
   const p = meta.parameters || {};
+  /* 생성 정보가 없는 이미지(스마트 툴로 올린 외부 PNG, 옛 백업의 빈 메타)에서 ⤴ 를 누르면
+     예전엔 빈 값들이 그대로 적용돼 **지금 쓰던 프롬프트·캐릭터·네거티브가 통째로 지워졌다**.
+     되돌릴 방법도 없었다 — 아무것도 안 바꾸고 알리기만 한다. */
+  const anyPrompt = String(meta.input || (p.v4_prompt && p.v4_prompt.caption && p.v4_prompt.caption.base_caption) || p.prompt || '').trim();
+  if (!anyPrompt && p.width == null && p.steps == null && !p.sampler && !p.characterPrompts) {
+    toast('이 이미지에는 생성 정보가 없습니다 — 지금 설정은 그대로 둡니다', 'err'); return;
+  }
   const m = baseModelOf(meta.model); if (MODELS[m]) S.model = m;
   const info = MODELS[S.model];
-  let prompt = meta.input || (p.v4_prompt && p.v4_prompt.caption.base_caption) || '';
-  // 퀄리티 태그를 편집(오버라이드)한 경우까지 잘라내도록 "지금 쓰는 값"과 "내장 기본값" 둘 다 시도.
-  // 잘라내지 못하면 프롬프트에 이미 들어있는 것으로 보고 토글은 끈다 (두 벌로 붙는 것 방지)
-  const qCands = [getQuality(S.model), MODELS[S.model].quality].filter(Boolean);
-  const qHit = qCands.find(c => prompt.endsWith(c));
-  if (qHit) { prompt = prompt.slice(0, -qHit.length); S.quality = true; }
-  else S.quality = false;
+  const cm = cleanMetaPrompt(p, S.model, meta.input || (p.v4_prompt && p.v4_prompt.caption.base_caption) || '');
+  const { chars, useCoords } = cm; let prompt = cm.prompt;
+  S.quality = cm.quality;                 // 못 뗐으면 프롬프트에 이미 들어 있는 것 — 토글은 끈다 (두 벌 방지)
+  S.transparent = cm.transparent;
+  if (cm.qid && !cm.keep) { S.ov = S.ov || {}; S.ov[S.model] = S.ov[S.model] || {}; if (cm.qid === 3) S.ov[S.model].q = info.quality2; else delete S.ov[S.model].q; }
   setPromptText(prompt); S.activeStyle = null;
   let uc = p.negative_prompt != null ? p.negative_prompt : (p.v4_negative_prompt ? p.v4_negative_prompt.caption.base_caption : '');
   /* NAI 웹이 자동으로 붙인 "nsfw, " 는 떼어내고(앱이 같은 규칙으로 다시 붙임),
@@ -1441,24 +1568,8 @@ function applyMeta(meta) {
     if (!getUcText(S.model, ucIdx(S.model))) return;             // UC 프리셋 "없음" — 원래 대상이 아니다
     S.autoNsfw = hadNsfw;
   };
-  let presetIdx = -1;
-  if (p.ucPreset != null) presetIdx = info.ucs.findIndex(u => u.id === p.ucPreset);
-  // 텍스트가 일치하는 프리셋 중 가장 긴 것 (Heavy가 Human Focus의 접두어라서).
-  // 프리셋을 편집한 경우도 잡도록 "지금 쓰는 값"을 먼저 보고 내장 텍스트로 폴백한다.
-  let byText = -1, bestLen = 0;
-  info.ucs.forEach((u, i) => {
-    for (const t of [getUcText(S.model, i), u.text]) {
-      if (t && uc.startsWith(t) && t.length > bestLen) { bestLen = t.length; byText = i; break; }
-    }
-  });
-  if (byText >= 0) presetIdx = byText;
-  if (presetIdx >= 0) {
-    S.ucPreset = presetIdx;
-    for (const t of [getUcText(S.model, presetIdx), info.ucs[presetIdx].text]) {
-      if (t && uc.startsWith(t)) { uc = uc.slice(t.length).replace(/^,\s*/, ''); break; }
-    }
-  }
-  else S.ucPreset = info.ucs.length - 1; // 없음
+  const cu = cleanMetaUc(p, S.model, uc);
+  S.ucPreset = cu.presetIdx; uc = cu.uc;
   S.uc = uc;
   nsfwDecide();     // 프리셋이 정해진 뒤에 판단한다 (프리셋이 "없음" 이면 건드리지 않는다)
   if (p.width) S.w = p.width; if (p.height) S.h = p.height;
@@ -1471,36 +1582,45 @@ function applyMeta(meta) {
   S.smea = !!p.sm; S.smeaDyn = !!p.sm_dyn;
   if (p.uncond_scale != null) S.ucStrength = p.uncond_scale;
   S.legacyUc = !!p.legacy_uc;
-  S.aiChoice = !p.use_coords;
-  if (Array.isArray(p.characterPrompts)) S.chars = p.characterPrompts.map(c => ({ prompt: c.prompt || '', uc: c.uc || '', x: (p.use_coords && c.center) ? c.center.x : null, y: (p.use_coords && c.center) ? c.center.y : null }));
+  S.aiChoice = !useCoords;
+  /* 캐릭터는 통째로 바꾼다 — 예전엔 characterPrompts 가 없으면 이전 캐릭터가 그대로 남았다 */
+  S.chars = chars.map(c => ({ prompt: c.prompt, uc: c.uc, x: c.x, y: c.y }));
   save(); syncUI(); renderChars();
   toast('프롬프트·설정을 불러왔습니다 (시드 고정됨)');
 }
 async function importFromPng(blob) {
   const chunks = await pngTextChunks(new Uint8Array(await blob.arrayBuffer()));
-  const comment = chunks.find(c => c.key === 'Comment');
-  if (!comment) { toast('NAI 메타데이터(Comment)가 없는 파일입니다', 'err'); return; }
+  let comment = chunks.find(c => c.key === 'Comment');
+  let src = (chunks.find(c => c.key === 'Source') || {}).text || '';
+  if (!comment) {   // 텍스트 청크가 지워졌어도 알파 채널에 숨은 메타(stealth)가 남아 있으면 거기서 읽는다
+    const st = await readStealthMeta(blob).catch(() => null);
+    if (st && st.Comment) { comment = { key: 'Comment', text: String(st.Comment) }; src = String(st.Source || ''); toast('텍스트 메타가 없어 알파 채널에 숨은 메타에서 읽었습니다'); }
+  }
+  if (!comment) { toast(NO_META_MSG, 'err'); return; }
   let j; try { j = JSON.parse(comment.text); } catch (e) { toast('메타데이터 파싱 실패', 'err'); return; }
-  const src = (chunks.find(c => c.key === 'Source') || {}).text || '';
-  let model = S.model;
-  /* Source 에는 "curated" 라는 단어가 안 들어간다. 실제 형식은
-     "NovelAI Diffusion V5 DB276663" 처럼 모델 이름 + 8자리 해시다.
-     그래서 /curated/ 로 가르던 예전 코드는 Curated 분기가 통째로 죽어 있었고,
-     Curated 로 뽑은 그림을 불러오면 전부 Full 로 잡혔다.
-     NAI 웹과 같게 해시로 가른다 — 목록에 있는 것만 Full, 나머지는 Curated. */
+  applyMeta({ model: modelFromSource(src), input: j.prompt || (j.v4_prompt && j.v4_prompt.caption.base_caption) || '', parameters: { ...j, negative_prompt: j.uc != null ? j.uc : (j.v4_negative_prompt ? j.v4_negative_prompt.caption.base_caption : '') } });
+  closeModal();
+}
+/* PNG 의 Source 문자열 → 모델 id.
+   Source 에는 "curated" 라는 단어가 안 들어간다. 실제 형식은
+   "NovelAI Diffusion V5 DB276663" 처럼 모델 이름 + 8자리 해시다.
+   그래서 /curated/ 로 가르던 예전 코드는 Curated 분기가 통째로 죽어 있었고,
+   Curated 로 뽑은 그림을 불러오면 전부 Full 로 잡혔다.
+   NAI 웹과 같게 해시로 가른다 — 목록에 있는 것만 Full, 나머지는 Curated. */
+function modelFromSource(src) {
+  src = String(src || '');
   const FULL_HASH = {
     5: /\b(657484A5|0ADF9AB7)\b/i,
     45: /\b(4BDE2A90|1229B44F|B9F340FD|F3D95188)\b/i,
     40: /\b(37442FCA|4F49EC75|CA4B7203|79F47848|F6302A9D)\b/i,
   };
   // V5 를 먼저 본다 — "V4.5" 검사보다 앞서야 한다 (둘 다 걸리는 문자열이 오는 경우가 있다)
-  if (/\bV?5\b/i.test(src) && !/4\.5/.test(src)) model = FULL_HASH[5].test(src) ? 'nai-diffusion-5-full' : 'nai-diffusion-5-curated';
-  else if (/4\.5/.test(src)) model = FULL_HASH[45].test(src) ? 'nai-diffusion-4-5-full' : 'nai-diffusion-4-5-curated';
-  else if (/Diffusion V4/i.test(src)) model = FULL_HASH[40].test(src) ? 'nai-diffusion-4-full' : 'nai-diffusion-4-curated-preview';
-  else if (/furry/i.test(src)) model = 'nai-diffusion-furry-3';
-  else if (/V3/i.test(src)) model = 'nai-diffusion-3';
-  applyMeta({ model, input: j.prompt || (j.v4_prompt && j.v4_prompt.caption.base_caption) || '', parameters: { ...j, negative_prompt: j.uc != null ? j.uc : (j.v4_negative_prompt ? j.v4_negative_prompt.caption.base_caption : '') } });
-  closeModal();
+  if (/\bV?5\b/i.test(src) && !/4\.5/.test(src)) return FULL_HASH[5].test(src) ? 'nai-diffusion-5-full' : 'nai-diffusion-5-curated';
+  if (/4\.5/.test(src)) return FULL_HASH[45].test(src) ? 'nai-diffusion-4-5-full' : 'nai-diffusion-4-5-curated';
+  if (/Diffusion V4/i.test(src)) return FULL_HASH[40].test(src) ? 'nai-diffusion-4-full' : 'nai-diffusion-4-curated-preview';
+  if (/furry/i.test(src)) return 'nai-diffusion-furry-3';
+  if (/V3/i.test(src)) return 'nai-diffusion-3';
+  return S.model;
 }
 async function openMetaViewer(blob, title) {
   const chunks = await pngTextChunks(new Uint8Array(await blob.arrayBuffer()));
@@ -1523,20 +1643,35 @@ async function openMetaViewer(blob, title) {
 /* 파일(PNG)이든 히스토리 항목이든 같은 모양으로 꺼낸다.
    NAI PNG 는 Comment 청크에 JSON 이 들어 있고, 우리가 만든 이미지는 it.meta 에 있다. */
 async function readImageMeta(src) {
-  const out = { prompt: '', uc: '', params: {}, model: '', source: '', hasMeta: false, item: null };
+  const out = { prompt: '', uc: '', rawPrompt: '', rawUc: '', chars: [], params: {}, model: '', modelId: '', source: '', hasMeta: false, item: null, viaStealth: false, stripped: false };
+  /* 보여주고 넣는 값은 "사용자가 쓴 것" — 품질 태그·teXt: 꼬리·UC 프리셋은 앱이 생성할 때 다시 붙이므로 뺀다.
+     예전엔 서버에 보낸 최종 문자열을 그대로 넣어서, 다시 생성하면 품질 태그가 두 벌로 붙었다. 원문은 rawPrompt 에. */
+  const clean = (p, modelId) => {
+    out.rawPrompt = out.prompt; out.rawUc = out.uc;
+    /* 자동으로 붙은 "nsfw, " 는 프리셋 문구 앞에 오므로 먼저 떼야 프리셋이 맞는다 (applyMeta 와 같은 순서) */
+    const cm = cleanMetaPrompt(p, modelId, out.prompt), cu = cleanMetaUc(p, modelId, String(out.uc || '').replace(/^nsfw(,\s*|$)/i, ''));
+    out.prompt = cm.prompt; out.uc = cu.uc; out.chars = cm.chars;
+    out.stripped = cm.stripped || out.uc !== out.rawUc;
+  };
   if (src && src.meta) {                       // 히스토리 항목
     out.item = src;
     const p = (src.meta && src.meta.parameters) || {};
     out.prompt = src.meta.input || p.prompt || '';
     out.uc = p.negative_prompt || p.uc || '';
     out.params = p; out.model = src.meta.model || src.model || '';
+    out.modelId = baseModelOf(out.model); if (!MODELS[out.modelId]) out.modelId = S.model;
     out.hasMeta = !!(out.prompt || Object.keys(p).length);
+    if (out.hasMeta) clean(p, out.modelId);
     return out;
   }
   const u8 = new Uint8Array(await src.arrayBuffer());
   const chunks = await pngTextChunks(u8);
-  const cmt = chunks.find(c => c.key === 'Comment');
+  let cmt = chunks.find(c => c.key === 'Comment');
   out.source = (chunks.find(c => c.key === 'Source') || {}).text || '';
+  if (!cmt) {   // 텍스트 청크가 지워졌어도 알파 채널에 숨은 메타(stealth)가 남아 있으면 거기서 읽는다
+    const st = await readStealthMeta(src).catch(() => null);
+    if (st && st.Comment) { cmt = { key: 'Comment', text: String(st.Comment) }; out.source = String(st.Source || ''); out.viaStealth = true; }
+  }
   if (cmt) {
     try {
       const j = JSON.parse(cmt.text);
@@ -1548,6 +1683,8 @@ async function readImageMeta(src) {
     } catch (e) { /* 형식이 다르면 아래에서 '메타 없음' 으로 처리된다 */ }
   }
   out.model = out.source;
+  out.modelId = modelFromSource(out.source);
+  if (out.hasMeta) clean(out.params, out.modelId);
   return out;
 }
 
@@ -1604,8 +1741,9 @@ async function openImageMeta(src, opts) {
                  '<span class="hint" id="imPos">' + (nav.index + 1) + ' / ' + nav.total + '</span>' +
                  '<button class="btn sm" id="imNext">다음 ›</button></div>' : '') +
           '<div class="hint im-bits">' + bits.map(esc).join(' · ') + '</div>' +
-          (m.hasMeta ? '' : '<div class="hint" style="color:var(--red)">이 파일에는 생성 정보가 없습니다 (메타데이터가 지워졌거나 NAI 이미지가 아닙니다)</div>') +
-          '<div class="mtitle">프롬프트</div>' +
+          (m.hasMeta ? (m.viaStealth ? '<div class="hint">텍스트 메타가 지워진 파일 — 알파 채널에 숨은 메타(stealth)에서 읽었습니다</div>' : '')
+                     : '<div class="hint" style="color:var(--red)">' + esc(NO_META_MSG) + '</div>') +
+          '<div class="mtitle">프롬프트' + (m.stripped ? ' <span class="hint">(품질 태그·자동 글자·UC 프리셋은 뺐습니다 — 생성할 때 앱이 다시 붙입니다)</span>' : '') + '</div>' +
           '<pre class="im-t" id="imP"></pre>' +
           '<div class="row">' +
             '<button class="btn sm primary" id="imPIns">프롬프트 칸에 넣기</button>' +
@@ -1619,6 +1757,8 @@ async function openImageMeta(src, opts) {
             '<button class="btn sm" id="imUChunk">청크로 저장</button>' +
             '<button class="btn sm" id="imUCopy">복사</button>' +
           '</div>' +
+          '<div class="mtitle">캐릭터' + (m.chars && m.chars.length ? ' ' + m.chars.length + '명' : '') + '</div>' +
+          '<div id="imChars"></div>' +
           '<div class="row" style="margin-top:8px">' +
             '<button class="btn sm" id="imApply">⤴ 설정 전부 불러오기</button>' +
             (m.item ? '<button class="btn sm" id="imMain">↗ 메인 뷰어에서 열기</button>' +
@@ -1634,7 +1774,7 @@ async function openImageMeta(src, opts) {
     body.querySelector('#imP').textContent = m.prompt || '(없음)';
     body.querySelector('#imU').textContent = m.uc || '(없음)';
     body.querySelector('#imRaw').textContent = (() => {
-      try { return JSON.stringify(p, null, 2); } catch (e) { return String(p); }
+      try { return (m.stripped ? '// 서버에 보낸 프롬프트 원문:\n' + m.rawPrompt + '\n// 네거티브 원문:\n' + m.rawUc + '\n\n' : '') + JSON.stringify(p, null, 2); } catch (e) { return String(p); }
     })();
 
     const cp = async (t, what) => {
@@ -1648,12 +1788,41 @@ async function openImageMeta(src, opts) {
       const ta = document.querySelector('#uc');
       if (!ta) { toast('네거티브 칸을 찾지 못했습니다', 'err'); return; }
       if (typeof setMode === 'function' && S.mode !== 'main') setMode('main');
+      /* 네거티브 칸은 접힌 <details> 안에 있다 — 펴 주지 않으면 넣어도 아무 변화가 안 보인다 */
+      { let d = ta.closest('details'); while (d) { d.open = true; d = d.parentElement && d.parentElement.closest('details'); } }
       ta.value = (ta.value.trim() ? ta.value.trim() + ', ' : '') + m.uc;
       ta.dispatchEvent(new Event('input', { bubbles: true }));
       closeModal(); toast('네거티브 칸에 넣었습니다');
     };
     body.querySelector('#imUChunk').onclick = () => saveTextAsChunk(m.uc, '', '기본');
     body.querySelector('#imUCopy').onclick = () => cp(m.uc, '네거티브');
+    /* 캐릭터 프롬프트 — 한 명씩 캐릭터 칸에 넣거나 청크로 만든다 */
+    const cw = body.querySelector('#imChars');
+    if (!m.chars || !m.chars.length) cw.innerHTML = '<div class="hint">(없음)</div>';
+    else m.chars.forEach((c, i) => {
+      const d = document.createElement('div'); d.className = 'im-char';
+      d.innerHTML = '<pre class="im-t"></pre>' + (c.uc ? '<pre class="im-t im-cuc"></pre>' : '') +
+        '<div class="row"><button class="btn sm" data-a="add">캐릭터 칸에 추가</button>' +
+        '<button class="btn sm" data-a="ins">프롬프트 칸에 넣기</button>' +
+        '<button class="btn sm" data-a="chunk">청크로 저장</button>' +
+        '<button class="btn sm" data-a="copy">복사</button></div>';
+      d.querySelector('pre').textContent = (i + 1) + '. ' + c.prompt + (c.x != null ? '   (위치 ' + Math.round(c.x * 100) + '%, ' + Math.round(c.y * 100) + '%)' : '');
+      if (c.uc) d.querySelector('.im-cuc').textContent = '네거티브: ' + c.uc;
+      d.querySelector('[data-a=add]').onclick = () => {
+        const mx = capsOf(S.model).maxChars || 0;
+        if (!mx) { toast(MODELS[modelOf(S.model)].name + ' 은 캐릭터 프롬프트를 받지 않습니다', 'err'); return; }
+        if (S.chars.length >= mx) { toast('이 모델은 캐릭터를 최대 ' + mx + '명까지 받습니다', 'err'); return; }
+        S.chars.push({ prompt: c.prompt, uc: c.uc || '', x: c.x, y: c.y });
+        /* 좌표가 있는데 'AI 자동 배치' 가 켜져 있으면 그 좌표는 생성에서 버려진다 — 같이 꺼 준다 */
+        if (c.x != null && S.aiChoice) { S.aiChoice = false; toast('좌표가 있어 \'AI 자동 배치\' 를 껐습니다'); }
+        save(); renderChars();
+        toast('캐릭터 ' + S.chars.length + '번에 넣었습니다');
+      };
+      d.querySelector('[data-a=ins]').onclick = () => { closeModal(); insertIntoPrompt(c.prompt); };
+      d.querySelector('[data-a=chunk]').onclick = () => saveTextAsChunk(c.prompt, '', '캐릭터');
+      d.querySelector('[data-a=copy]').onclick = () => cp(c.prompt, '캐릭터 프롬프트');
+      cw.appendChild(d);
+    });
     body.querySelector('#imApply').onclick = () => {
       if (m.item) { applyMeta(m.item.meta); closeModal(); if (typeof setMode === 'function') setMode('main'); }
       else { importFromPng(src); }
@@ -2122,10 +2291,29 @@ function openBackup() {
               ? normKey(a) === normKey(b)
               : String(a || '').toLowerCase() === String(b || '').toLowerCase());
             const mergeBy = (a, b, key) => { const out = [...(a || [])]; (b || []).forEach(x => { if (!out.some(y => sameKey(y[key], x[key]))) out.push(x); }); return out; };
-            S.chunks = mergeBy(S.chunks, state.chunks, 'name'); S.styles = mergeBy(S.styles, state.styles, 'id');   // 서버 _STATE_LISTS 와 같은 키여야 한다 — 여기만 name 이라 id 가 겹친 스타일이 조용히 사라졌다 S.characters = mergeBy(S.characters, state.characters, 'name');
+            // 키는 서버 _STATE_LISTS 와 같아야 한다 (chunks=name · styles=id · characters=name · scenes=id)
+            S.chunks = mergeBy(S.chunks, state.chunks, 'name');
+            S.styles = mergeBy(S.styles, state.styles, 'id');
+            /* ★ 이 줄은 예전에 윗줄 주석 뒤에 붙어 통째로 주석이 되어 있었다 —
+                 백업을 '합치기' 로 복원하면 캐릭터 라이브러리가 말없이 하나도 안 돌아왔다. */
+            S.characters = mergeBy(S.characters, state.characters, 'name');
             S.scenes = mergeBy(S.scenes, state.scenes, 'id'); S.chunkCats = [...new Set([...(S.chunkCats || []), ...(state.chunkCats || [])])];
             S.ytQueue = mergeBy(S.ytQueue, state.ytQueue, 'id'); S.ytHistory = mergeBy(S.ytHistory, state.ytHistory, 'id');
-            if (!S.prompt && !Object.keys(S.secText || {}).length) { S.secText = state.secText || {}; S.prompt = state.prompt || ''; S.sections = state.sections || S.sections; }
+            /* 쌓기만 하는 기록들도 합친다 (서버 _merge_state 와 같은 규칙).
+               채점 한 줄 = Gemini 호출 한 번(=요금 한 번)이라 버리면 돈을 다시 내야 한다.
+               뭉갬 평소 기록은 버리면 "평소" 기준이 사라져 상태 판정이 한동안 헛돈다. */
+            const mergeLog = (a, b, keyOf, cap) => {
+              const out = [...(a || [])]; const seen = new Set(out.map(keyOf));
+              (b || []).forEach(x => { const k = keyOf(x); if (x && !seen.has(k)) { seen.add(k); out.push(x); } });
+              out.sort((p, q) => (p.t || 0) - (q.t || 0));
+              return out.slice(-cap);
+            };
+            S.judgeLog = mergeLog(S.judgeLog, state.judgeLog, x => (x && x.id != null) ? 'i' + x.id : 't' + (x && x.t) + '_' + (x && x.seed), 300);
+            S.mushLog = mergeLog(S.mushLog, state.mushLog, x => 't' + (x && x.t), 120);
+            /* '지금 비어 있을 때만' 의 판정은 값을 봐야 한다 — 예전엔 키 개수만 봐서,
+               구역 칸이 만들어져 있고 내용이 전부 비어 있으면(흔한 상태) 프롬프트가 영영 안 돌아왔다. */
+            const promptEmpty = !String(S.prompt || '').trim() && !Object.values(S.secText || {}).some(v => String(v || '').trim());
+            if (promptEmpty) { S.secText = state.secText || {}; S.prompt = state.prompt || ''; S.sections = state.sections || S.sections; }
             // 캐릭터 칸과 네거티브도 같은 규칙으로 — 지금 비어 있을 때만 백업 것을 가져온다.
             // 예전엔 아예 손대지 않아서 "합치기" 로 복원해도 이 둘은 영영 안 돌아왔다.
             if (!(S.chars || []).some(c => (c.prompt || '').trim()) && (state.chars || []).length) S.chars = state.chars;
@@ -2490,6 +2678,8 @@ const GEMINI_MODELS = [
   ['gemini-3-pro-preview', 'Gemini 3 Pro (프리뷰)'],
 ];
 function openAiPrompt(targetTA) {
+  /* 창을 열기 전에 '지금 쓰던 칸' 을 붙잡아 둔다 — 창이 열리면 포커스가 창 안으로 옮겨가 어디에 넣을지 잃어버린다 */
+  if (!targetTA && typeof activeTA === 'function') targetTA = activeTA();
   openModal('✨ AI 프롬프트 생성 — 원하는 장면을 한국어로 쓰면 단부루 태그로 바꿔줍니다', body => {
     body.innerHTML = `
       <label class="fld">모델<select id="aiModel">${GEMINI_MODELS.map(([v, n]) => `<option value="${v}"${v === (S.aiModel || 'gemini-2.5-flash') ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
@@ -2714,7 +2904,42 @@ const MUSH_WARN = 0.15;      // 이 위면 의심 (정상 0.05 · 뭉갬 0.23~0.
    따로 부르면 그림을 두 번 그리고 두 번 읽는다. */
 async function imageDefects(blob) {
   const st = await imageStats(blob);
-  return { mush: st.mush, mushy: st.mushy, busy: st.busy, at: st.mushAt, suspect: st.mush >= MUSH_WARN };
+  return { mush: st.mush, mushy: st.mushy, busy: st.busy, at: st.mushAt, suspect: st.mush >= mushThr().thr };
+}
+/* 지표는 한 장에 50~400ms 걸리는 캔버스 계산이다 — 항목에 캐시해 두 번 재지 않는다 (상태 판정이 10분마다 8장을 다시 재고 있었다) */
+async function statsOf(it) { if (!it || !it.blob) return null; if (it._stats) return it._stats; it._stats = await imageStats(it.blob); return it._stats; }
+const MUSH_LOG_MAX = 120;
+/* "평소" 기준: mushLog(최근 생성들의 뭉갬 값) 에서 지금 보는 표본을 뺀 최근 40장의 중앙값 */
+function mushThr(exclT, sample) {
+  const log = Array.isArray(S.mushLog) ? S.mushLog : [];
+  const prior = log.filter(x => x && typeof x.m === 'number' && !(exclT && exclT.has(x.t))).slice(-40).map(x => x.m);
+  const base = prior.length >= 8 ? med(prior) : null;
+  /* 2배: 사용자 앱 출력 12장(0.08~0.23, 중앙 0.12)에서 오탐 0, 애니 선화(평소 0.05)의 진짜 뭉갬(0.23~0.54)은 그대로 잡힌다 */
+  const thr = base != null ? Math.max(MUSH_WARN, base * 2) : Math.max(0.30, (sample && sample.length ? med(sample) : 0) * 2);
+  return { base, thr, n: prior.length };
+}
+/* 생성 직후 한가할 때 지표를 재서 평소 기록에 넣는다 (생성 완료를 기다리게 하지 않는다) */
+function noteMushLater(it) {
+  const run = async () => {
+    try {
+      const st = await statsOf(it); if (!st) return;
+      S.mushLog = Array.isArray(S.mushLog) ? S.mushLog : [];
+      if (S.mushLog.some(x => x && x.t === it.t)) return;
+      S.mushLog.push({ t: it.t, m: st.mush });
+      if (S.mushLog.length > MUSH_LOG_MAX) S.mushLog = S.mushLog.slice(-MUSH_LOG_MAX);
+      save();
+    } catch (e) {}
+  };
+  if (window.requestIdleCallback) requestIdleCallback(() => run(), { timeout: 4000 }); else setTimeout(run, 800);
+}
+/* 기존 히스토리로 평소 기록을 채운다 (처음 한 번, 한가할 때 한 장씩) — 안 그러면 8장을 새로 뽑을 때까지 기준이 없다 */
+function seedMushLog() {
+  const log = Array.isArray(S.mushLog) ? S.mushLog : [];
+  if (log.length >= 8) return;
+  const items = (R.hist || []).filter(h => h.blob && !log.some(x => x && x.t === h.t)).slice(-40);
+  let i = 0;
+  const step = () => { if (i >= items.length) return; noteMushLater(items[i++]); (window.requestIdleCallback || (f => setTimeout(f, 300)))(step); };
+  step();
 }
 async function imageStats(blob) {
   const img = await blobToImage(blob);
@@ -2780,15 +3005,21 @@ async function qualityHealth(sampleN) {
   const items = (R.hist || []).filter(h => h.blob).slice(-(sampleN || 8));
   if (items.length < 3) return { enough: false, n: items.length };
   const stats = [];
-  for (const it of items) { try { stats.push(await imageStats(it.blob)); } catch (e) {} }
+  for (const it of items) { try { const st = await statsOf(it); if (st) stats.push(st); } catch (e) {} }
   if (stats.length < 3) return { enough: false, n: stats.length };
   const m = k => med(stats.map(s => s[k]));
   const cur = { sd: m('sd'), lap: m('lap'), ent: m('ent') };
-  /* 뭉갬은 "평소 대비" 가 아니라 절대값으로 본다 — 평소가 이미 뭉개져 있으면
-     비율로는 정상으로 보이기 때문이다. 몇 장이 걸렸는지도 함께 센다. */
+  /* 뭉갬 — 절대값 0.15 하나로 보던 것을 "내 평소 대비" 로 바꿨다.
+     구조 텐서 지표는 화풍을 탄다: 애니 선화는 0.05 언저리지만, 사실적·3D·피부 질감이 많은 화풍은
+     멀쩡한 그림도 0.10~0.35 다 (실측: 앱 출력 12장 중앙 0.12 · novelai.net 출력 12장 중앙 0.27).
+     절대 기준 0.15 는 그런 화풍에서 12장 중 11장을 "의심" 으로 찍어 늘 빨간불이었다.
+     → 최근 표본 앞의 그림들(mushLog, 최대 40장)로 평소 중앙값을 잡고 그 2배(최소 0.15)만 의심한다.
+       평소 기록이 아직 없으면 최근 표본 중앙값의 2배·최소 0.30 — 극단만 잡는다. */
   const mushList = stats.map(s => s.mush).filter(v => typeof v === 'number');
+  const recentT = new Set(items.map(it => it.t));
+  const thrInfo = mushThr(recentT, mushList);
   const mush = { med: med(mushList), worst: Math.max(...mushList, 0),
-                 hits: mushList.filter(v => v >= MUSH_WARN).length, n: mushList.length };
+                 hits: mushList.filter(v => v >= thrInfo.thr).length, n: mushList.length, base: thrInfo.base, thr: thrInfo.thr };
   const base = S.qBase;                              // 기준선 (평소 상태)
   const ratio = base ? { sd: cur.sd / base.sd, lap: cur.lap / base.lap, ent: cur.ent / base.ent } : null;
   return { enough: true, n: stats.length, cur, base, ratio, mush };
