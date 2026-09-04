@@ -1831,7 +1831,10 @@ class Handler(BaseHTTPRequestHandler):
                                               ("characters", "char"), ("scenes", "scene")):
                                 for it in (base.get(key) or []):
                                     k = it.get("name") if kind in ("chunk", "char") else it.get("id")
-                                    if k and (kind + "|" + str(k).lower()) in d:
+                                    # 값 0 은 '되살리기' 표시다 — 삭제로 세면 안 된다.
+                                    # 백업을 복원한 뒤에는 되살리기 표시가 잔뜩 남는데,
+                                    # 그걸 전부 삭제로 세는 바람에 덮어쓰기 보호가 사실상 꺼졌다.
+                                    if k and d.get(kind + "|" + str(k).lower()):
                                         n += 1
                             return n
                         gone = ccount(cur) - ccount(incoming)

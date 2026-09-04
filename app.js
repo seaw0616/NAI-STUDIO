@@ -208,8 +208,12 @@ function flushSave() {
       /* force 를 같이 보낸다. 사용자가 프롬프트를 지우고 1.2초 안에 창을 닫으면,
          예전엔 beacon 이 force 없이 나가 서버의 빈-프롬프트 보호(409)에 걸렸고
          다음에 열 때 지운 프롬프트가 통째로 되살아났다. */
-      navigator.sendBeacon(R.api + '/state' + (pendingForce ? '?force=1' : ''), b);
+      const okBeacon = navigator.sendBeacon(R.api + '/state' + (pendingForce ? '?force=1' : ''), b);
       pendingForce = false;
+      /* 비콘은 응답을 볼 수 없어 예전엔 nst_base 를 갱신하지 못했다. 그래서 '한 글자 치고 곧 창 닫기'
+         라는 흔한 마무리 뒤에는 다음 실행마다 가짜 '갈라짐' 경고가 뜨고 🛟복구 스냅샷이 덮여 버렸다.
+         보낸 것이 그대로 서버 상태가 되므로, 보낸 시각을 기준으로 남긴다. */
+      if (okBeacon && S.savedAt) { try { localStorage.setItem('nst_base', String(S.savedAt)); R.seenBase = S.savedAt; } catch (e) {} }
     } catch (e) {}
   }
 }
@@ -312,14 +316,18 @@ async function pushStateToServer(force) {
   // 다음 부팅에서 애먼 '갈라짐' 판정이 난다.
   const sentAt = S.savedAt, sentBody = JSON.stringify(S);
   try {
-    const r = await fetch(R.api + '/state' + (force ? '?force=1' : ''), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: sentBody });
+    const r = await fetchT(R.api + '/state' + (force ? '?force=1' : ''), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: sentBody }, 15000);
     if (r.status === 409) { // 서버가 보호: 서버 쪽 내용이 훨씬 많거나, 빈 프롬프트로 덮으려 함
       const j = await r.json().catch(() => ({}));
       const emptyPrompt = j.message === 'protected-prompt';
       /* 사용자가 "일부러" 지운 경우는 saveCleared() 가 force 로 보내므로 여기까지 오지 않는다.
          그러니 여기 온 빈 프롬프트는 사고다 — 서버 것을 되불러와 화면을 되살린다.
-         (v11.20 에서 이 되불러오기를 뺐더니, 프롬프트가 빈 채로 굳어 영영 안 돌아왔다) */
-      pullStateFromServer(true).catch(() => {});
+         (v11.20 에서 이 되불러오기를 뺐더니, 프롬프트가 빈 채로 굳어 영영 안 돌아왔다)
+
+         ★ '개수 보호' 일 때는 절대 먼저 합치면 안 된다. 아래 모달이 '그래도 이 화면 설정으로
+            덮어쓰기' 를 물어보는데, 여기서 미리 합쳐 버리면 그 버튼이 **합쳐진 결과**를 저장한다
+            (사용자가 지운 항목이 되살아난 채로 굳는다). 빈 프롬프트일 때만 되불러온다. */
+      if (emptyPrompt) pullStateFromServer(true).catch(() => {});
       if (emptyPrompt) {
         toast('프롬프트가 비어 있어 저장하지 않고, 서버에 있던 것을 되살렸습니다', 'err');
         R.stateSynced = false; logErr('서버 저장 보류(빈 프롬프트) — 서버 값으로 복구');
@@ -383,6 +391,11 @@ const isTombed = (del, kind, key, item) => {
 const mergeByKey = (a, b, key, kind, delA, delB) => {
   const kOf = x => ((x[key] != null ? x[key] : x.list) || '').toString().toLowerCase();
   const del = { ...(delA || {}), ...(delB || {}) };
+  /* '되살리기'(값 0) 는 어느 쪽에 있든 이긴다.
+     예전엔 뒤에 펼친 쪽(서버)이 덮어써서, 백업을 복원해 되살린 항목이
+     서버에 남아 있던 낡은 삭제 기록에 다시 지워졌다. */
+  for (const kk in (delA || {})) if (!delA[kk]) del[kk] = 0;
+  for (const kk in (delB || {})) if (!delB[kk]) del[kk] = 0;
   const out = (a || []).filter(x => !(kind && isTombed(del, kind, kOf(x), x)));
   (b || []).forEach(x => {
     const kx = kOf(x); if (!kx) return;
@@ -394,7 +407,7 @@ const mergeByKey = (a, b, key, kind, delA, delB) => {
 async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 내용 목록(청크·스타일·캐릭터·씬·유튜브)은 항상 합집합 → 어느 쪽 것도 사라지지 않음
   if (!R.srvOk) return false;
   try {
-    const r = await fetch(R.api + '/state', { cache: 'no-store' }); if (!r.ok) { R.booted = true; return false; }
+    const r = await fetchT(R.api + '/state', { cache: 'no-store' }, 8000); if (!r.ok) { R.booted = true; return false; }
     const srv = await r.json();
     if (!srv || !srv.savedAt) { R.booted = true; pushStateToServer(); return false; }
     /* 어느 쪽이 이길지 정하는 규칙.
@@ -699,14 +712,19 @@ function chunkByName() {
   m._n = arr.length; m._a = arr;
   return (_chunkByName = m);
 }
-function chunkMapClear() { _chunkByName = null; }
+function chunkMapClear() { _chunkByName = null; _chunkMapCache = null; }
 const chunkKeyOf = tok => normKey(String(tok).replace(/^-?[\d.]+::/, '').replace(/::$/, '').replace(/^@/, ''));
 /* 이름만 적었을 때 무엇으로 바꿀지.
      한 줄 청크        → 그 내용
      한 덩어리(여러 줄) → 쉼표를 정리해 이어붙인 내용
      후보 목록         → <이름> 으로 넘긴다. 그래야 expandWild 가 한 줄만 뽑는다.
    (예전엔 이름만 적으면 114줄짜리 작가랜덤이 통째로 프롬프트에 실려 나갔다.) */
+let _chunkMapCache = null;
+/* 청크가 중첩되면 expandChunks 가 재귀할 때마다 이 표를 새로 만들었다 —
+   청크 77개 × 재귀 깊이만큼 반복돼 글자 하나 칠 때마다 화면이 끊겼다.
+   chunkMapClear() 가 청크가 바뀔 때마다 이 캐시도 버린다. */
 function chunkMap() {
+  if (_chunkMapCache && _chunkMapCache._n === S.chunks.length && _chunkMapCache._a === S.chunks) return _chunkMapCache.m;
   const m = {};
   for (const c of S.chunks) {
     if (!c.name) continue;
@@ -715,6 +733,7 @@ function chunkMap() {
          예전엔 c.text 를 날것으로 써서, '# 이건 메모' 같은 줄이 그대로 NAI 로 나갔다. */
       : chunkBlockText(c);
   }
+  _chunkMapCache = { _n: S.chunks.length, _a: S.chunks, m };
   return m;
 }
 function expandChunks(s, depth, active) {
@@ -936,9 +955,9 @@ async function histPut(rec) {
     tx.onabort = () => rej(tx.error || new Error('저장 공간이 부족합니다'));
   });
 }
-async function histDel(id) { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction('hist', 'readwrite'); tx.objectStore('hist').delete(id); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
-async function histAll() { const db = await idb(); return new Promise((res, rej) => { const rq = db.transaction('hist').objectStore('hist').getAll(); rq.onsuccess = () => res(rq.result || []); rq.onerror = () => rej(rq.error); }); }
-async function histClearDb() { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction('hist', 'readwrite'); tx.objectStore('hist').clear(); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
+async function histDel(id) { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction('hist', 'readwrite'); tx.objectStore('hist').delete(id); tx.oncomplete = res; tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error || new Error('삭제가 중단됐습니다')); }); }
+async function histAll() { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction('hist'); const rq = tx.objectStore('hist').getAll(); rq.onsuccess = () => res(rq.result || []); rq.onerror = () => rej(rq.error); tx.onabort = () => rej(tx.error || new Error('읽기가 중단됐습니다')); }); }
+async function histClearDb() { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction('hist', 'readwrite'); tx.objectStore('hist').clear(); tx.oncomplete = res; tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error || new Error('비우기가 중단됐습니다')); }); }
 
 /* ─────────────── ZIP / PNG ─────────────── */
 async function unzip(buf) {
@@ -1083,6 +1102,13 @@ const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 
    그러면 멀쩡히 도는 서버를 두고 배너가 "start.bat 을 다시 실행하라" 고 시켰고,
    더 나쁘게는 다른 포트로 주소를 옮겨 히스토리가 사라진 것처럼 보였다.
    → 실패하면 조금 기다렸다 한 번 더, 더 넉넉한 시간으로 확인한다. */
+/* 데드라인이 붙은 fetch. 없으면 응답이 안 오는 순간 그 await 뒤가 통째로 멈춘다
+   (srvLoop 는 함수 끝에서 자기를 다시 예약하므로 서버 감시 자체가 죽는다). */
+async function fetchT(url, opt, ms) {
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), ms || 8000);
+  try { return await fetch(url, { ...(opt || {}), signal: ctl.signal }); }
+  finally { clearTimeout(t); }
+}
 async function tryHealth(base, tries) {
   const once = async ms => {
     try {
@@ -1180,11 +1206,17 @@ async function guardPromptLoss() {
     if (!R.srvOk || R._guardDone) return;
     const hasText = o => !!((o.prompt || '').trim() || Object.values(o.secText || {}).some(v => (v || '').trim()));
     if (hasText(S)) { R._guardDone = true; return; }          // 화면에 글자가 있으면 볼 것 없다
-    const srv = await (await fetch(R.api + '/state', { cache: 'no-store' })).json().catch(() => null);
+    const srv = await (await fetchT(R.api + '/state', { cache: 'no-store' }, 8000)).json().catch(() => null);
     if (!srv || !hasText(srv)) { R._guardDone = true; return; }
     R._guardDone = true;
     S.prompt = srv.prompt || ''; S.secText = srv.secText || {};
-    if (srv.sections && !((S.sections || []).length)) S.sections = srv.sections;
+    /* 되살린 secText 의 칸 id 가 지금 칸 구성에 없으면 그 글자는 화면 어디에도 안 보인다
+       (= 되살렸는데 빈 화면). 서버 칸 구성도 같이 가져온다. */
+    if (srv.sections && srv.sections.length) {
+      const have = new Set((S.sections || []).map(x => x.id));
+      const need = Object.keys(S.secText || {}).filter(k => (S.secText[k] || '').trim());
+      if (!((S.sections || []).length) || need.some(k => !have.has(k))) S.sections = srv.sections;
+    }
     if (!(S.uc || '').trim() && (srv.uc || '').trim()) S.uc = srv.uc;
     if (!(S.chars || []).some(c => (c.prompt || '').trim()) && (srv.chars || []).length) S.chars = srv.chars;
     if (typeof renderSections === 'function') renderSections();
@@ -1202,7 +1234,14 @@ async function srvLoop() {
   const info = await probeServer();
   const was = R.srvOkPrev;
   setSrvUI(R.srvOk, info);
-  if (R.srvOk && !was) { await pullStateFromServer(); await guardPromptLoss(); refreshAnlas().catch(() => {}); if (window.onServerUp) window.onServerUp(); }
+  if (R.srvOk && !was) {
+    /* 재연결은 '부팅' 이 아니다 — 지금 보고 있는 화면 모드는 그대로 둔다.
+       예전엔 서버가 잠깐 끊겼다 붙을 때마다 탭이 저 혼자 바뀌었다. */
+    const keepMode = S.mode;
+    await pullStateFromServer(); await guardPromptLoss(); refreshAnlas().catch(() => {});
+    if (R.booted && keepMode && S.mode !== keepMode && typeof setMode === 'function') { S.mode = keepMode; try { setMode(keepMode); } catch (e) {} }
+    if (window.onServerUp) window.onServerUp();
+  }
   if (!R.srvOk && !R.booted && (R.probeFails = (R.probeFails || 0) + 1) >= 3) R.booted = true; // 서버가 없으면 로컬만 사용
   // 서버가 10분마다 GitHub 를 확인해 /health 에 실어 준다. srvLoop 는 15초마다 도므로
   // 새 버전이 올라오면 몇 초 안에 버튼이 뜬다 (예전엔 앱이 6시간에 한 번만 물어봤다).
@@ -1553,7 +1592,16 @@ function buildPayload(ov) {
   let qtHint = 0;
   {
     let qs = (S.quality && !ov.noQuality) ? String(getQuality(m) || '').replace(/^\s*,\s*/, '') : '';
+    /* ov.noQuality 는 '이미 품질 태그가 들어간 최종 프롬프트를 그대로 보낸다' 는 뜻이다.
+       그때 0(=없음)을 적어 두면, 그 이미지를 나중에 불러올 때 품질 태그를 못 떼고 프롬프트에 남는다.
+       프롬프트에 지금 프리셋 문구가 실제로 들어 있으면 그 프리셋으로 적어 준다. */
     qtHint = qualityHint(m, qs);
+    if (!qs && ov.noQuality) {
+      const info2 = MODELS[modelOf(m)] || {};
+      const std = qNorm(info2.quality), light = qNorm(info2.quality2), cur = qNorm(getQuality(m));
+      const has = t => t && String(prompt || '').includes(t);
+      qtHint = has(light) ? 3 : (has(std) || has(cur)) ? 1 : 0;
+    }
     if (!ov.noQuality && capsOf(m).transparency && S.transparent) {
       qs = qs ? 'transparent background, ' + qs : 'transparent background';
     }
@@ -1566,7 +1614,12 @@ function buildPayload(ov) {
   let uc = ov.uc != null ? ov.uc
     : ((ucPre.onlyIfEmpty && ucRest.trim()) ? ucRest : joinParts(getUcText(m, ucIdx(m)), ucRest));
   // NAI 웹 숨은 규칙: 프롬프트에 nsfw 가 없으면 네거티브 맨 앞에 "nsfw, " 자동 추가 (Curated 모델·UC 프리셋 "없음" 제외)
-  if (ov.uc == null && S.autoNsfw !== false && !NSFW_EXEMPT.includes(m) && getUcText(m, ucIdx(m)) && !prompt.toLowerCase().includes('nsfw') && !/^nsfw\b/i.test(uc)) uc = uc ? 'nsfw, ' + uc : 'nsfw';
+  /* UC 프리셋이 '없음' 이면 novelai.net 도 nsfw 를 안 붙인다.
+     V3 계열의 '없음' 은 빈 값이 아니라 'lowres'(onlyIfEmpty) 라서, getUcText 가 값을 돌려주는 바람에
+     '없음' 을 골라도 자동 nsfw 가 붙고 있었다. 프리셋 자체를 보고 가른다. */
+  const ucPreNow = (info.ucs[ucIdx(m)] || {});
+  const ucPresetIsNone = !ucPreNow.text || ucPreNow.onlyIfEmpty;
+  if (ov.uc == null && S.autoNsfw !== false && !NSFW_EXEMPT.includes(m) && !ucPresetIsNone && getUcText(m, ucIdx(m)) && !prompt.toLowerCase().includes('nsfw') && !/^nsfw\b/i.test(uc)) uc = uc ? 'nsfw, ' + uc : 'nsfw';
   const caps = capsOf(m);
   let chars = (ov.chars || S.chars.filter(c => c.prompt.trim())).map(c => ({ ...c }));
   /* 캐릭터를 아예 안 받는 모델(V3 계열)로 바꿔 놓고 캐릭터 칸을 채워 두면, 예전엔 말없이 통째로 빠졌다.
@@ -1888,6 +1941,10 @@ async function doGenerate(ov, label) {
       if (S.autoSaveOn) await autoSave(item);
       if (S.judgeAuto) maybeAutoJudge(item);   // 자동 채점 (기본 꺼짐 · 생성을 기다리게 하지 않으려고 await 하지 않는다)
     }
+    /* 취소가 아니라 스트림이 끊겨 일부만 받은 경우도 알려야 한다 — 예전엔 '완료 · N장' 으로만 보여
+       요청한 장수보다 적게 나온 것을 알 수 없었다(Anlas 는 배치 전체분이 이미 빠진 뒤다). */
+    { const want = (body.parameters && body.parameters.n_samples) || 1;
+      if (!R._cancelledWith && blobs.length < want) toast(`${want}장 중 ${blobs.length}장만 받았습니다 — 중간에 끊겼습니다 (Anlas 는 이미 빠진 뒤입니다)`, 'err'); }
     if (R._cancelledWith) { const k = R._cancelledWith; R._cancelledWith = 0; toast(`취소했지만 이미 나온 ${k}장은 남겼습니다 (Anlas 는 이미 빠진 뒤입니다)`); }
     if (window.onImageGenerated) window.onImageGenerated(item);
     const sec = ((Date.now() - t0) / 1000).toFixed(1);
@@ -2083,7 +2140,7 @@ async function pruneHistory(keep) {
     const idx = R.hist.findIndex(h => !h.fav && h !== keep); if (idx < 0) break;
     const [old] = R.hist.splice(idx, 1); URL.revokeObjectURL(old.url);
     if (typeof LIB !== 'undefined' && LIB.sel) LIB.sel.delete(old);
-    if (old.id != null) histDel(old.id).catch(() => {});
+    if (old.id != null) histDel(old.id).catch(e => logErr('오래된 이미지 삭제 실패(새로고침하면 되살아납니다): ' + (e && e.message || e)));
     if (!old.saved) savedAll = false;      // 디스크에 남긴 적 없는 이미지
     if (R.cur > idx) R.cur--;
     n++;
@@ -2187,7 +2244,17 @@ function showImage(i) {
 const curItem = () => (R.cur >= 0 && R.cur < R.hist.length) ? R.hist[R.cur] : null;
 function stepImage(d) {
   const idx = visibleHist(); if (!idx.length) return;
-  let k = idx.indexOf(R.cur); k = k < 0 ? idx.length - 1 : Math.max(0, Math.min(idx.length - 1, k + d));
+  let k = idx.indexOf(R.cur);
+  if (k < 0) {
+    /* 지금 보고 있는 것이 목록에 없다(= '☆즐겨찾기만 보기' 인데 방금 뽑은 새 그림을 보는 중).
+       예전엔 무조건 마지막으로 보내서 ←/→ 가 둘 다 '가장 최근 ⭐' 로 튀었다.
+       지금 위치를 기준으로 앞/뒤에서 가장 가까운 것을 고른다. */
+    k = d < 0 ? idx.filter(i => i < R.cur).length - 1 : idx.findIndex(i => i > R.cur);
+    if (k < 0) k = d < 0 ? 0 : idx.length - 1;
+    showImage(idx[Math.max(0, Math.min(idx.length - 1, k))]);
+    return;
+  }
+  k = Math.max(0, Math.min(idx.length - 1, k + d));
   showImage(idx[k]);
 }
 function clearViewer() {
@@ -2205,8 +2272,12 @@ function clearViewer() {
    unsaved 는 "아직 저장 안 함" 이라는 그때그때의 표시다. */
 function persistItem(it) {
   if (!it || it.id == null) return;
+  /* 이미 히스토리에서 빠진 항목이면 쓰지 않는다.
+     채점은 오래 걸려서, 그 사이에 지운 그림에 결과가 도착하면 histPut 이 그 그림을
+     저장소에 **되살려 넣었다** — 새로고침하면 지운 그림이 돌아왔다. */
+  if (!R.hist.includes(it)) return;
   const { url, unsaved, ...rec } = it;
-  histPut(rec).catch(() => {});
+  histPut(rec).catch(e => logErr('이미지 저장 실패: ' + (e && e.message || e)));
 }
 /* 저장 표시.
    how='save'/'auto' 는 폴더에 실제로 쓴 경우, how='download' 는 브라우저에 넘긴 경우다.
@@ -2244,7 +2315,7 @@ async function deleteItem(it, silent) {   // silent: 일괄 삭제용 — 화면
   const i = R.hist.indexOf(it); if (i < 0) return;
   R.hist.splice(i, 1); URL.revokeObjectURL(it.url);
   if (typeof LIB !== 'undefined' && LIB.sel) LIB.sel.delete(it);
-  if (it.id != null) histDel(it.id).catch(() => {});
+  if (it.id != null) histDel(it.id).catch(e => { logErr('이미지 삭제 실패: ' + (e && e.message || e)); toast('이미지를 저장소에서 지우지 못했습니다 — 새로고침하면 다시 나타납니다', 'err'); });
   if (R.cur >= i) R.cur = Math.min(R.cur - (R.cur > i ? 1 : 0), R.hist.length - 1);
   if (silent) return;
   // 지운 뒤에는 뒤 카드들의 data-i 가 전부 한 칸씩 밀린다 → 전체를 다시 그려야 한다
@@ -2384,7 +2455,9 @@ function charCard(c, i, onDel, onChange) { // 메인·씬 공용 카드
   const cb = card.querySelector('.chunkbar'); cb.dataset.ta = tp.id; if (typeof renderChunkBar === 'function') renderChunkBar(cb);
   attachHighlight(tp);
   (S.characters || []).forEach(ch => { const o = document.createElement('option'); o.value = ch.id; o.textContent = ch.name; lib.appendChild(o); });
-  lib.onchange = () => { const ch = S.characters.find(x => x.id === lib.value); if (ch) { c.prompt = ch.prompt; c.uc = ch.uc || ''; c.libId = ch.id; tp.value = c.prompt; tu.value = c.uc; onChange(); } lib.value = ''; };
+  /* 값을 코드로 바꿔치면 input 이 안 나므로, 뒤에 깔린 강조 층이 **이전 캐릭터 글자**를 그대로 들고 있다
+     (칩 색·가중치 표시가 엉뚱한 자리에 남는다). 미러를 강제로 다시 그린다. */
+  lib.onchange = () => { const ch = S.characters.find(x => x.id === lib.value); if (ch) { c.prompt = ch.prompt; c.uc = ch.uc || ''; c.libId = ch.id; tp.value = c.prompt; tu.value = c.uc; if (tp._hlSync) tp._hlSync(true); if (tu._hlSync) tu._hlSync(true); onChange(); } lib.value = ''; };
   tp.addEventListener('input', () => { c.prompt = tp.value; onChange(); });
   tu.addEventListener('input', () => { c.uc = tu.value; onChange(); });
   card.querySelector('.del').onclick = onDel;
@@ -2911,6 +2984,9 @@ function applyTheme() {
 function toggleTheme() { S.theme = isDarkTheme(S.theme) ? (S.lastLight || 'light') : (S.lastDark || 'violet'); applyTheme(); save(); }
 function setMode(m) {
   S.mode = m; save();
+  /* 📌 로 고정한 청크 칩 띠가 라이브러리·스마트툴 탭까지 따라와 도구줄을 덮었다 — 탭을 옮기면 감춘다
+     (메인·씬으로 돌아와 프롬프트 칸을 누르면 다시 뜬다). */
+  if (m !== 'main' && m !== 'scene' && typeof window._chunkFloatHide === 'function') window._chunkFloatHide();
   $$('.nav-tab').forEach(t => t.classList.toggle('on', t.dataset.mode === m));
   $('#left').hidden = $('#center').hidden = m !== 'main';
   $('#right').hidden = m === 'library';
@@ -3313,7 +3389,14 @@ function init() {
   $('#qtLight').onclick = () => setQualityPreset('light');
   $('#qtReset').onclick = () => setQualityPreset('reset');
   $('#ucEdit').oninput = () => { S.ov[S.model] = S.ov[S.model] || {}; S.ov[S.model].uc = S.ov[S.model].uc || {}; S.ov[S.model].uc[ucIdx()] = $('#ucEdit').value; save(); };
-  $('#btnResetPreset').onclick = () => { delete S.ov[S.model]; syncAdvanced(); save(); toast('프리셋 기본값 복원'); };
+  $('#btnResetPreset').onclick = () => {
+    /* 이 모델에 직접 고쳐 둔 퀄리티 태그·UC 프리셋을 통째로 버리는 조작이다 — 되돌리기가 없다.
+       고친 게 있을 때만 확인을 받는다(고친 게 없으면 그냥 지나간다). */
+    const ov = (S.ov || {})[S.model];
+    const n = ov ? Object.keys(ov).length : 0;
+    if (n && !confirm('이 모델에 직접 고쳐 둔 퀄리티 태그·UC 프리셋을 모두 버리고 기본값으로 되돌립니다. 계속할까요?')) return;
+    delete S.ov[S.model]; syncAdvanced(); save(); toast(n ? '프리셋 기본값 복원 (고쳐 둔 ' + n + '개를 버렸습니다)' : '프리셋 기본값 복원');
+  };
   $('#prompt').addEventListener('input', () => { S.prompt = $('#prompt').value; savePrompt(); });
   $('#uc').addEventListener('input', () => { S.uc = $('#uc').value; markUserEdit(); save(); });
   // 사용자가 직접 지운 것이므로 서버 보호를 넘어 그대로 반영한다 (안 그러면 곧바로 되살아난다)
@@ -3349,6 +3432,11 @@ function init() {
       // 모달(AI 프롬프트 창 등)이 열려 있으면 그 창의 일이다 — 뒤에서 생성이 같이 돌면 안 된다
       if (!$('#modalOverlay').hidden) return;
       e.preventDefault();
+      /* 가로·세로·스텝 같은 숫자 칸은 change 에서만 S 에 반영된다. Ctrl+Enter 는 포커스를 옮기지
+         않으므로 방금 친 값이 아직 안 들어가 있다 — 옛 크기로 생성되고 Anlas 는 그대로 나갔다.
+         지금 칸에서 change 를 먼저 흘려보낸다. */
+      { const ae = document.activeElement;
+        if (ae && /^(INPUT|SELECT)$/.test(ae.tagName)) { ae.dispatchEvent(new Event('change', { bubbles: true })); } }
       if (S.mode === 'scene') { const b = $('#scRun'); if (b && !b.disabled) b.click(); } else if (S.mode === 'main') genClick();
       return;
     }
@@ -3391,13 +3479,18 @@ function init() {
       body.innerHTML = `<div>즐겨찾기(★)를 제외한 ${R.hist.filter(h => !h.fav).length}장을 삭제합니다.</div>`;
       const b = document.createElement('button'); b.className = 'btn danger'; b.textContent = '삭제';
       b.onclick = async () => {
+        /* 비우기는 await 를 여러 번 탄다 — 그 사이에 연속 생성이 새 그림을 넣으면
+           예전엔 그것까지 같이 지웠다(방금 뽑은 그림이 사라지고 Anlas 는 이미 나간 뒤다).
+           지금 화면에 있는 것만 대상으로 삼는다. */
+        const targets = R.hist.filter(h => !h.fav);
         const keep = R.hist.filter(h => h.fav);
-        for (const h of R.hist) if (!h.fav) {
+        for (const h of targets) {
           URL.revokeObjectURL(h.url);
           if (typeof LIB !== 'undefined' && LIB.sel) LIB.sel.delete(h);   // 지운 이미지가 라이브러리 선택에 남아 되살아나던 문제
           if (h.id != null) await histDel(h.id).catch(() => {});
         }
-        R.hist = keep; R.cur = R.hist.length - 1;
+        // 도중에 들어온 새 그림은 남긴다 (지우기로 정한 것만 뺀다)
+        R.hist = R.hist.filter(h => !targets.includes(h)); R.cur = R.hist.length - 1;
         closeModal(); refreshAfterBulk();
         if (typeof updateLibSel === 'function') updateLibSel();
       };
@@ -3414,7 +3507,9 @@ function init() {
 
   $('#anlas').onclick = () => { if (!hasToken()) openSettings(); else refreshAnlas().catch(e => toast(e.message, 'err')); };
   $('#btnSettings').onclick = openSettings; $('#btnTheme').onclick = toggleTheme;
-  $('#btnReload').onclick = () => { if (R.gen || R.auto.on) { if (!confirm('생성 중입니다. 새로고침하면 진행 중인 작업이 끊깁니다. 계속할까요?')) return; } location.reload(); };
+  /* 씬 '전체 순서대로 생성' 은 SR.on 이라는 별도 깃발로 돈다 — ■취소 는 챙기는데 여기만 빠져 있었다.
+     붙여 둔 이미지·마스크도 새로고침하면 사라지므로 함께 본다. */
+  $('#btnReload').onclick = () => { const busy = R.gen || R.auto.on || (typeof SR !== 'undefined' && SR.on) || R.i2iBlob || (R.mask && R.mask.on); if (busy) { if (!confirm('진행 중인 작업이 있습니다. 새로고침하면 끊기고 붙여 둔 이미지도 사라집니다. 계속할까요?')) return; } location.reload(); };
   $$('.nav-tab').forEach(t => t.onclick = () => setMode(t.dataset.mode));
   $('#modalClose').onclick = closeModal;
   // 바깥 클릭으로 닫기: 입력 칸이 없는 안내용 창만. 편집 중인 창(청크·스타일·캐릭터·설정 등)은 ✕ 또는 Esc 로만 닫힘 (실수로 날아가는 것 방지)
