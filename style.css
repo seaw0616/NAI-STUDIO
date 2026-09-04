@@ -273,7 +273,10 @@ select.style-sel.sm { width: auto; max-width: 180px; padding: 3px 24px 3px 8px; 
 
 /* ── 프롬프트 하이라이트 (청크 칩) ── */
 .pwrap { position: relative; }
-.pwrap textarea { position: relative; z-index: 1; background: transparent; }
+/* 미러(.phl)와 **같은** 줄바꿈 규칙이어야 한다. 미러에만 break-word 가 걸려 있으면
+   한 줄보다 긴 토큰(긴 작가 이름·URL)에서 미러만 줄을 더 쪼개, 그 아래 모든 줄의 강조가 밀렸다. */
+.pwrap textarea { position: relative; z-index: 1; background: transparent;
+  white-space: pre-wrap; overflow-wrap: break-word; word-break: break-word; }
 .phl { position: absolute; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; color: transparent;
   background: var(--bg2); border: 1px solid transparent; border-radius: 10px; padding: 7px 10px;
   white-space: pre-wrap; overflow-wrap: break-word; word-break: break-word; font: inherit; line-height: 1.55; }

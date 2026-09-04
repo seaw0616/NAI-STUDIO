@@ -38,7 +38,13 @@ function bindCatSelect(sel, onPick) { // "새 분류…" 선택 시 이름 입�
 }
 function catColor(cat) { const cats = chunkCats(); return CHUNK_COLORS[Math.max(0, cats.indexOf(cat || '기본')) % CHUNK_COLORS.length]; }
 function renderChunkBar(target) {
-  if (!target) { $$('.chunkbar[data-ta]').forEach(b => renderChunkBar(b)); if (typeof refreshHighlights === 'function') refreshHighlights(); }
+  if (!target) {
+    $$('.chunkbar[data-ta]').forEach(b => renderChunkBar(b));
+    /* 플로팅 띠는 자기만의 📌·✕ 칩을 갖고 있다. 위 선택자에 걸려 통째로 다시 그려지면
+       그 두 칩이 사라져 고정한 띠를 그 자리에서 끌 수 없게 됐다 — 자기 그리기 함수로 되살린다. */
+    if (typeof window._chunkFloatRedraw === 'function') window._chunkFloatRedraw();
+    if (typeof refreshHighlights === 'function') refreshHighlights();
+  }
   const bar = target || $('#chunkBar'); if (!bar) return; bar.innerHTML = '';
   if (!S.chunks.length) return;
   for (const cat of chunkCats()) {
@@ -107,7 +113,8 @@ function chunkMenu(e, c, target) {
     ['📝 새 분류로 옮기기…', () => { const v = prompt('분류 이름 (' + chunkCats().join(', ') + ')', c.cat || '기본'); if (v != null) { c.cat = v.trim() || '기본'; addChunkCat(c.cat); save(); renderChunkBar(); } }],
     ...cats.slice(0, 5).map(k => ['   → ' + k, () => { c.cat = k; save(); renderChunkBar(); }]),
     ['-'],
-    ['🗑 삭제', () => { tomb('chunk', c.name); S.chunks = S.chunks.filter(x => x !== c); save(); renderChunkBar(); toast('삭제: ' + c.name); }, 'danger'],
+    /* 되돌리기가 없다 — 내용이 있으면 확인을 받는다 (메뉴가 위로 뒤집히면 커서 바로 옆에 오는 항목이다) */
+    ['🗑 삭제', () => { if ((c.text || '').trim() && !confirm('청크 "' + c.name + '" 를 지웁니다. 되돌릴 수 없습니다. 계속할까요?')) return; tomb('chunk', c.name); S.chunks = S.chunks.filter(x => x !== c); save(); renderChunkBar(); toast('삭제: ' + c.name); }, 'danger'],
   ]);
 }
 function catMenu(e, cat) {
@@ -187,12 +194,19 @@ function initChunkFloat() {
     b.onclick = e => {
       e.preventDefault(); e.stopPropagation();
       S.chunkFloatOn = false; save(); fl.hidden = true;
+      // 설정 체크박스도 같이 꺼 준다 — 화면엔 켜져 있는데 안 뜨면 고장으로 보인다
+      { const cb = document.querySelector('#chunkFloatOn'); if (cb) cb.checked = false; }
+      if (typeof syncUI === 'function') syncUI();
       toast('청크 칩 띠를 껐습니다 — ⚙설정에서 다시 켤 수 있어요');
     };
     return b;
   };
   const origShow = show;
   show = ta => { origShow(ta); if (!fl.hidden) { fl.prepend(closeBtn()); fl.prepend(window._chunkFloatPin()); } };
+  /* 밖에서 청크가 바뀌었을 때 이 띠만 제대로 다시 그리는 길 (📌·✕ 칩까지 붙여서) */
+  window._chunkFloatRedraw = () => { if (!fl.hidden && curTa && document.contains(curTa)) show(curTa); };
+  /* 탭을 옮기면 띠를 감춘다 — 📌 로 고정해 두면 라이브러리·스마트툴 탭까지 따라와 도구줄을 덮었다 */
+  window._chunkFloatHide = () => { fl.hidden = true; };
 }
 function saveSelectionAsChunk() {
   /* 지금 글자를 고르고 있는 칸이 있으면 그 칸에서 가져온다 — **읽기** 는 네거티브·모달 칸이라도 안전하다.
@@ -216,7 +230,12 @@ function saveSelectionAsChunk() {
     let kind = 'chunk';
     const seg = body.querySelector('#ckKind');
     seg.querySelectorAll('button').forEach(b => b.onclick = () => { kind = b.dataset.k; seg.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); body.querySelector('#ckCatWrap').hidden = kind !== 'chunk'; const rw = body.querySelector('#ckRepWrap'); if (rw) rw.hidden = kind === 'char'; body.querySelector('#ckNameLbl').textContent = kind === 'char' ? '캐릭터 이름 (캐릭터 라이브러리에 저장 · 캐릭터 카드의 "라이브러리…"에서 불러옴)' : '이름 (프롬프트에 이 이름을 쓰면 칩으로 표시되고 생성 시 내용으로 치환)'; });
-    let pickedCat = S.lastChunkCat || '기본'; bindCatSelect(body.querySelector('#ckCat'), v => { pickedCat = v; });
+    /* S.lastChunkCat 이 이미 지운 분류면 select 는 그것을 못 고르고 첫 분류를 보여준다 —
+       그런데 저장은 화면과 무관하게 lastChunkCat 으로 가서, 지운 분류가 되살아나고
+       사용자는 다른 분류에 넣은 줄 알았다. 목록에 없으면 화면에 보이는 것을 쓴다. */
+    const catsNow = chunkCats();
+    let pickedCat = (S.lastChunkCat && catsNow.includes(S.lastChunkCat)) ? S.lastChunkCat : (catsNow[0] || '기본');
+    bindCatSelect(body.querySelector('#ckCat'), v => { pickedCat = v; });
     const nameEl = body.querySelector('#ckName'); setTimeout(() => nameEl.focus(), 50);
     nameEl.oninput = () => { const ex = kind === 'char' ? (S.characters || []).find(c => c.name === nameEl.value.trim()) : S.chunks.find(c => normKey(c.name) === normKey(nameEl.value)); body.querySelector('#ckDup').textContent = ex ? `⚠ "${ex.name}" 이(가) 이미 있어 내용이 덮어써집니다` : ''; };
     body.querySelector('#ckSave').onclick = () => {
@@ -341,7 +360,9 @@ function openChunkManager(focus, onlyCat) {
              같은 청크가 반대로 동작했다(전부 들어가야 할 것이 한 줄만 나가거나 그 반대). */
           const rec = { name: c.name, text: c.text || '', cat: c.cat || '기본' };
           if (typeof c.frag === 'boolean') rec.frag = c.frag;
-          if (ex) { Object.assign(ex, rec); if (typeof c.frag !== 'boolean') delete ex.frag; }
+          /* createdAt 은 되돌리지 않는다 — 삭제 기록(톰스톤)보다 오래된 시각이 되면
+             다음 동기화에서 '지운 것' 으로 걸려 방금 가져온 청크가 조용히 사라진다. */
+          if (ex) { const born = ex.createdAt; Object.assign(ex, rec); ex.createdAt = Math.max(born || 0, c.createdAt || 0, Date.now()); if (typeof c.frag !== 'boolean') delete ex.frag; }
           else S.chunks.push({ ...rec, createdAt: c.createdAt || Date.now() });
           addChunkCat(rec.cat);
         } save(); draw(); renderChunkBar(); toast('청크 ' + arr.length + '개 가져옴'); }
@@ -1546,7 +1567,15 @@ function applyMeta(meta) {
   const { chars, useCoords } = cm; let prompt = cm.prompt;
   S.quality = cm.quality;                 // 못 뗐으면 프롬프트에 이미 들어 있는 것 — 토글은 끈다 (두 벌 방지)
   S.transparent = cm.transparent;
-  if (cm.qid && !cm.keep) { S.ov = S.ov || {}; S.ov[S.model] = S.ov[S.model] || {}; if (cm.qid === 3) S.ov[S.model].q = info.quality2; else delete S.ov[S.model].q; }
+  /* 이미지에 쓰인 프리셋(standard/light)에 맞춰 준다. 다만 사용자가 **직접 고쳐 둔 문구**는 지우지 않는다 —
+     예전엔 이미지를 한 장 불러올 때마다 그 모델의 퀄리티 태그 편집본이 조용히 기본값으로 돌아갔다.
+     (그 이미지가 실제로 편집본으로 만들어졌으면 cm.keep 이 서고, 이 분기 자체를 타지 않는다) */
+  if (cm.qid && !cm.keep) {
+    S.ov = S.ov || {}; const cur = (S.ov[S.model] || {}).q;
+    const isCustom = cur != null && qNorm(cur) !== qNorm(info.quality) && qNorm(cur) !== qNorm(info.quality2);
+    if (!isCustom) { S.ov[S.model] = S.ov[S.model] || {}; if (cm.qid === 3) S.ov[S.model].q = info.quality2; else delete S.ov[S.model].q; }
+    else toast('이 모델의 퀄리티 태그는 직접 고쳐 두신 것이라 그대로 두었습니다');
+  }
   setPromptText(prompt); S.activeStyle = null;
   let uc = p.negative_prompt != null ? p.negative_prompt : (p.v4_negative_prompt ? p.v4_negative_prompt.caption.base_caption : '');
   /* NAI 웹이 자동으로 붙인 "nsfw, " 는 떼어내고(앱이 같은 규칙으로 다시 붙임),
@@ -1696,10 +1725,21 @@ function saveTextAsChunk(text, suggest, cat) {
   if (name == null) return;
   name = name.trim().replace(/\s+/g, '_');
   if (!name) { toast('이름이 필요합니다', 'err'); return; }
+  /* 쉼표·꺾쇠·중괄호가 든 이름은 프롬프트에서 토큰으로 잘려 영영 치환되지 않는다
+     (칩을 눌러 넣어도 그 이름이 태그인 척 NAI 로 나간다) — 만들 때 걸러 준다. */
+  if (/[,<>{}[\]|]/.test(name)) {
+    const fixed = name.replace(/[,<>{}[\]|]/g, '_').replace(/_+/g, '_');
+    if (!confirm('청크 이름에 쓸 수 없는 글자(, < > { } [ ] |)가 있습니다.\n프롬프트에서 치환되지 않으므로 "' + fixed + '" 로 바꿔 저장할까요?')) return;
+    name = fixed;
+  }
+  /* normKey 로 같은 이름(띄어쓰기·밑줄·대소문자만 다른 것)은 프롬프트에서 **한 청크만** 쓰인다 —
+     둘 다 만들어 두면 칩·색칠은 이쪽을 가리키는데 실제로는 저쪽이 치환돼 결과가 어긋난다.
+     그래서 이름을 자동으로 비켜 준다. */
   if (S.chunks.some(c => normKey(c.name) === normKey(name))) {
     let n = 2;
     while (S.chunks.some(c => normKey(c.name) === normKey(name + '_' + n))) n++;
     name = name + '_' + n;
+    toast('같은 이름의 청크가 있어 "' + name + '" 로 저장합니다');
   }
   const c = cat || '기본';
   addChunkCat(c);
@@ -2204,7 +2244,11 @@ function openBackup() {
       <div class="mtitle">백업 불러오기</div>
       <div class="hint">백업 ZIP(또는 예전 설정 JSON)을 드롭하면 내용을 보여주고, <b>합치기</b>(기존 유지 + 추가) 또는 <b>덮어쓰기</b>를 고를 수 있습니다.</div>
       <div class="drop" id="bkDrop" style="width:100%;min-height:70px">백업 ZIP / JSON 드롭 또는 클릭</div>
-      <div id="bkPreview"></div>`;
+      <div id="bkPreview"></div>
+      <hr>
+      <div class="mtitle">서버 자동 백업 <span class="hint">(앱이 설정을 저장할 때마다 서버가 최근 30개를 자동으로 남깁니다)</span></div>
+      <div class="row"><button class="btn sm" id="bkSrvList">목록 보기</button><span class="hint" id="bkSrvSt"></span></div>
+      <div id="bkSrvBox"></div>`;
     const bkHist = body.querySelector('#bkHist'), bkFav = body.querySelector('#bkFav');
     bkHist.onchange = () => { if (bkHist.checked) bkFav.checked = false; }; bkFav.onchange = () => { if (bkFav.checked) bkHist.checked = false; };
     body.querySelector('#bkGo').onclick = async () => {
@@ -2374,6 +2418,79 @@ function openBackup() {
       } catch (e) { pv.innerHTML = `<div class="hint">✖ ${esc(e.message)}</div>`; }
     };
     bindDrop(drop, handle); drop.onclick = () => pickFiles(false, handle, '.zip,.json');
+
+    /* 서버 자동 백업 — 지금까지는 파일로만 있고 앱에서 열 길이 없었다.
+       (사고가 났을 때 "백업에서 되돌리세요" 라고 안내하면서 정작 그 길이 없었다) */
+    body.querySelector('#bkSrvList').onclick = async () => {
+      const st = body.querySelector('#bkSrvSt'), box = body.querySelector('#bkSrvBox');
+      st.textContent = '불러오는 중…'; box.innerHTML = '';
+      try {
+        const r = await apiFetch('/state?list=1');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const j = await r.json();
+        // 서버는 {backups:[{file,savedAt,chunks,styles,characters,scenes}]} 를 최신순으로 준다
+        const files = (j.backups || j.files || []);
+        if (!files.length) { st.textContent = '아직 자동 백업이 없습니다'; return; }
+        st.textContent = files.length + '개';
+        for (const f of files.slice(0, 30)) {
+          const name = typeof f === 'string' ? f : (f.name || f.file || '');
+          const d = document.createElement('div'); d.className = 'style-card';
+          const pre = (typeof f === 'object' && f.savedAt) ? (new Date(f.savedAt).toLocaleString() + ' · 청크 ' + (f.chunks || 0) + ' · 스타일 ' + (f.styles || 0) + ' · 캐릭터 ' + (f.characters || 0) + ' · 씬 ' + (f.scenes || 0)) : '내용 확인 전';
+          d.innerHTML = '<b>' + esc(name) + '</b><div class="hint">' + esc(pre) + '</div>' +
+            '<div class="row"><button class="btn xs" data-a="peek">내용 보기</button>' +
+            '<button class="btn xs primary" data-a="merge" hidden>합치기</button>' +
+            '<button class="btn xs danger" data-a="replace" hidden>덮어쓰기</button></div>';
+          let snap = null;
+          const info = d.querySelector('.hint');
+          d.querySelector('[data-a=peek]').onclick = async () => {
+            info.textContent = '읽는 중…';
+            try {
+              const rr = await apiFetch('/state?file=' + encodeURIComponent(name));
+              if (!rr.ok) throw new Error('HTTP ' + rr.status);
+              snap = await rr.json();
+              info.textContent = (snap.savedAt ? new Date(snap.savedAt).toLocaleString() + ' · ' : '')
+                + '청크 ' + (snap.chunks || []).length + ' · 스타일 ' + (snap.styles || []).length
+                + ' · 캐릭터 ' + (snap.characters || []).length + ' · 씬 ' + (snap.scenes || []).length
+                + ' · 채점 ' + (snap.judgeLog || []).length;
+              d.querySelector('[data-a=merge]').hidden = false;
+              d.querySelector('[data-a=replace]').hidden = false;
+            } catch (e) { info.textContent = '✖ ' + e.message; }
+          };
+          const apply = replace => {
+            if (!snap) return;
+            if (replace && !confirm('현재 설정(청크·스타일·캐릭터·씬)을 이 백업으로 교체합니다. 계속할까요?')) return;
+            const sameKey = (x, y) => (typeof normKey === 'function' ? normKey(x) === normKey(y) : String(x || '').toLowerCase() === String(y || '').toLowerCase());
+            const mergeBy = (x, y, k) => { const out = [...(x || [])]; (y || []).forEach(v => { if (!out.some(z => sameKey(z[k], v[k]))) out.push(v); }); return out; };
+            // 되살린 항목이 옛 삭제 기록에 다시 걸리지 않게 톰스톤을 걷는다
+            S.deleted = S.deleted || {};
+            const untombAll = (kind, keys) => (keys || []).forEach(k2 => { if (k2 != null) S.deleted[kind + '|' + String(k2).toLowerCase()] = 0; });
+            untombAll('chunk', (snap.chunks || []).map(c => c.name));
+            untombAll('style', (snap.styles || []).map(x => x.id));
+            untombAll('char', (snap.characters || []).map(c => c.name));
+            untombAll('scene', (snap.scenes || []).map(x => x.id));
+            untombAll('cat', snap.chunkCats || []);
+            if (replace) {
+              S.chunks = snap.chunks || []; S.styles = snap.styles || [];
+              S.characters = snap.characters || []; S.scenes = snap.scenes || [];
+              S.chunkCats = snap.chunkCats || S.chunkCats;
+            } else {
+              S.chunks = mergeBy(S.chunks, snap.chunks, 'name');
+              S.styles = mergeBy(S.styles, snap.styles, 'id');
+              S.characters = mergeBy(S.characters, snap.characters, 'name');
+              S.scenes = mergeBy(S.scenes, snap.scenes, 'id');
+              S.chunkCats = [...new Set([...(S.chunkCats || []), ...(snap.chunkCats || [])])];
+            }
+            S.savedAt = Date.now(); save();
+            if (replace && typeof pushStateToServer === 'function') pushStateToServer(true).catch(() => {});
+            try { syncUI(); renderChunkBar(); if (typeof renderStyleSelects === 'function') renderStyleSelects(); } catch (e) {}
+            toast(replace ? '서버 백업으로 교체했습니다' : '서버 백업을 합쳤습니다');
+          };
+          d.querySelector('[data-a=merge]').onclick = () => apply(false);
+          d.querySelector('[data-a=replace]').onclick = () => apply(true);
+          box.appendChild(d);
+        }
+      } catch (e) { st.textContent = '✖ ' + e.message; }
+    };
   }, true);
 }
 
@@ -2461,8 +2578,16 @@ function seedArtistPack() {
   if (n) save();
 }
 
+/* 기본 청크·작가팩은 **서버 상태를 받은 뒤에** 심는다.
+   예전엔 부팅 순서가 initTools() → srvLoop() → pullStateFromServer() 라,
+   그 브라우저의 (아직 비어 있는) 삭제 기록만 보고 심었다 — 사이트 데이터를 지웠거나
+   다른 브라우저로 처음 열면, 지워 뒀던 검열·작가 청크가 통째로 되살아나 서버까지 덮었다. */
+function seedDefaults() { try { seedCensorChunks(); seedArtistPack(); } catch (e) {} }
 function initTools() {
-  seedCensorChunks(); seedArtistPack(); initSmartTools();
+  if (R.booted) seedDefaults();          // 서버 없이 도는 경우(로컬 전용)엔 바로 심는다
+  else { const prev = window.onServerUp; window.onServerUp = () => { seedDefaults(); if (prev) prev(); };
+         setTimeout(() => { if (!R.srvOk) seedDefaults(); }, 8000); }   // 서버가 끝내 안 뜨면 그때 심는다
+  initSmartTools();
   const ai = $('#btnAiPrompt'); if (ai) ai.onclick = () => openAiPrompt();
   const ub = $('#btnUpdate'); if (ub) ub.onclick = () => openUpdate();
   /* 새 버전 확인. 서버는 매번 GitHub 에 직접 물어보므로 조회 자체는 실시간인데,
