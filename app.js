@@ -182,9 +182,17 @@ const DEFAULTS = {
   emphHl: true,           // 프롬프트 칸에서 {tag}·[tag]·N::tag:: 가중치를 색으로 표시 (NAI 도 기본 켬)
   mode: 'main', scenes: [], curScene: null, styles: [], activeStyle: null, characters: [],
 };
+/* 청크 이름→내용 캐시. 선언이 아래(chunkMap 옆)에 있으면 안 된다 —
+   바로 아래 normalizeState() 가 chunkMapClear() 를 부르는데, 그때는 아직 초기화 전(TDZ)이라
+   ReferenceError 가 나고 catch 가 삼켜 **저장된 설정이 매번 통째로 버려졌다**.
+   (서버에서 다시 받아오기 때문에 눈에 잘 안 띄었지만, 서버가 꺼져 있으면 전부 기본값이 됐다) */
+let _chunkByName = null;
 let S = { ...DEFAULTS };
-try { S = normalizeState({ ...DEFAULTS, ...(JSON.parse(localStorage.getItem('nst_state')) || {}) }); } catch (e) { S = { ...DEFAULTS }; }
+let _stateLoadErr = null;
+try { S = normalizeState({ ...DEFAULTS, ...(JSON.parse(localStorage.getItem('nst_state')) || {}) }); }
+catch (e) { _stateLoadErr = e; S = { ...DEFAULTS }; }   // 조용히 넘어가지 않는다 — 부팅 뒤에 알린다
 let saveTimer = null, pushTimer = null;
+let pendingForce = false;   // '사용자가 일부러 비웠다' 표시 — 실제로 서버에 보낼 때까지 들고 있는다
 /* 저장은 250ms(로컬)·1200ms(서버) 미뤄서 한다. 그 사이에 창을 닫으면 마지막 편집이 사라진다.
    같은 브라우저로 다시 열면 로컬에서 살아나지만, 다른 브라우저·다른 PC 로 먼저 열면 없는 상태다.
    닫히는 순간 로컬은 즉시 쓰고, 서버로는 sendBeacon 으로 보낸다
@@ -197,7 +205,11 @@ function flushSave() {
     clearTimeout(pushTimer); pushTimer = null;
     try {
       const b = new Blob([JSON.stringify(S)], { type: 'application/json' });
-      navigator.sendBeacon(R.api + '/state', b);
+      /* force 를 같이 보낸다. 사용자가 프롬프트를 지우고 1.2초 안에 창을 닫으면,
+         예전엔 beacon 이 force 없이 나가 서버의 빈-프롬프트 보호(409)에 걸렸고
+         다음에 열 때 지운 프롬프트가 통째로 되살아났다. */
+      navigator.sendBeacon(R.api + '/state' + (pendingForce ? '?force=1' : ''), b);
+      pendingForce = false;
     } catch (e) {}
   }
 }
@@ -214,7 +226,10 @@ function save() {
      실제로 그 모양의 사고가 났다 — 서버는 멀쩡한데 8시간 동안 저장이 한 건도 안 들어왔다.
      저장은 화면 그리기가 어떻게 되든 반드시 일어나야 한다. */
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => { try { localStorage.setItem('nst_state', JSON.stringify(S)); } catch (e) { logErr('로컬 저장 실패: ' + e.message); } }, 250);
+  /* 콜백에서 반드시 null 로 되돌린다. 안 그러면 saveTimer/pushTimer 가 첫 저장 뒤로 영원히 truthy 라
+     flushSave 의 '보낼 게 있을 때만' 가드가 죽고, 오래 놔둔 탭이 탭 전환만으로
+     낡은 상태를 서버에 되쓴다(다른 창에서 바꾼 모델·크기·프롬프트가 되돌아갔다). */
+  saveTimer = setTimeout(() => { saveTimer = null; try { localStorage.setItem('nst_state', JSON.stringify(S)); } catch (e) { logErr('로컬 저장 실패: ' + e.message); } }, 250);
   /* 미리보기는 **미뤄서** 갱신한다.
      예전엔 여기서 곧바로 updatePreview() 를 불렀다. save() 는 글자 하나마다 불리는데,
      그 안에서 청크 77개 치환 + T5 토큰 세기 + 중복 검사를 매번 다시 했다.
@@ -223,14 +238,26 @@ function save() {
   schedulePreview();
   if (R.booted) {
     clearTimeout(pushTimer);
-    // force: 사용자가 "일부러" 비운 경우. 서버의 빈-프롬프트 보호는 사고를 막으려는 것이지
-    // 사용자가 직접 지우는 것까지 막으려는 게 아니다 (막으면 비우기가 아예 불가능해진다).
-    const f = R._forcePush; R._forcePush = false;
-    pushTimer = setTimeout(() => pushStateToServer(f), 1200);
+    /* force: 사용자가 "일부러" 비운 경우. 서버의 빈-프롬프트 보호는 사고를 막으려는 것이지
+       사용자가 직접 지우는 것까지 막으려는 게 아니다 (막으면 비우기가 아예 불가능해진다).
+       ★ 표시를 '예약할 때' 소비하면 안 된다 — 1.2초 안에 다른 조작이 save() 를 한 번만 더 불러도
+         타이머가 새로 잡히면서 force 가 사라져, 지운 프롬프트가 서버 값으로 되살아났다.
+         실제로 보낼 때까지 들고 있는다. */
+    if (R._forcePush) { pendingForce = true; R._forcePush = false; }
+    pushTimer = setTimeout(() => { pushTimer = null; const f = pendingForce; pendingForce = false; pushStateToServer(f); }, 1200);
   }
 }
+/* 부팅(서버 동기화)이 끝나기 전에도 **사용자가 직접 친 글자**는 '내 편집' 으로 도장을 찍는다.
+   save() 는 R.booted 전이면 savedAt 을 안 찍는데(빈 브라우저가 서버를 덮는 사고 방지),
+   그 규칙을 사람이 친 글자에까지 적용해서 — 서버가 붙는 순간 방금 친 것이 조용히 서버 값으로 덮였다.
+   자동으로 심는 청크·프리셋에는 이 도장을 찍지 않으므로 원래 보호는 그대로다. */
+function markUserEdit() { if (!R.booted) S.savedAt = Date.now(); }
 /* 사용자가 직접 지운 뒤 부르는 저장 — 서버 보호를 넘어 그대로 반영한다 */
 function saveCleared() { R._forcePush = true; save(); }
+/* 프롬프트 칸을 편집한 뒤의 저장. 결과가 완전히 비었으면 '일부러 지운 것' 으로 본다.
+   예전엔 칸 ✕ 나 Ctrl+A→Delete 로 비우면 일반 save() 라, 서버 보호(409)에 걸려
+   1.2초 뒤에 지운 글이 통째로 되살아났다. */
+function savePrompt() { markUserEdit(); (String(getMainPrompt() || '').trim() ? save : saveCleared)(); }
 /* "사용자가 만든 내용" 의 개수.
    앱이 켜질 때 검열·작가 청크 23개를 자동으로 심는데(initTools), 그걸 세면
    새로 연 브라우저도 절대 "빈 상태" 로 판정되지 않는다.
@@ -247,15 +274,31 @@ function normalizeState(o) {
   /* 청크 칩 띠를 chunkFloatOff(끄기) 에서 chunkFloatOn(켜기) 으로 바꿨다.
      📌 로 고정해 두셨던 분은 이 기능을 즐겨 쓰신 것이니 켠 채로 넘긴다. */
   if (o.chunkFloatOn === undefined && o.chunkFloatPin) o.chunkFloatOn = true;
+  /* 값이 DEFAULTS 의 '그 객체' 이면 반드시 복사한다.
+     부팅은 { ...DEFAULTS, ...저장분 } 이라 저장분에 없는 키는 DEFAULTS 의 배열·객체를 그대로 가리킨다.
+     그 상태에서 칸 이름을 고치면 DEFAULTS.sections 자체가 바뀌어, '기본 5칸으로 복원' 이
+     사용자가 고친 것을 그대로 되돌려 놓았다(복원이 아무 일도 안 하는 것처럼 보였다). */
   for (const k in DEFAULTS) {
     const d = DEFAULTS[k], v = o[k];
-    if (Array.isArray(d)) { if (!Array.isArray(v)) o[k] = Array.isArray(d) ? [...d] : []; }
-    else if (d && typeof d === 'object') { if (!v || typeof v !== 'object' || Array.isArray(v)) o[k] = { ...d }; }
+    if (Array.isArray(d)) {
+      if (!Array.isArray(v)) o[k] = d.map(x => (x && typeof x === 'object') ? { ...x } : x);
+      else if (v === d) o[k] = d.map(x => (x && typeof x === 'object') ? { ...x } : x);
+    }
+    else if (d && typeof d === 'object') {
+      if (!v || typeof v !== 'object' || Array.isArray(v)) o[k] = { ...d };
+      else if (v === d) o[k] = { ...d };
+    }
     else if (typeof d === 'string') { if (typeof v !== 'string') o[k] = d; }
     else if (typeof d === 'number') { if (typeof v !== 'number' || !isFinite(v)) o[k] = d; }
     else if (typeof d === 'boolean') { if (typeof v !== 'boolean') o[k] = d; }
   }
   if (!MODELS[o.model]) o.model = DEFAULTS.model;
+  /* 12.3 까지는 스트림이 한 번만 깨져도(429·NAI 쪽 재시도 안내까지) 실시간 미리보기를 영구히 껐다.
+     사용자가 직접 끈 게 아니면(streamOffAuto 가 false 가 아니면) 한 번만 되살린다. */
+  if (o.stream === false && o.streamOffAuto !== false && !o.streamReset124) {
+    o.stream = true; o.streamReset124 = true;
+    setTimeout(() => { if (typeof toast === 'function') toast('실시간 미리보기를 다시 켰습니다 — 일시 오류로 자동으로 꺼져 있던 것입니다 (⚙설정에서 끌 수 있습니다)'); }, 2500);
+  }
   if (!o.deleted || typeof o.deleted !== 'object') o.deleted = {};
   if (!o.ov || typeof o.ov !== 'object') o.ov = {};
   return o;
@@ -401,6 +444,19 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
     // 대기열에서 뺀 곡이 서버/다른 탭에서 그대로 되살아났다. 이 둘은 최신 쪽(base)을 그대로 쓴다.
     for (const [k, key, kind] of [['chunks', 'name', 'chunk'], ['styles', 'id', 'style'], ['characters', 'name', 'char'], ['scenes', 'id', 'scene']])
       base[k] = mergeByKey(base[k], other[k], key, kind, S.deleted, srv.deleted);
+    /* 쌓기만 하는 기록은 합집합으로 합친다 — 채점 한 줄이 Gemini 호출 한 번(=요금 한 번)이다.
+       서버는 POST 때 합쳐 주는데 이쪽(pull)은 안 합쳐서, 다른 창·다른 기기에서 매긴 채점이
+       이 브라우저엔 영영 안 보였고, force 저장 한 번에 서버에서도 사라졌다. */
+    {
+      const uniLog = (x, y, keyOf, cap) => {
+        const out = [...(x || [])]; const seen = new Set(out.map(keyOf));
+        (y || []).forEach(v => { const kk = keyOf(v); if (v && !seen.has(kk)) { seen.add(kk); out.push(v); } });
+        out.sort((p, q) => (p.t || 0) - (q.t || 0));
+        return out.slice(-cap);
+      };
+      base.judgeLog = uniLog(base.judgeLog, other.judgeLog, x => (x && x.id != null) ? 'i' + x.id : 't' + (x && x.t) + '_' + (x && x.seed), 300);
+      base.mushLog = uniLog(base.mushLog, other.mushLog, x => 't' + (x && x.t), 120);
+    }
     base.deleted = { ...(srv.deleted || {}), ...(S.deleted || {}) };
     base.chunkCats = [...new Set([...(base.chunkCats || []), ...(other.chunkCats || [])])].filter(c => !isTombed(base.deleted, 'cat', c));
     // 복구용 백업은 "실제로 내용이 줄어드는" 경우에만 남긴다.
@@ -422,7 +478,9 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
       S = base; R.booted = true; save();
       if (diverged) toast('이 브라우저 설정으로 서버를 갱신했습니다 — 다른 창/기기에서 바꾼 설정이 있었다면 📦백업에서 되돌릴 수 있습니다');
       // 되살린 글자가 화면에 보이도록 다시 그린다 (예전엔 S 만 바뀌고 칸은 빈 채였다)
-      if (textFromServer) { if (typeof renderSections === 'function') renderSections(); if (typeof syncUI === 'function') syncUI(); }
+      /* renderChars() 가 빠져 있었다 — 서버에서 되살린 캐릭터가 화면에 안 보이는데
+         생성 요청에는 그대로 실려 나갔다(보이지 않는 캐릭터). */
+      if (textFromServer) { if (typeof renderSections === 'function') renderSections(); if (typeof renderChars === 'function') renderChars(); if (typeof syncUI === 'function') syncUI(); if (typeof refreshSceneMirror === 'function') refreshSceneMirror(); }
       if (typeof renderChunkBar === 'function') renderChunkBar();
       if (typeof renderStyleSelects === 'function') renderStyleSelects();
       return false;
@@ -548,6 +606,13 @@ function chunkIsFrag(c) {
   // ① 이어쓰기 신호 — 앞 줄에 붙이려고 쓴 것이 분명하다
   if (lines.slice(1).some(l => l.startsWith(','))) return false;
   if (lines.some(l => !l.replace(/[,\s]/g, ''))) return false;
+  /* 마지막이 아닌 줄이 쉼표로 끝나면 그것도 이어쓰기다 — 태그 하나씩 줄바꿈해 적은 흔한 모양.
+       standing,
+       arms up,
+       looking at viewer
+     예전엔 줄 "안" 의 쉼표만 봐서 이런 청크를 후보 목록으로 오해했고, 매번 한 줄만 나갔다.
+     후보 목록(artist:이름 나열 같은 것)은 줄 끝에 쉼표를 안 붙인다. */
+  if (lines.slice(0, -1).some(l => l.endsWith(','))) return false;
 
   /* ② 줄 안에 쉼표가 있으면 그 줄 자체가 이미 태그 목록이다 → 한 덩어리를 나눠 쓴 것.
         후보 목록은 줄마다 후보가 하나씩이라 줄 안에 쉼표가 없다(예: artist:이름).
@@ -624,7 +689,6 @@ const normKey = s => String(s || '').trim().toLowerCase().replace(/[\s_]+/g, '_'
    계산했다 — 프롬프트 토큰 수 × 청크 수 × 입력칸 수 만큼. 청크가 많을수록 그대로 느려졌다.
    (실측: 청크 0개 0.057ms → 77개 0.464ms → 200개 1.089ms)
    청크가 바뀌면 반드시 save() 가 뒤따르므로 거기서 버린다. 오래된 값이 남을 수 없다. */
-let _chunkByName = null;
 function chunkByName() {
   const arr = S.chunks || [];
   // save() 를 거치지 않고 청크를 넣거나 빼는 자리가 몇 군데 있다(복원·초기 씨앗 등).
@@ -647,7 +711,9 @@ function chunkMap() {
   for (const c of S.chunks) {
     if (!c.name) continue;
     m[normKey(c.name)] = chunkIsFrag(c) ? '<' + c.name + '>'
-      : (chunkLines(c).length > 1 ? chunkBlockText(c) : c.text);
+      /* 한 줄이라도 chunkBlockText 를 태운다 — 주석(#)·앞뒤 쉼표를 걷어내려면 같은 손질이 필요하다.
+         예전엔 c.text 를 날것으로 써서, '# 이건 메모' 같은 줄이 그대로 NAI 로 나갔다. */
+      : chunkBlockText(c);
   }
   return m;
 }
@@ -659,8 +725,14 @@ function expandChunks(s, depth, active) {
   depth = depth || 0;
   active = active || new Set();
   if (depth > 5 || !S.chunks.length) return s;
+  /* <...> 안(조각 이름·랜덤 옵션)은 건드리지 않는다 — 이 보호가 바깥(chunksKeepTags)에만 있어서,
+     청크 **본문**에 <다른청크> 를 적어 두면 그 이름이 먼저 치환돼 꺾쇠가 남았다.
+     실제로 `<artist:bbb>` 처럼 꺾쇠째 NAI 로 나갔다. 여기(재귀 안쪽)에서도 같이 보호한다. */
+  const held = [];
+  const MK = '\u0001';
+  let t = String(s).replace(/<[^<>]*>/g, m => { held.push(m); return MK + (held.length - 1) + MK; });
   const map = chunkMap();
-  return String(s).replace(/([^,\n{}\[\]<>|]+)/g, seg => {
+  t = t.replace(/([^,\n{}\[\]<>|\u0001]+)/g, seg => {
     const m = seg.match(/^(\s*)(-?[\d.]+::)?(@?)(.*?)(::)?(\s*)$/);
     if (!m) return seg;
     const key = normKey(m[4]);
@@ -669,6 +741,7 @@ function expandChunks(s, depth, active) {
     const inner = expandChunks(map[key], depth + 1, next);
     return m[1] + (m[2] || '') + inner + (m[5] || '') + m[6];
   });
+  return t.replace(/\u0001(\d+)\u0001/g, (m, i) => (held[+i] != null ? held[+i] : m));
 }
 function isChunkToken(tok) { const t = chunkKeyOf(tok); return !!t && chunkByName().has(t); }
 /* 최종 프롬프트에서 두 번 이상 나오는 태그를 찾는다.
@@ -809,21 +882,36 @@ async function blobSize(blob) { const i = await blobToImage(blob); return [i.wid
 function snap64(v) { return Math.max(64, Math.min(2048, Math.round(v / 64) * 64)); }
 
 /* IndexedDB */
+/* 연 연결을 재사용한다. 예전엔 작업마다 새로 열어 한 세션에 수백 개가 쌓였다
+   (브라우저가 그만큼 메모리를 물고 있고, 스키마를 올릴 때 blocked 가 나기도 쉬웠다).
+   연결이 끊기면(다른 탭이 스키마를 올리거나 브라우저가 닫으면) 캐시를 버리고 다시 연다. */
+let _idbP = null;
 function idb() {
-  return new Promise((res, rej) => {
+  if (_idbP) return _idbP;
+  const p = _idbP = new Promise((res, rej) => {
     const rq = indexedDB.open('nst', 2);
     rq.onupgradeneeded = () => {
       const db = rq.result;
       if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
       if (!db.objectStoreNames.contains('hist')) db.createObjectStore('hist', { keyPath: 'id', autoIncrement: true });
     };
-    rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error);
+    rq.onsuccess = () => {
+      const db = rq.result;
+      // 연결이 끊기거나 다른 탭이 스키마를 올리면 캐시를 버린다 (다음 호출에서 새로 연다)
+      db.onclose = () => { if (_idbP === p) _idbP = null; };
+      db.onversionchange = () => { try { db.close(); } catch (e) {} if (_idbP === p) _idbP = null; };
+      res(db);
+    };
+    rq.onerror = () => rej(rq.error);
     /* 다음에 스키마 버전을 올릴 때, 옛 버전 탭이 하나라도 열려 있으면 여기로 떨어진다.
        onblocked 에서는 onsuccess 도 onerror 도 오지 않는다 —
        처리하지 않으면 이 Promise 가 영원히 안 끝나고, await idb() 뒤가 통째로 멈춘다
        (히스토리가 빈 채로 있고 저장도 안 되는데 오류 하나 안 뜬다). */
     rq.onblocked = () => rej(new Error('다른 탭에서 이 앱이 열려 있어 이미지 저장소를 열지 못했습니다 — 다른 탭을 닫고 새로고침하세요'));
   });
+  // 실패는 캐시하지 않는다 — 안 그러면 한 번 실패한 뒤로 이 세션 내내 저장이 영영 안 된다
+  p.catch(() => { if (_idbP === p) _idbP = null; });
+  return p;
 }
 /* onabort 가 반드시 있어야 한다. 공간이 모자라면 트랜잭션은 **커밋 단계에서** abort 되는데,
    그때는 요청 오류(onerror)가 오지 않는다 → resolve 도 reject 도 안 되어 Promise 가 영원히 매달린다.
@@ -941,6 +1029,32 @@ function stealthDetect(imgData) {
   let s = ''; for (let i = 0; i + 8 <= bits.length; i += 8) s += String.fromCharCode(parseInt(bits.slice(i, i + 8), 2));
   return /^stealth_png(info|comp)/.test(s) ? s.slice(0, 15) : null;
 }
+/* stealth pnginfo 읽기: 알파 LSB 를 x→y 순서로 모아
+   "stealth_pngcomp"(gzip) / "stealth_pnginfo"(그대로) + 32비트 길이(비트 수) + 본문(JSON).
+   novelai.net 은 텍스트 청크와 함께 이것도 심는다 — 텍스트 청크만 지워진 파일에서 프롬프트를 살린다. */
+async function readStealthMeta(blob) {
+  const img = await blobToImage(blob);
+  const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+  const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0);
+  const { data, width, height } = x.getImageData(0, 0, c.width, c.height);
+  const total = width * height; let n = 0;
+  const bit = () => { const i = n++; const px = Math.floor(i / height), py = i % height; return data[(py * width + px) * 4 + 3] & 1; };
+  const byte = () => { let v = 0; for (let k = 0; k < 8; k++) v = (v << 1) | bit(); return v; };
+  if (total < 8 * 19) return null;
+  let sig = ''; for (let k = 0; k < 15; k++) sig += String.fromCharCode(byte());
+  if (!/^stealth_png(info|comp)$/.test(sig)) return null;
+  let len = 0; for (let k = 0; k < 4; k++) len = len * 256 + byte();       // 비트 수
+  const bytes = Math.floor(len / 8);
+  if (bytes <= 0 || 15 * 8 + 32 + len > total) return null;
+  const u8 = new Uint8Array(bytes); for (let k = 0; k < bytes; k++) u8[k] = byte();
+  let txt;
+  if (sig === 'stealth_pngcomp') {
+    if (typeof DecompressionStream !== 'function') return null;
+    txt = await new Response(new Blob([u8]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+  } else txt = new TextDecoder().decode(u8);
+  const j = JSON.parse(txt);
+  return (j && typeof j === 'object') ? j : null;
+}
 async function stripBlob(blob) { // 완전 제거: 텍스트 청크 제거 + 픽셀 재인코딩(알파 LSB를 1로 고정 → 숨은 stealth 메타 파괴). 보이는 이미지는 그대로.
   const img = await blobToImage(blob);
   const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
@@ -961,22 +1075,38 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.3';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.4';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
-async function tryHealth(base) {
-  try {
-    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 2500);
-    const r = await fetch(base + '/health', { signal: ctl.signal, cache: 'no-store' });
-    clearTimeout(t);
-    if (r.ok) return await r.json();
-  } catch (e) {}
+/* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
+   이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
+   브라우저의 호스트당 동시 연결 한도(6)가 차면 /health 가 그냥 줄을 서다 2.5초에 잘린다.
+   그러면 멀쩡히 도는 서버를 두고 배너가 "start.bat 을 다시 실행하라" 고 시켰고,
+   더 나쁘게는 다른 포트로 주소를 옮겨 히스토리가 사라진 것처럼 보였다.
+   → 실패하면 조금 기다렸다 한 번 더, 더 넉넉한 시간으로 확인한다. */
+async function tryHealth(base, tries) {
+  const once = async ms => {
+    try {
+      const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), ms);
+      const r = await fetch(base + '/health', { signal: ctl.signal, cache: 'no-store' });
+      clearTimeout(t);
+      if (r.ok) return await r.json();
+    } catch (e) {}
+    return null;
+  };
+  const n = tries || 1;
+  for (let i = 0; i < n; i++) {
+    const j = await once(i === 0 ? 2500 : 7000);
+    if (j) return j;
+    if (i + 1 < n) await sleep(400);
+  }
   return null;
 }
 async function probeServer() {
   R.probeTried = [];
   // 1) 같은 주소(서버로 열었을 때)
   if (!IS_FILE) {
-    const j = await tryHealth('');
+    // 지금 주소는 두 번까지 확인한다 — 여기서 잘못 판정하면 주소를 옮기는 데까지 간다
+    const j = await tryHealth('', 2);
     R.probeTried.push(location.origin);
     if (j) { R.api = ''; R.srvOk = true; R.srvInfo = j; R.srvToken = !!j.hasToken; R.srvTokenHint = j.tokenHint || ''; R.oldServer = false; return j; }
   }
@@ -987,15 +1117,28 @@ async function probeServer() {
     R.probeTried.push(base);
     const j = await tryHealth(base);
     if (j) {
-      // 예전 포트(예: 8766)로 열린 탭/즐겨찾기인데 지금 서버는 다른 포트 → 올바른 주소로 이동 (히스토리·설정이 주소별로 저장되므로)
-      if (!IS_FILE && PORTS.includes(+location.port) && location.port !== String(p)) { location.replace(base + '/' + location.search); return j; }
+      /* 예전 포트로 열린 탭/즐겨찾기인데 지금 서버는 다른 포트 → 올바른 주소로 이동.
+         다만 **생성 중이거나 붙여 둔 것이 있으면 옮기지 않는다** — 주소가 바뀌면 그 화면의
+         진행 중 생성(이미 요금이 나갔을 수 있다)·붙인 이미지·마스크가 통째로 사라진다.
+         그 경우엔 옮기지 않고 그 서버에 붙어서 계속 쓴다(기능은 전부 정상이다). */
+      const busy = R.gen || (R.auto && R.auto.on) || (typeof SR !== 'undefined' && SR.on) || R.i2iBlob || (R.vibes && R.vibes.length) || (R.prefs && R.prefs.length);
+      if (!IS_FILE && PORTS.includes(+location.port) && location.port !== String(p) && !busy) { location.replace(base + '/' + location.search); return j; }
       R.api = base; R.srvOk = true; R.srvInfo = j; R.srvToken = !!j.hasToken; R.srvTokenHint = j.tokenHint || ''; R.oldServer = false; return j;
     }
   }
   R.srvOk = false;
   // 정적 파일은 오는데 /health 가 없으면 = 예전 버전 서버 창이 아직 떠 있는 것
   R.oldServer = false;
-  if (!IS_FILE) { try { const r = await fetch('/style.css', { cache: 'no-store' }); if (r.ok) R.oldServer = true; } catch (e) {} }
+  /* 데드라인이 없으면 이 fetch 하나가 영영 pending 이 되고, srvLoop 는 자기 자신을
+     '함수 끝에서' 다시 예약하므로 서버 감시가 통째로 멈춘다(연결이 돌아와도 모른다). */
+  if (!IS_FILE) {
+    try {
+      const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 4000);
+      const r = await fetch('/style.css', { cache: 'no-store', signal: ctl.signal });
+      clearTimeout(t);
+      if (r.ok) R.oldServer = true;
+    } catch (e) {}
+  }
   return null;
 }
 function setSrvUI(ok, info) {
@@ -1020,7 +1163,9 @@ function setSrvUI(ok, info) {
       ? '⚠ <b>예전 버전의 서버 창이 아직 켜져 있습니다.</b> 열려 있는 검은 창(start.bat)을 <b>모두 닫고</b> start.bat을 다시 실행한 뒤 새로고침하세요.'
       : '⚠ <b>로컬 서버(start.bat)에 연결되지 않았습니다.</b> 같은 폴더의 <b>start.bat</b>을 실행하면 자동으로 연결됩니다 (3초마다 재시도). 검은 창이 켜져 있는데도 이 배너가 남아 있으면 검은 창에 표시된 주소(예: http://127.0.0.1:8765/)를 그대로 주소창에 입력해 여세요.')
       + `<div class="hint" style="color:#fff;opacity:.85;margin-top:4px">현재 주소: ${escHtml(location.href.split('?')[0])} · 시도한 서버: ${escHtml(tried || '-')} <button class="btn xs" id="srvRetry" style="margin-left:8px">지금 다시 연결</button></div>`;
-    const rb = w.querySelector('#srvRetry'); if (rb) rb.onclick = async () => { rb.textContent = '연결 중…'; const info = await probeServer(); setSrvUI(R.srvOk, info); if (R.srvOk) { refreshAnlas().catch(() => {}); if (window.onServerUp) window.onServerUp(); } };
+    /* srvLoop 의 재연결과 **같은 순서**로 돈다. 예전엔 pullStateFromServer 없이 R.srvOk 만 켜서,
+       서버 설정과 합치기도 전에 이 창의 설정이 서버를 덮어쓸 수 있었다. */
+    const rb = w.querySelector('#srvRetry'); if (rb) rb.onclick = async () => { rb.textContent = '연결 중…'; const info = await probeServer(); setSrvUI(R.srvOk, info); if (R.srvOk) { R.srvOkPrev = true; await pullStateFromServer(); await guardPromptLoss(); refreshAnlas().catch(() => {}); if (window.onServerUp) window.onServerUp(); } };
   } else if (w) w.remove();
   updateAnlasLabel();
 }
@@ -1045,6 +1190,9 @@ async function guardPromptLoss() {
     if (typeof renderSections === 'function') renderSections();
     if (typeof renderChars === 'function') renderChars();
     if (typeof syncUI === 'function') syncUI();
+    /* 씬 화면은 자기만의 '기본 프롬프트' 칸을 갖고 있다 — 여기서 다시 그리지 않으면
+       되살린 글자가 씬 화면엔 안 보이고, 그 칸에 한 글자만 쳐도 빈 값으로 다시 덮인다. */
+    if (typeof refreshSceneMirror === 'function') refreshSceneMirror();
     save();
     toast('프롬프트가 비어 있어 서버에 저장돼 있던 것을 되살렸습니다');
     logErr('프롬프트 복구: 화면은 비었는데 서버에 글자가 있었음');
@@ -1155,7 +1303,10 @@ async function apiError(res) {
   /* 500번대라고 다 NAI 가 아니다. 로컬 서버는 유튜브·Gemini 실패도 502 로 돌려준다.
      예전엔 유튜브 영상이 지워진 것뿐인데 "NAI 이미지 생성 Degraded (NAI 쪽 문제입니다)" 가
      붙어서, 엉뚱한 데를 의심하게 만들었다. */
-  const isNaiPath = !/\/(yt|ai)\//.test(res.url || '');
+  /* 로컬 라우트(/yt/·/ai/judge·/ai/prompt)만 빼야 한다. 예전 정규식은 주소 '어디에나' /ai/ 가 있으면
+     걸려서, 정작 NAI 생성 경로(/img/ai/generate-image)가 전부 제외됐다 —
+     NAI 쪽 장애일 때 안내가 절대 안 붙었다. */
+  const isNaiPath = !/\/(yt\/|ai\/(judge|prompt))/.test(res.url || '');
   if (res.status >= 500 && isNaiPath) { // NAI 서버 오류 → 공식 상태가 장애면 그 사실을 함께 알림 (내 문제 아님)
     const o = NST.last && NST.last.official, img = o && officialImg(o);
     if (img && img.code > 100) msg += ' · NAI 공식 상태: 이미지 생성 ' + img.status + ' (NAI 쪽 문제입니다)';
@@ -1261,21 +1412,80 @@ function atOrder(chars) {
   return rows([...chars].sort((a, b) => a.center.y - b.center.y))
     .flatMap(r => r.sort((a, b) => a.center.x - b.center.x));
 }
-function autoTextV5(prompt, chars, useCoords) {
+/* 따옴표 글자를 모은다 (번들 51964 I()) — 붙일 때와 뗄 때 같은 부품을 쓴다 */
+function atCollect(prompt, chars, useCoords) {
   const cs = (chars || []).filter(c => (c.enabled === undefined || c.enabled) && (c.prompt || '').length > 0);
-  if (AT_HAS_TEXT.test(prompt) || cs.some(c => AT_HAS_TEXT.test(c.prompt))) return prompt;
   const groups = [atQuoted(prompt), ...(useCoords ? atOrder(cs) : cs).map(c => atQuoted(c.prompt))];
   const all = groups.flat().join('');
   // 일본어·중국어가 3할을 넘으면 각 묶음을 뒤집는다 (세로쓰기 순서)
   const cjk = (all.match(AT_CJK) || []).length;
   if (all.length && cjk / all.length > 0.3) groups.forEach(g => g.reverse());
-  const bits = groups.flat();
+  return groups.flat();
+}
+const AT_MARK = /(?:^|\s|[,.:[\]{}、。])teXt:(?!:)/;   // 자동으로 붙인 꼬리만 (대소문자 그대로 — 번들 51964 h)
+/* 불러올 때: 'teXt:' 뒤 글자가 "따옴표 글자를 모은 결과" 와 똑같으면 자동으로 붙은 것이니 떼어낸다.
+   앱이 생성할 때 다시 붙이므로, 안 떼면 두 벌이 된다. (번들 PAn 과 같은 규칙) */
+function stripAutoTextV5(prompt, chars, useCoords) {
+  /* 자동 꼬리는 프롬프트 **전체**의 끝에 붙는다(autoTextV5). 그러니 뗄 때도 전체에서 본다.
+     예전엔 '|' 조각별로 봐서, 따옴표가 앞 조각에 있고 꼬리는 마지막 조각 끝에 붙는 흔한 모양
+     (`1girl, "HI" | 2girls, teXt: HI`)에서 꼬리가 그대로 남았다 —
+     그 프롬프트로 다시 생성하면 옛 글자가 계속 그려진다. */
+  const s = String(prompt || '');
+  const m = s.match(AT_MARK); if (!m) return s;
+  const head = s.slice(0, m.index), after = s.slice(m.index + m[0].length).trim();
+  return after === atCollect(head, chars, useCoords).join('\n\n') ? head.replace(/[\s,]+$/, '') : s;
+}
+function autoTextV5(prompt, chars, useCoords) {
+  const cs = (chars || []).filter(c => (c.enabled === undefined || c.enabled) && (c.prompt || '').length > 0);
+  if (AT_HAS_TEXT.test(prompt) || cs.some(c => AT_HAS_TEXT.test(c.prompt))) return prompt;
+  const bits = atCollect(prompt, chars, useCoords);
   if (!bits.length) return prompt;
   const head = String(prompt || '').replace(/[\s,]+$/, '');
   const tail = 'teXt: ' + bits.join('\n\n');
   return head.length > 0 ? head + ', ' + tail : tail;
 }
 
+
+
+/* ─── NAI 가 요청에 같이 싣는 "프리셋 힌트" ───────────────────────
+   novelai.net(번들 7416) 은 tag_hint_qt / tag_hint_uc_preset 을 숫자로 보낸다 (모듈 34342 표):
+     none 0 · standard 1 · heavy 2 · light 3 · humanFocus 4 · furryFocus 5
+   서버는 이 값을 PNG Comment 에 되돌려 주고, novelai.net 은 불러올 때 이 힌트로
+   품질 태그·UC 프리셋을 정확히 떼어낸다. 우리 UC 표의 id → 힌트 번호. */
+const UC_HINT = { 0: 2, 1: 3, 3: 4, 2: 5, 4: 0 };
+const qNorm = q => String(q || '').replace(/^\s*,\s*/, '').trim();
+/* 지금 붙는 품질 프리셋의 힌트 번호: 끔 0 · standard 1 · light(V5 의 두 번째) 3 */
+function qualityHint(m, qs) {
+  if (!qs) return 0;
+  const info = MODELS[modelOf(m)] || {};
+  return (info.quality2 && qNorm(qs) === qNorm(info.quality2)) ? 3 : 1;
+}
+
+/* ─── 불러올 때의 역산 (novelai.net 불러오기와 같은 규칙 — 번들 9874 · 34342 pI) ───
+   addQualityTag 가 넣은 자리에서 품질 덩어리를 떼어낸다. 못 떼면 null. */
+function stripQualityTag(prompt, q, caps) {
+  q = qNorm(q); if (!q) return null;
+  const pi = seg => { seg = seg == null ? '' : seg; if (seg === q) return ''; return seg.endsWith(', ' + q) ? seg.slice(0, -(q.length + 2)) : null; };
+  if (!caps || !caps.maxChars) {   // V3 계열: 조각마다(끝의 :가중치 앞에) 붙였으니 조각마다 전부 떼여야 한다
+    const segs = String(prompt || '').split('|').map(seg => { const w = (seg.match(/(:[\d.]+$)/) || [''])[0]; const r = pi(w ? seg.slice(0, -w.length) : seg); return r === null ? null : r + w; });
+    return segs.some(x => x === null) ? null : segs.join('|');
+  }
+  const segs = qSplitSegs(prompt); let s0 = segs[0], tail = '', sep = '';
+  if (caps.text) {
+    const m = s0.match(Q_TEXT_MARK);
+    if (m) {
+      /* 붙일 때와 **같은 자리**('text:' 의 시작)에서 자른다. 예전엔 구분자 앞에서 잘라
+         앞쪽에 쉼표가 남는 바람에 품질 태그를 못 떼고 그대로 프롬프트에 남았다. */
+      const at = m.index + m[0].length - 5;
+      tail = s0.slice(at); s0 = s0.slice(0, at);
+      const t = s0.replace(/[\s,]+$/, ''); sep = s0.slice(t.length); s0 = t;
+    }
+  }
+  const r = pi(s0); if (r === null) return null;
+  // 앞이 통째로 품질 태그였다면(= 'text:' 가 맨 앞인 프롬프트) 붙일 때 만든 구분자도 같이 뗀다
+  segs[0] = r ? r + sep + tail : tail;
+  return segs.join('|');
+}
 
 /* ─── 품질 태그를 붙이는 자리 ───────────────────────────────────
    NAI(번들 모듈 41179 g())는 맨 끝에 붙이지 않는다.
@@ -1301,9 +1511,14 @@ function addQualityTag(prompt, q, caps) {
     if (caps && caps.text) {
       const m = seg.match(Q_TEXT_MARK);
       if (m) {
-        const parts = seg.split(Q_TEXT_MARK);
-        parts[0] = parts[0] ? parts[0] + ', ' + q : q;
-        return parts.join(m[0]);
+        /* 'text:' 가 시작하는 자리에서 자른다. 앞쪽 구분자는 그대로 두어 novelai.net 과 같은 모양을 유지한다.
+           예전엔 split/join 이라 (ㄱ) 맨 앞이면 구분자가 없어 'no texttext:' 로 들러붙었고
+           (ㄴ) 마커가 둘 이상이면 첫 구분자가 나머지에도 덮어써졌다. */
+        const at = m.index + m[0].length - 5;         // 'text:' 의 시작
+        const head = seg.slice(0, at), tail = seg.slice(at);
+        const base = head.replace(/\s+$/, '');
+        if (!base.trim()) return q + ', ' + tail;      // 맨 앞 — 구분자를 만들어 준다
+        return base + ', ' + q + head.slice(base.length) + tail;
       }
     }
     return seg ? seg + ', ' + q : q;
@@ -1335,8 +1550,10 @@ function buildPayload(ov) {
      따로 붙이면 'text:' 가 있는 프롬프트에서 자리가 어긋난다.
      (tag_hint_transparent_background 는 서버가 해석하지 않는 전달용 힌트라
       프롬프트에 글자를 직접 넣어야 배경이 지워진다.) */
+  let qtHint = 0;
   {
     let qs = (S.quality && !ov.noQuality) ? String(getQuality(m) || '').replace(/^\s*,\s*/, '') : '';
+    qtHint = qualityHint(m, qs);
     if (!ov.noQuality && capsOf(m).transparency && S.transparent) {
       qs = qs ? 'transparent background, ' + qs : 'transparent background';
     }
@@ -1352,6 +1569,11 @@ function buildPayload(ov) {
   if (ov.uc == null && S.autoNsfw !== false && !NSFW_EXEMPT.includes(m) && getUcText(m, ucIdx(m)) && !prompt.toLowerCase().includes('nsfw') && !/^nsfw\b/i.test(uc)) uc = uc ? 'nsfw, ' + uc : 'nsfw';
   const caps = capsOf(m);
   let chars = (ov.chars || S.chars.filter(c => c.prompt.trim())).map(c => ({ ...c }));
+  /* 캐릭터를 아예 안 받는 모델(V3 계열)로 바꿔 놓고 캐릭터 칸을 채워 두면, 예전엔 말없이 통째로 빠졌다.
+     인원 초과는 알려 주면서 '전부 빠짐' 만 조용했다 — 결과가 왜 다른지 알 길이 없다. */
+  if (!caps.maxChars && chars.length && typeof toast === 'function' && !ov.quiet) {
+    toast(`${MODELS[m].name} 은 캐릭터 프롬프트를 받지 않습니다 — 캐릭터 ${chars.length}명은 이번 생성에서 빠집니다`, 'err');
+  }
   if (caps.maxChars && chars.length > caps.maxChars) {
     // 넘으면 NAI 가 요청 자체를 거절한다. 잘라 보내되 말없이 하지는 않는다.
     if (typeof toast === 'function' && !ov.quiet) toast(`이 모델은 캐릭터를 ${caps.maxChars}명까지 받습니다 — 뒤쪽 ${chars.length - caps.maxChars}명은 빠졌습니다`, 'err');
@@ -1364,6 +1586,8 @@ function buildPayload(ov) {
     params_version: 4, width: w, height: h,
     scale: S.scale, sampler: S.sampler, steps: S.steps, n_samples: ov.n || S.n || 1,
     ucPreset: (info.ucs[ucIdx(m)] || {}).id != null ? info.ucs[ucIdx(m)].id : 0, qualityToggle: S.quality, autoSmea: false,
+    // novelai.net 이 같이 보내는 프리셋 힌트 (숫자가 아니면 NAI 도 지운다 → undefined 는 JSON 에서 빠진다)
+    tag_hint_qt: qtHint, tag_hint_uc_preset: ov.uc != null ? undefined : UC_HINT[(info.ucs[ucIdx(m)] || {}).id],
     dynamic_thresholding: S.decrisper, controlnet_strength: 1, legacy: false, add_original_image: true,
     cfg_rescale: S.rescale, noise_schedule: S.schedule, legacy_v3_extend: false,
     skip_cfg_above_sigma: S.variety ? varietySigma(m, w, h) : null, use_coords: useCoords, seed,
@@ -1377,7 +1601,10 @@ function buildPayload(ov) {
   };
   /* NAI 는 능력표 autoText 가 켜진 모델(V5)에서만, v4_prompt 를 만들기 직전에 이걸 돌린다.
      S.autoText 를 false 로 두면 끌 수 있다(설정). */
-  if (caps.autoText && S.autoText !== false && ov.prompt == null) {
+  /* ov.prompt 가 있어도 막지 않는다. 씬 모드는 '스타일+씬+메인' 을 이어 붙인 **원본** 을 넘기는데,
+     예전엔 이 가드 때문에 씬으로 뽑은 그림에만 V5 자동 글자(teXt:)가 빠져 결과가 달라졌다.
+     이미 완성된 프롬프트(인핸스·조합 고정)는 autoTextV5 안의 'text: 가 이미 있으면 그대로' 가 막아 준다. */
+  if (caps.autoText && S.autoText !== false) {
     prompt = autoTextV5(prompt, p.characterPrompts, useCoords);
   }
   const body = { input: prompt, model: m, action: 'generate', parameters: p };
@@ -1487,9 +1714,17 @@ async function attachImages(body, ov) {
   }
   if (vibes.length) {
     if (info.ver >= 40) {
-      await ensureVibes();
+      const encFails = await ensureVibes();
       // 원본 없는 라이브러리 바이브는 재인코딩이 불가하므로 현재 모델용 인코딩일 때만 쓴다
       const ready = R.vibes.filter(v => v.enc && (v.b64 || v.encModel === S.model));
+      /* 하나도 못 붙이는데 그대로 보내면, 바이브가 전혀 안 걸린 그림에 Anlas 를 다 쓴다.
+         예전엔 토스트만 띄우고 진행해서, 사용자는 "왜 바이브가 안 먹지?" 하며 돈을 계속 썼다.
+         → 여기서 멈추고 무엇을 하면 되는지 알린다. */
+      if (!ready.length) {
+        throw new Error(encFails
+          ? '바이브 인코딩에 실패해 붙일 수 있는 바이브가 없습니다 — 생성을 멈췄습니다 (잠시 뒤 다시 시도하거나 🎨 목록에서 빼세요)'
+          : '지금 모델용 인코딩이 있는 바이브가 없습니다 — 생성을 멈췄습니다 (원본이 없는 라이브러리 바이브는 다시 인코딩할 수 없습니다. 🎨 목록에서 빼면 그대로 생성됩니다)');
+      }
       if (ready.length < R.vibes.filter(v => v.enc || v.b64).length) toast('현재 모델용 인코딩이 없는 바이브는 제외했습니다');
       if (ready.length) { p.reference_image_multiple = ready.map(v => v.enc); p.reference_strength_multiple = ready.map(v => v.strength); p.normalize_reference_strength_multiple = S.vibeNormalize; }
     } else {
@@ -1498,7 +1733,9 @@ async function attachImages(body, ov) {
   }
   return body;
 }
+/* 실패한 개수를 돌려준다 — 부르는 쪽이 '하나도 못 붙였다' 를 구분해 요금 낭비를 막는다 */
 async function ensureVibes() {
+  let fails = 0;
   for (const v of R.vibes) {
     if (!v.b64) continue;
     if (v.enc && v.encModel === S.model && v.encIe === v.ie) continue;
@@ -1510,9 +1747,10 @@ async function ensureVibes() {
       const enc = bufToB64(await res.arrayBuffer());
       if (mdl !== S.model || ie !== v.ie) { v.state = '설정이 바뀌어 다시 인코딩 필요'; v.stateCls = ''; }  // 결과 폐기 → 다음 생성에서 재인코딩
       else { v.enc = enc; v.encModel = mdl; v.encIe = ie; v.state = '인코딩 완료'; v.stateCls = 'ok'; }
-    } catch (e) { v.enc = null; v.state = '실패: ' + e.message; v.stateCls = 'err'; toast('바이브 인코딩 실패: ' + e.message, 'err'); }
+    } catch (e) { v.enc = null; v.state = '실패: ' + e.message; v.stateCls = 'err'; fails++; toast('바이브 인코딩 실패: ' + e.message, 'err'); }
     renderVibes();
   }
+  return fails;
 }
 function metaOf(body, ov) {
   const p = { ...body.parameters };
@@ -1624,8 +1862,17 @@ async function doGenerate(ov, label) {
            · 받아들여진 뒤에 깨졌다                          → 이번 장은 포기하되, **다음부터** 일반 방식 */
       try {
         blobs = await generateStreaming(body);
+        R.streamFails = 0;
       } catch (e) {
-        if (!e || !e.streamUnusable) { streamOff('깨짐: ' + ((e && e.message) || '')); throw e; }
+        if (!e || !e.streamUnusable) {
+          /* 한 번 깨졌다고 미리보기를 영구히 끄지 않는다. 429(동시 생성 제한)·네트워크 끊김·NAI 쪽 재시도는
+             모두 일시적이다 — 예전엔 첫 실패에 바로 껐고, 사용자는 왜 꺼졌는지도 모른 채 느린 일반 방식으로 남았다.
+             요청이 받아들여지기 전 실패(HTTP 오류·요금 안 나감)는 세지 않고, 연속 3번 깨졌을 때만 끈다. */
+          /* 사용자가 누른 ■취소도 charged 로 표시된다(요금은 이미 나갔으므로 맞다).
+             하지만 그건 '스트림이 깨진 것' 이 아니다 — 세면 세 번 취소만으로 미리보기가 꺼진다. */
+          if (e && e.charged && e.name !== 'AbortError') { R.streamFails = (R.streamFails || 0) + 1; if (R.streamFails >= 3) { streamOff('연속 3회 깨짐: ' + (e.message || '')); R.streamFails = 0; } }
+          throw e;
+        }
         streamOff('쓸 수 없음: ' + e.message);
         blobs = await generatePlain(body);
       }
@@ -1706,7 +1953,7 @@ async function generatePlain(body) {
 /* 스트림을 끄고 사람에게 알린다. 조용히 끄면 "미리보기가 왜 안 뜨지" 로만 남는다. */
 function streamOff(why) {
   if (S.stream === false) return;
-  S.stream = false; save();
+  S.stream = false; S.streamOffAuto = true; save();   // 앱이 껐다는 표시 — 다음 판에서 되살릴 수 있게
   logErr('실시간 미리보기 끔 (' + why + ')');
   toast('실시간 미리보기를 끄고 일반 방식으로 바꿨습니다 — 그림은 계속 나옵니다. ⚙설정에서 다시 켤 수 있습니다');
   if (typeof syncUI === 'function') syncUI();
@@ -1732,7 +1979,7 @@ async function generateStreaming(body) {
   if (!res.body) { const e = new Error('스트리밍 응답이 비어 있습니다'); e.streamUnusable = true; throw e; }
   $('#btnCancel').hidden = false;
   const reader = res.body.getReader();
-  let buf = new Uint8Array(0); const finals = []; let finished = false;
+  let buf = new Uint8Array(0); const finals = []; let finished = false; let lastMsg = '';
   const t0 = Date.now();
   try {
     while (true) {
@@ -1746,7 +1993,11 @@ async function generateStreaming(body) {
           if (buf.length < 4 + len) break;
           const msg = buf.slice(4, 4 + len); buf = buf.slice(4 + len);
           let d; try { d = msgpackDecode(msg); } catch (e) { logErr('msgpack: ' + e.message); continue; }
-          if (d && (d.error || (d.message && !d.image))) throw new Error('NAI 스트림 오류: ' + (d.error || d.message));
+          if (d && d.error) throw new Error('NAI 스트림 오류: ' + d.error);
+          /* message 만 있는 프레임은 NAI 의 안내다 — "Retrying request, attempt 0, current generation ID: …" 처럼
+             NAI 쪽이 자기 큐에서 다시 시도한다는 뜻이지 실패가 아니다. 예전엔 이걸 오류로 던져 생성을 끊고
+             실시간 미리보기까지 영구히 껐다 (사용자 오류 기록 09-03). 상태줄에 보여주고 계속 기다린다. */
+          if (d && d.message && !d.image) { lastMsg = String(d.message); $('#genStatus').textContent = 'NAI 서버: ' + lastMsg.slice(0, 80); continue; }
           const ev = d && (d.event_type || d.event);
           if (ev === 'intermediate' && d.image) {
             // 몇 번째 장인지: samp_ix 가 오면 그걸 쓰고, 없으면 이미 완료된 final 개수로 대체
@@ -1775,7 +2026,7 @@ async function generateStreaming(body) {
   if (!finals.length) {
     /* 여기까지 왔다는 건 NAI 가 요청을 받아들였다는 뜻이다 = 이미 Anlas 가 빠졌다.
        자동 짤뽑이 이걸 모르고 다시 보내면 실패할 때마다 돈이 나간다. */
-    const e = new Error('스트림에서 최종 이미지를 받지 못했습니다');
+    const e = new Error('스트림에서 최종 이미지를 받지 못했습니다' + (lastMsg ? ' (NAI: ' + lastMsg.slice(0, 120) + ')' : ''));
     e.charged = true; throw e;
   }
   return finals;
@@ -1813,6 +2064,7 @@ async function addToHistory(blob, meta, label) {
   catch (e) { item.unsaved = true; logErr('히스토리 저장 실패: ' + e.message); toast('이미지를 브라우저 저장소에 못 넣었습니다 (공간 부족?) — 새로고침하면 사라집니다', 'err'); }
   item.url = URL.createObjectURL(blob);
   R.hist.push(item);
+  if (typeof noteMushLater === 'function') noteMushLater(item);   // 뭉갬 '평소' 기록 (한가할 때)
   await pruneHistory(item); renderHist(); showImage(R.hist.length - 1);
   return item;
 }
@@ -1964,7 +2216,11 @@ function markSaved(it, how, silent) { // 저장됨 표시 (히스토리 배지·
   it.saved = { t: Date.now(), how: how || 'save' }; persistItem(it);
   if (silent) return;
   if (R.hist[R.cur] === it) paintSavedUI(it);
-  renderHist();
+  /* 배지 하나 때문에 히스토리 400장을 통째로 다시 만들지 않는다.
+     자동 저장을 켜면 생성 한 장마다 이 재구성이 두 번씩 돌았다. */
+  const idx = R.hist.indexOf(it);
+  if (idx >= 0 && typeof refreshHistCard === 'function') refreshHistCard(idx);
+  else renderHist();
   // 라이브러리·씬 갤러리에도 💾 표시가 바로 뜨게 (예전엔 히스토리만 갱신돼 저장한 티가 안 났다)
   if (S.mode === 'library' && window.renderLibrary) window.renderLibrary();
   if (S.mode === 'scene' && window.renderScenes) window.renderScenes();
@@ -2076,7 +2332,12 @@ async function autoLoopBody() {
   if (ov) toast('지금 조합을 고정하고 시드만 바꿔 뽑습니다');
   while (R.auto.on && (total === 0 || R.auto.done < total)) {
     $('#autoProg').textContent = `${R.auto.done}${total ? '/' + total : ''} 생성 중…`;
-    try { await doGenerate(ov ? { ...ov } : undefined); R.auto.done++; errStreak = 0; }
+    /* '조합 고정' 은 안내 그대로 **시드만 바꿔** 뽑는 모드다. 그런데 시드는 buildPayload 안에서
+       'S.randomSeed 이거나 시드 칸이 비었을 때' 만 새로 뽑혔다 — 시드를 고정해 둔 사람은
+       똑같은 그림을 N장 뽑고 Anlas 를 N배 썼다. 고정 모드에서는 여기서 시드를 직접 굴린다.
+       (매번 랜덤 조합 모드는 프롬프트가 매번 달라지므로 사용자가 고정한 시드를 존중한다) */
+    const ovNow = ov ? { ...ov, seed: randSeed() } : undefined;
+    try { await doGenerate(ovNow); R.auto.done++; errStreak = 0; }
     catch (e) {
       /* 이미 요금이 빠진 실패는 다시 보내면 안 된다 — NAI 는 요청을 받아들인 시점에 Anlas 를 뺀다.
          예전에는 이걸 구분하지 않아 최대 5번까지 재요청했고, 그때마다 돈이 나갔다. */
@@ -2102,6 +2363,9 @@ const POS_LABELS = 'ABCDE';
 function posName(c) { if (c.x == null) return '자동'; return POS_LABELS[Math.round((c.x - 0.1) / 0.2)] + (Math.round((c.y - 0.1) / 0.2) + 1); }
 function renderChars() {
   const list = $('#charList'); list.innerHTML = '';
+  /* 카드를 통째로 다시 만들면 R.lastTA 가 사라진 노드를 가리킨다 —
+     그 상태에서 태그를 넣으면 캐릭터 칸이 아니라 1번 칸으로 들어갔다. */
+  if (R.lastTA && !document.contains(R.lastTA)) R.lastTA = null;
   S.chars.forEach((c, i) => list.appendChild(charCard(c, i, () => { S.chars.splice(i, 1); save(); renderChars(); }, () => save())));
   $('#aiChoiceBtn').classList.toggle('on', !!S.aiChoice);
   $('#aiChoiceBtn').textContent = S.aiChoice ? '✔ AI 자동 배치' : '☐ 좌표 지정 사용';
@@ -2385,7 +2649,7 @@ function renderPrefs() {
   updateRefBadge();
 }
 async function addPref(blob) {
-  if (MODELS[S.model].ver < 45) { toast('Precise Reference는 V4.5 모델에서만 사용 가능합니다', 'err'); return; }
+  if (!refOk()) { toast('Precise Reference 는 이 모델에서 쓸 수 없습니다 (V4.5 전용 — V5 는 받지 않습니다)', 'err'); return; }
   if (R.prefs.length >= 4) { toast('레퍼런스는 최대 4개', 'err'); return; }
   const pb64 = await blobToB64Letterbox(blob);
   // await 사이에 다른 파일이 먼저 들어갔을 수 있다 → 넣기 직전에 다시 센다
@@ -2438,7 +2702,7 @@ function renderSections() {
     d.querySelector('.sec-name').textContent = sec.name;
     d.querySelector('.sec-hint').textContent = sec.hint || '';
     const ta = d.querySelector('textarea'); ta.value = S.secText[sec.id] || ''; ta.placeholder = sec.hint || ''; ta.dataset.sec = sec.id;
-    ta.addEventListener('input', () => { S.secText[sec.id] = ta.value; syncPromptFromSections(); save(); });
+    ta.addEventListener('input', () => { S.secText[sec.id] = ta.value; syncPromptFromSections(); savePrompt(); });
     d.querySelector('.sec-clr').onclick = () => { ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); if (ta._hlSync) ta._hlSync(); };
     list.appendChild(d);
     attachHighlight(ta);
@@ -2460,7 +2724,17 @@ function openSectionEditor() {
       <div id="seRows"></div>
       <div class="row"><button class="btn sm" id="seAdd">＋ 칸 추가</button><button class="btn sm" id="seReset">기본 5칸으로 복원</button><span class="hint">변경은 즉시 반영</span></div>`;
     const single = body.querySelector('#seSingle'); single.checked = !!S.singleBox;
-    single.onchange = () => { if (single.checked && !S.singleBox) { S.prompt = getMainPrompt(); } else if (!single.checked && S.singleBox) { S.secText = {}; if (S.sections.length) S.secText[S.sections[0].id] = S.prompt; } S.singleBox = single.checked; save(); renderSections(); draw(); };
+    /* 칸 모드로 돌아갈 때 원래 칸 내용을 버리지 않는다.
+       예전엔 무조건 1번 칸으로 뭉쳐서, 한 칸 모드를 잠깐 켰다 끄기만 해도 5칸 분할이 영구히 사라졌다.
+       한 칸 모드에서 글을 고쳤을 때만(합친 결과가 달라졌을 때만) 1번 칸으로 넣는다. */
+    single.onchange = () => {
+      if (single.checked && !S.singleBox) { S.prompt = getMainPrompt(); }
+      else if (!single.checked && S.singleBox) {
+        const secJoin = joinParts(...(S.sections || []).map(x => (S.secText || {})[x.id] || ''));
+        if (secJoin !== (S.prompt || '').trim()) { S.secText = {}; if (S.sections.length) S.secText[S.sections[0].id] = S.prompt; }
+      }
+      S.singleBox = single.checked; save(); renderSections(); draw();
+    };
     const rows = body.querySelector('#seRows');
     const draw = () => {
       rows.innerHTML = ''; rows.hidden = !!S.singleBox;
@@ -2471,7 +2745,8 @@ function openSectionEditor() {
         n.oninput = () => { sec.name = n.value; save(); renderSections(); }; h.oninput = () => { sec.hint = h.value; save(); renderSections(); };
         d.querySelector('[data-a="up"]').onclick = () => { if (i > 0) { S.sections.splice(i - 1, 0, S.sections.splice(i, 1)[0]); syncPromptFromSections(); save(); renderSections(); draw(); } };
         d.querySelector('[data-a="dn"]').onclick = () => { if (i < S.sections.length - 1) { S.sections.splice(i + 1, 0, S.sections.splice(i, 1)[0]); syncPromptFromSections(); save(); renderSections(); draw(); } };
-        d.querySelector('[data-a="del"]').onclick = () => { if (S.sections.length <= 1) { toast('칸은 최소 1개', 'err'); return; } delete S.secText[sec.id]; S.sections.splice(i, 1); syncPromptFromSections(); save(); renderSections(); draw(); };
+        /* 칸에 글이 들어 있으면 확인을 받는다 — 되돌리기가 없어 그대로 영구 손실이다 */
+        d.querySelector('[data-a="del"]').onclick = () => { if (S.sections.length <= 1) { toast('칸은 최소 1개', 'err'); return; } if ((((S.secText || {})[sec.id]) || '').trim() && !confirm('"' + (sec.name || '') + '" 칸에 쓴 내용도 함께 지웁니다. 계속할까요?')) return; delete S.secText[sec.id]; S.sections.splice(i, 1); syncPromptFromSections(); save(); renderSections(); draw(); };
         rows.appendChild(d);
       });
     };
@@ -2479,9 +2754,15 @@ function openSectionEditor() {
     body.querySelector('#seAdd').onclick = () => { S.sections.push({ id: uid(), name: '새 칸', hint: '' }); save(); renderSections(); draw(); };
     body.querySelector('#seReset').onclick = () => {
       const cur = getMainPrompt();   // 현재 내용 보존 (한 칸 모드에서 날아가던 문제)
+      const oldText = { ...(S.secText || {}) }, wasSingle = S.singleBox;
       S.sections = JSON.parse(JSON.stringify(DEFAULTS.sections)); S.singleBox = false; single.checked = false;
-      S.secText = {}; if (cur) S.secText[S.sections[0].id] = cur;
-      S.prompt = cur; save(); renderSections(); draw();
+      /* 칸 이름만 바꾸거나 순서만 바꾼 경우엔 칸 id 가 그대로다 — 그때는 내용을 제자리에 남긴다.
+         예전엔 무조건 1번 칸으로 뭉쳐서, 이름만 고쳤다가 복원한 사람이 5칸 분류를 통째로 잃었다. */
+      const keep = {};
+      if (!wasSingle) for (const sec of S.sections) if ((oldText[sec.id] || '').trim()) keep[sec.id] = oldText[sec.id];
+      if (Object.keys(keep).length) { S.secText = keep; S.prompt = getMainPrompt(); }
+      else { S.secText = {}; if (cur) S.secText[S.sections[0].id] = cur; S.prompt = cur; }
+      save(); renderSections(); draw();
     };
   }, true);
 }
@@ -2552,6 +2833,12 @@ function chunkColorOf(tok) {
   const c = chunkByName().get(chunkKeyOf(tok));
   return (typeof catColor === 'function' && c) ? catColor(c.cat) : 'var(--acc)';
 }
+function isPromptTarget(t) {
+  if (!t || t.tagName !== 'TEXTAREA') return false;
+  if (t.closest && t.closest('#modalBody')) return false;
+  if (t.id === 'uc' || t.id === 'scUc' || t.id === 'scMainU' || t.classList.contains('cuc')) return false;
+  return true;
+}
 function attachHighlight(ta) {
   if (!ta || ta.dataset.hl) return;
   ta.dataset.hl = '1';
@@ -2565,6 +2852,13 @@ function attachHighlight(ta) {
      청크 목록이 바뀌면 칩 색이 달라지므로 그때는 다시 그린다. */
   const sync = force => {
     const v = ta.value, n = (S.chunks || []).length;
+    /* 텍스트칸에 세로 스크롤바가 생기면 글이 그만큼 좁게 접히는데 미러엔 스크롤바가 없어
+       같은 글이 더 넓게 접혔다 — 긴 프롬프트에서 줄이 하나씩 밀리며 강조가 엉뚱한 글자 위에 떴다.
+       스크롤바 폭만큼 미러의 오른쪽 안쪽 여백을 늘려 접히는 폭을 똑같이 맞춘다. */
+    const sbw = Math.max(0, (ta.offsetWidth - ta.clientWidth) - (hl.offsetWidth - hl.clientWidth));
+    if (hl._pr == null) hl._pr = parseFloat(getComputedStyle(hl).paddingRight) || 0;
+    const pr = (hl._pr + sbw) + 'px';
+    if (hl.style.paddingRight !== pr) { hl.style.paddingRight = pr; force = true; }
     if (force !== true && hl._v === v && hl._n === n) { hl.scrollTop = ta.scrollTop; return; }
     hl._v = v; hl._n = n;
     hl.innerHTML = hlHtml(v); hl.scrollTop = ta.scrollTop; hl.style.height = ta.offsetHeight + 'px';
@@ -2574,7 +2868,9 @@ function attachHighlight(ta) {
   new ResizeObserver(() => sync(true)).observe(ta);
   ta._hlSync = sync; sync(true);
 }
-function refreshHighlights() { $$('textarea[data-hl]').forEach(t => t._hlSync && t._hlSync()); }
+/* 강제 갱신이다. 그냥 부르면 sync 의 '내용·청크 개수가 같으면 건너뛰기' 캐시에 걸려
+   '가중치 강조 표시' 토글처럼 글자가 안 바뀌는 변경이 화면에 반영되지 않았다. */
+function refreshHighlights() { $$('textarea[data-hl]').forEach(t => t._hlSync && t._hlSync(true)); }
 
 /* ─────────────── 모달 / 파일 ─────────────── */
 function openModal(title, build, wide, onClose) {
@@ -2588,6 +2884,12 @@ function pickFiles(multi, cb, accept) {
   const inp = document.createElement('input'); inp.type = 'file'; if (multi) inp.multiple = true; inp.accept = accept || 'image/*';
   inp.onchange = () => { [...inp.files].forEach(f => cb(f)); }; inp.click();
 }
+/* 창 전체 드롭 가드 — 드롭 영역을 살짝 빗나간 파일을 브라우저가 열어 버리면
+   앱을 떠나게 되고, 붙여 둔 이미지·마스크·진행 중이던 생성이 통째로 사라진다.
+   (파이어폭스·크롬 모두 기본 동작이 '그 파일을 이 탭에서 연다' 이다) */
+window.__dropGuard = true;
+addEventListener('dragover', e => { e.preventDefault(); }, false);
+addEventListener('drop', e => { e.preventDefault(); }, false);
 function bindDrop(el, cb, multi) {
   el.addEventListener('dragover', e => { e.preventDefault(); el.classList.add('over'); });
   el.addEventListener('dragleave', () => el.classList.remove('over'));
@@ -2768,7 +3070,7 @@ function openSettings() {
     const atx = body.querySelector('#mAutoText'); atx.checked = S.autoText !== false;
     atx.onchange = () => { S.autoText = atx.checked; save(); updatePreview(); toast(atx.checked ? 'V5 글자 그리기 자동 처리 켬' : '끔 — teXt: 를 붙이지 않습니다'); };
     const stm = body.querySelector('#mStream'); stm.checked = S.stream !== false;
-    stm.onchange = () => { S.stream = stm.checked; save(); toast(stm.checked ? '실시간 미리보기 켬' : '실시간 미리보기 끔 — 다 그려진 뒤 한 번에 받습니다'); };
+    stm.onchange = () => { S.stream = stm.checked; S.streamOffAuto = false; save(); toast(stm.checked ? '실시간 미리보기 켬' : '실시간 미리보기 끔 — 다 그려진 뒤 한 번에 받습니다'); };
     const sc = body.querySelector('#mShowChunks'); sc.checked = !!S.showChunkBars; sc.onchange = () => { S.showChunkBars = sc.checked; document.body.classList.toggle('show-chunks', sc.checked); save(); };
     body.querySelector('#mBackup').onclick = () => openBackup();
     body.querySelector('#mExport').onclick = () => downloadBlob(new Blob([JSON.stringify(S, null, 2)], { type: 'application/json' }), 'nai-studio-settings.json');
@@ -2833,6 +3135,14 @@ function syncUI() {
      켜 둔 줄 알고 기다리는 일이 없게 한다. */
   { const row = $('#transpRow'), cb = $('#transparent');
     if (row && cb) { const ok = capsOf(S.model).transparency; row.hidden = !ok; cb.checked = ok && !!S.transparent; } }
+  /* 이 모델이 안 받는 옵션은 화면에서도 끈다 — 요청에서는 지워지는데 체크박스만 켜져 있으면
+     '켰는데 왜 안 먹지' 가 된다 (V5 의 Variety+ · Noise Schedule 이 그랬다). */
+  { const caps = capsOf(S.model);
+    const vr = $('#variety') && $('#variety').closest('label,.row,.fld');
+    if ($('#variety')) { $('#variety').disabled = !caps.cfgDelay; if (vr) vr.title = caps.cfgDelay ? '' : '이 모델은 Variety+ 를 받지 않습니다 (요청에서 빠집니다)'; if (vr) vr.style.opacity = caps.cfgDelay ? '' : '.45'; }
+    const sr = $('#schedule') && $('#schedule').closest('label,.row,.fld');
+    if ($('#schedule')) { $('#schedule').disabled = !caps.noiseSchedule; if (sr) { sr.title = caps.noiseSchedule ? '' : '이 모델은 노이즈 스케줄을 고를 수 없습니다 (karras 고정)'; sr.style.opacity = caps.noiseSchedule ? '' : '.45'; } }
+  }
   syncAdvanced(); updateCostHint(); updateRefBadge();
   if (typeof renderStyleSelects === 'function') renderStyleSelects();
   // 코드로 value 를 바꾼 textarea 들은 input 이벤트가 안 나므로 하이라이트 미러를 직접 다시 그린다
@@ -2843,9 +3153,12 @@ function syncUI() {
    (실제로는 80 Anlas 가 더 나갔다).
    updateCostHint 는 아래쪽에 정의돼 있고 렌더 도중에도 불리므로 존재 확인 후 부른다. */
 function refreshCost() { if (typeof updateCostHint === 'function') updateCostHint(); }
+/* '이 모델이 정밀 레퍼런스를 받는가' 는 버전 비교가 아니라 능력표로 봐야 한다.
+   ver >= 45 로 보면 V5(ver 50)까지 true 가 되어, 실제로는 빠지는데 붙은 것처럼 보였다. */
+const refOk = m => !!capsOf(m || S.model).charRef;
 function updateRefBadge() {
   const b = $('#refBadge'); if (!b) return;
-  const prefOk = MODELS[S.model].ver >= 45;   // Precise Reference 는 V4.5 전용 — 아니면 실제로 안 나가니 배지도 그렇게 표시
+  const prefOk = refOk();   // Precise Reference 를 받는 모델인가 (능력표 기준 — V5 는 안 받는다)
   const parts = [R.i2iBlob ? (R.maskCanvas ? '인페인트' : 'i2i') : '', R.vibes.length ? '바이브 ' + R.vibes.length : '',
     R.prefs.length ? '레퍼런스 ' + R.prefs.length + (prefOk ? '' : ' (V4.5 전용·미적용)') : ''].filter(Boolean);
   b.textContent = parts.join(' · ');
@@ -2855,7 +3168,7 @@ function updateRefBadge() {
    칩 본문을 누르면 해당 패널이 열리고, ✕ 를 누르면 그 자리에서 떨어진다. */
 function renderAttachBar() {
   const bar = $('#attachBar'); if (!bar) return;
-  const prefOk = MODELS[S.model].ver >= 45;
+  const prefOk = refOk();
   const chips = [];
   if (R.i2iBlob && R.maskCanvas) chips.push({ ico: '🖌', txt: '인페인트 마스크', tip: '마스크만 떼기 — 이미지는 남아서 일반 i2i 가 됩니다',
     tab: 'i2i', off: () => { R.maskCanvas = null; updateI2IUI(); toast('마스크를 뗐습니다 — 이제 일반 i2i 입니다'); } });
@@ -2976,7 +3289,15 @@ function init() {
   $('#enhScale').onchange = () => { S.enhScale = +$('#enhScale').value; save(); };
   $('#sampler').onchange = () => { S.sampler = $('#sampler').value; save(); };
   $('#schedule').onchange = () => { S.schedule = $('#schedule').value; save(); };
-  $('#seed').oninput = () => { S.seed = $('#seed').value.replace(/\D/g, ''); $('#seed').value = S.seed; save(); };
+  /* 시드를 직접 치면 '생성할 때마다 랜덤' 을 꺼 준다 — 🎲·↶ 는 꺼 주는데 직접 입력만 안 꺼서,
+     원하는 시드를 넣어 놓고 재현이 안 된다며 같은 그림을 계속 뽑는 함정이었다.
+     (칸을 비우면 다시 랜덤으로 돌아간다) */
+  $('#seed').oninput = () => {
+    S.seed = $('#seed').value.replace(/\D/g, ''); $('#seed').value = S.seed;
+    if (S.seed && S.randomSeed) { S.randomSeed = false; const cb = $('#randomSeed'); if (cb) cb.checked = false; toast('시드를 직접 넣어 \'생성할 때마다 랜덤\' 을 껐습니다'); }
+    else if (!S.seed && !S.randomSeed) { S.randomSeed = true; const cb = $('#randomSeed'); if (cb) cb.checked = true; }
+    save();
+  };
   const fixSeed = v => { S.seed = String(v); $('#seed').value = S.seed; S.randomSeed = false; $('#randomSeed').checked = false; save(); };
   window.fixSeed = fixSeed;
   $('#btnDice').onclick = () => fixSeed(randSeed());
@@ -2993,18 +3314,24 @@ function init() {
   $('#qtReset').onclick = () => setQualityPreset('reset');
   $('#ucEdit').oninput = () => { S.ov[S.model] = S.ov[S.model] || {}; S.ov[S.model].uc = S.ov[S.model].uc || {}; S.ov[S.model].uc[ucIdx()] = $('#ucEdit').value; save(); };
   $('#btnResetPreset').onclick = () => { delete S.ov[S.model]; syncAdvanced(); save(); toast('프리셋 기본값 복원'); };
-  $('#prompt').addEventListener('input', () => { S.prompt = $('#prompt').value; save(); });
-  $('#uc').addEventListener('input', () => { S.uc = $('#uc').value; save(); });
+  $('#prompt').addEventListener('input', () => { S.prompt = $('#prompt').value; savePrompt(); });
+  $('#uc').addEventListener('input', () => { S.uc = $('#uc').value; markUserEdit(); save(); });
   // 사용자가 직접 지운 것이므로 서버 보호를 넘어 그대로 반영한다 (안 그러면 곧바로 되살아난다)
   $('#btnPromptClear').onclick = () => { S.prompt = ''; S.secText = {}; $('#prompt').value = ''; renderSections(); saveCleared(); };
   $('#btnSecEdit').onclick = openSectionEditor;
   $$('#autoModeSeg button').forEach(b => b.onclick = () => { S.autoMode = b.dataset.m; save(); syncUI(); });
   $('#contGen').onchange = () => setAutoUI(R.auto.on);
   ['steps', 'scale', 'rescale', 'sampler', 'schedule', 'quality', 'ucPreset', 'variety', 'decrisper'].forEach(id => $('#' + id).addEventListener('change', () => setTimeout(syncUI, 0)));
-  document.addEventListener('focusin', e => { if (e.target.matches && e.target.matches('textarea.ac')) R.lastTA = e.target; });
+  /* '프롬프트를 넣을 칸' 으로 기억할 textarea 만 — 네거티브 칸(#uc · 캐릭터 네거티브 · 씬 네거티브)과
+     모달 안의 칸(AI 프롬프트 결과 · 스타일/청크 편집)은 제외한다.
+     예전엔 자동완성이 붙은 칸(.ac)이면 무엇이든 기억해서, AI 프롬프트 창에서 결과칸을 한 번 클릭한 뒤
+     "프롬프트에 넣기" 를 누르면 그 결과칸 자기 자신에 넣고 창이 닫혔다(= 아무 데도 안 들어감).
+     네거티브 칸을 마지막으로 만졌으면 정보 화면의 "프롬프트 칸에 넣기" 가 네거티브로 갔다. */
+  document.addEventListener('focusin', e => { if (e.target.matches && e.target.matches('textarea.ac') && isPromptTarget(e.target)) R.lastTA = e.target; });
   $('#autoCount').onchange = () => { S.autoCount = Math.max(0, +$('#autoCount').value || 0); save(); };
   $('#autoDelay').onchange = () => { S.autoDelay = Math.max(0, +$('#autoDelay').value || 0); save(); };
-  $('#btnAddChar').onclick = () => { if (S.chars.length >= 6) { toast('캐릭터는 최대 6명', 'err'); return; } S.chars.push({ prompt: '', uc: '', x: null, y: null }); save(); renderChars(); };
+  /* 상한은 모델마다 다르다 — V4/4.5 는 6명, V5 는 32명. 6 으로 못 박아 두어 V5 에서 7번째를 못 넣었다. */
+  $('#btnAddChar').onclick = () => { const mx = capsOf(S.model).maxChars || 0; if (!mx) { toast(MODELS[modelOf(S.model)].name + ' 은 캐릭터 프롬프트를 받지 않습니다', 'err'); return; } if (S.chars.length >= mx) { toast('이 모델은 캐릭터를 최대 ' + mx + '명까지 받습니다', 'err'); return; } S.chars.push({ prompt: '', uc: '', x: null, y: null }); save(); renderChars(); };
 
   $$('.reftab').forEach(b => b.onclick = () => switchRefTab(b.dataset.t));
   const drop = $('#i2iDrop'); bindDrop(drop, f => setI2I(f)); drop.onclick = () => pickFiles(false, f => setI2I(f));
@@ -3103,7 +3430,8 @@ function init() {
   if (typeof initScenes === 'function') initScenes();
   setMode(S.mode || 'main'); applyTheme();
   checkCanvasBug();   // 썸네일이 전부 검게 나오는 브라우저 상태를 미리 알린다
-  loadHistory().then(() => { if (window.onHistChanged) window.onHistChanged(); });
+  if (_stateLoadErr) { logErr('저장된 설정을 읽지 못해 기본값으로 시작했습니다: ' + (_stateLoadErr.message || _stateLoadErr)); toast('이 브라우저에 저장된 설정을 읽지 못했습니다 — 서버에 있던 설정으로 이어갑니다', 'err'); }
+  loadHistory().then(() => { if (window.onHistChanged) window.onHistChanged(); if (typeof seedMushLog === 'function') seedMushLog(); });
   srvLoop(); naiStatusLoop();
   $('#naiStat').onclick = openNaiStatus;
   $('#appVer').textContent = 'v' + APP_VERSION;
@@ -3212,8 +3540,9 @@ function naiMarks(q) {
   if (mu && mu.n) {
     const lv = mu.hits >= Math.max(2, Math.ceil(mu.n * 0.4)) ? 2 : mu.hits ? 1 : 0;
     add('뭉갬 검사', lv,
-      `최근 ${mu.n}장 중 ${mu.hits}장 의심 (중앙 ${mu.med.toFixed(2)} · 최대 ${mu.worst.toFixed(2)} · 기준 ${typeof MUSH_WARN === 'number' ? MUSH_WARN : 0.15})`
-      + (lv ? ' — 뭉개진 부분이 있는 그림이 섞여 있습니다' : ' · 손·인체는 이 검사로 알 수 없습니다 → 🔬 최근 이미지 채점'));
+      `최근 ${mu.n}장 중 ${mu.hits}장 의심 (중앙 ${mu.med.toFixed(2)} · 최대 ${mu.worst.toFixed(2)} · 기준 ${(mu.thr || 0).toFixed(2)}`
+      + (mu.base != null ? ` = 평소 ${mu.base.toFixed(2)} 의 2배)` : ' — 평소 값이 아직 안 모여 넉넉히 봅니다)')
+      + (lv ? ' — 평소보다 뚜렷이 뭉개진 그림이 섞여 있습니다' : ' · 사실적·질감 많은 화풍은 값 자체가 높아 평소 대비로 봅니다 · 손·인체는 🔬 채점의 몫'));
   }
   /* 채점 추세 — 위 '출력 상태' 가 원리상 못 보는 것(손가락·해부학)을 본다.
      대신 Gemini 호출이 필요해서 자동으로는 안 돈다 — 여기 숫자는 채점한 것만 모은 결과다.
@@ -3597,7 +3926,14 @@ async function runSelfTest() {
   const step = async (name, fn) => { try { r.steps[name] = await fn(); } catch (e) { r.steps[name] = 'FAIL: ' + (e && e.message || e); } };
   await step('server', async () => (await probeServer()) ? 'ok ' + R.api : 'no server');
   await step('tagdb', async () => { for (let i = 0; i < 40 && !(window.TAGDB && TAGDB.rows); i++) await sleep(300); return TAGDB.rows ? TAGDB.rows.length + ' rows; 흰머리→' + tagSearchLocal('흰머리', 1)[0][0] : 'not loaded: ' + TAGDB.state + ' ' + TAGDB.msg; });
-  await step('token', async () => { await saveTokenToServer('pst-selftest'); let msg = ''; try { await refreshAnlas(); msg = 'unexpected ok'; } catch (e) { msg = e.message; } await saveTokenToServer(''); return msg; });
+  /* 예전엔 가짜 토큰을 저장했다가 빈 값으로 되돌렸다 — 그 '빈 값' 이 **사용자가 저장해 둔 진짜 토큰을 지웠다**.
+     토큰이 이미 있으면 이 검사는 건너뛴다 (지울 수 없는 것을 지우지 않는다). */
+  await step('token', async () => {
+    if (hasToken()) return 'skipped (저장된 토큰을 지우지 않으려고 건너뜀)';
+    await saveTokenToServer('pst-selftest'); let msg = '';
+    try { await refreshAnlas(); msg = 'unexpected ok'; } catch (e) { msg = e.message; }
+    await saveTokenToServer(''); return msg;
+  });
   await step('yt', async () => { const res = await apiFetch('/yt/search?q=lofi'); const j = await res.json(); return (j.items || []).length + ' results'; });
   await step('payload', async () => { const b = buildPayload(); return b.model + ' v' + b.parameters.params_version + ' q=' + b.input.slice(-20); });
   await step('idb', async () => { const c = document.createElement('canvas'); c.width = 8; c.height = 8; const blob = await new Promise(res => c.toBlob(res, 'image/png')); const it = await addToHistory(blob, { parameters: { seed: 1, width: 8, height: 8 }, model: S.model }, 'selftest'); const all = await histAll(); await deleteItem(it); return 'stored ' + all.length; });

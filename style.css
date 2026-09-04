@@ -713,3 +713,5 @@ input.sc-name-in:hover, input.sc-name-in:focus { border-bottom-color: var(--acc)
 .im-raw { margin-top: 10px; }
 /* 좁은 화면에서는 위아래로 */
 @media (max-width: 860px) { .im-wrap { grid-template-columns: 1fr; } .im-pic { position: static; } }
+.im-char { margin-bottom: 8px; }
+.im-cuc { opacity: .75; }

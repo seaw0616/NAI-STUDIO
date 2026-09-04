@@ -241,7 +241,10 @@ function tagSearchLocal(q, limit, cat, maxCand, wantScores) {
      예전엔 인덱스에서 한 건이라도 걸리면 전체 스캔을 통째로 건너뛰어서, 정답이 있는데도
      엉뚱한 한 건만 보여줬다. 그렇다고 매번 20만 행을 훑으면 타이핑이 끊긴다.
      → 인덱스 결과가 넉넉하면(8건 이상) 그대로 쓰고, 부족할 때만 전체를 훑는다. */
-  const ENOUGH = Math.min(limit || 20, 8);
+  /* 8건. 부르는 쪽 상한을 섞으면 안 된다 — 상한이 작을수록 '인덱스 결과로 충분' 이 되어
+     전체 스캔을 건너뛰고, 정작 정답(전체 스캔에서만 걸리는 한글 별칭)을 놓쳤다.
+     limit=1 로 '흰머리' 를 찾으면 white_hair 대신 bald_eagle 이 나왔다. */
+  const ENOUGH = 8;
   if (!narrowed && (!out || out.length < ENOUGH)) {
     /* 한 단어짜리 질의가 전체 스캔에서도 0건이었다면, 거기에 글자를 더 붙인 질의도 0건이다
        (모든 항이 부분문자열로 포함돼야 하므로) → 타이핑 중 매 글자마다 훑는 낭비를 막는다.
@@ -288,7 +291,9 @@ function tagSearchLocal(q, limit, cat, maxCand, wantScores) {
     try {
       /* 점수째로 받아 60점만 깎는다. 평평하게 주면 희귀 태그가 정답을 누른다
          (앉아있는 -> sitting_on_mushroom 이 sitting 위로 올라왔었다). */
-      const more = tagSearchLocal(q.slice(0, -1), limit, cat, maxCand, true);
+      /* 폴백에는 넉넉한 상한을 준다. 부르는 쪽 상한을 그대로 넘기면 폴백 결과가 합치기 전에 잘려
+         정답이 사라진다 — limit=1 로 '흰머리' 를 찾으면 white_hair 대신 bald_eagle 이 나왔다. */
+      const more = tagSearchLocal(q.slice(0, -1), Math.max(limit || 20, 20), cat, maxCand, true);
       const seen = new Set(out.map(x => x[1]));
       for (const m of more) { if (!seen.has(m[1])) out.push([m[0] - 60, m[1]]); }
     } catch (e) { /* 폴백일 뿐이다. 실패해도 원래 결과를 그대로 쓴다 */ }
@@ -312,7 +317,7 @@ function fmtTag(tag) {
 }
 function activeTA() { // 보이는 프롬프트 칸 (숨겨진 #prompt 로 들어가 사라지는 것 방지)
   const vis = t => t && document.contains(t) && t.offsetParent !== null;
-  if (vis(R.lastTA)) return R.lastTA;
+  if (vis(R.lastTA) && (typeof isPromptTarget !== 'function' || isPromptTarget(R.lastTA))) return R.lastTA;
   if (S.mode === 'scene') { const s = $('#scPrompt'); if (vis(s)) return s; }
   if (!S.singleBox) { const s = $('#secList textarea.sec-ta'); if (vis(s)) return s; }
   const p = $('#prompt'); if (vis(p)) return p;
@@ -444,17 +449,9 @@ function acRender(items, keepSel) {
 function acPick(i) {
   const t = AC.items[i]; if (!t || !AC.ta) return;
   const ta = AC.ta, seg = acSegment(ta);   // 저장된 옛 위치가 아니라 현재 커서 기준
-  /* '후보 목록' 청크만 <이름> 으로 넣는다 — 그래야 생성할 때마다 한 줄씩 뽑힌다
-     (기본으로 들어 있는 '작가랜덤' 은 114줄이다).
-     판정은 chunkIsFrag 한 곳에서만 한다. 예전엔 여기서 '줄이 2개 이상이면 조각' 이라는
-     옛 규칙을 따로 쓰고 있어서, 칩 클릭은 고쳐졌는데 자동완성으로 고르면 여전히
-     <로드> 가 들어가 캐릭터 묘사 9줄 중 한 줄만 나갔다. */
-  let tag;
-  if (t.chunk) {
-    const c = S.chunks.find(x => normKey(x.name) === normKey(t.tag));
-    const frag = c && typeof chunkIsFrag === 'function' && chunkIsFrag(c);
-    tag = frag ? '<' + t.tag + '>' : t.tag;
-  } else tag = fmtTag(t.tag);
+  /* 청크는 언제나 '이름' 만 넣는다 — 후보 목록도 이름만 적으면 생성할 때마다 한 줄씩 뽑힌다
+     (chunkMap() 이 안에서 <이름> 으로 넘긴다). 프롬프트에 <> 가 보일 이유가 없다. */
+  const tag = t.chunk ? t.tag : fmtTag(t.tag);
   // 뒤가 이미 쉼표로 시작하면 구분자를 붙이지 않는다 (중간 삽입 시 ", ," 로 빈 태그가 생기던 문제)
   const rest = ta.value.slice(seg.pos);
   const sep = /^\s*,/.test(rest) ? '' : ', ';
@@ -522,7 +519,7 @@ function openArtistBrowser(initial) {
         if (!c) { S.chunks.push({ name: '작가랜덤', text: line, cat: '작가', createdAt: Date.now() }); addChunkCat('작가'); }
         else if (!c.text.split('\n').some(l => l.trim() === line)) c.text = (c.text.trim() + '\n' + line).trim();
         else { toast('이미 들어 있습니다'); return; }
-        save(); renderChunkBar(); toast('작가랜덤 조각에 추가 — <작가랜덤> 으로 매번 다른 작가가 뽑힙니다');
+        save(); renderChunkBar(); toast('작가랜덤 조각에 추가 — 프롬프트에 "작가랜덤" 을 넣으면 매번 다른 작가가 뽑힙니다');
       };
       grid.innerHTML = '<div class="hint">단부루에서 그림 가져오는 중…</div>'; rel.innerHTML = '';
       // 작가를 빠르게 여러 번 누르면 늦게 온 응답이 지금 보고 있는 작가의 그림을 덮어쓴다.
