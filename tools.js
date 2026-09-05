@@ -776,7 +776,18 @@ async function ytPlayList(item) { // 재생목록 → 서버가 항목을 풀어
     ytPlay(items[0], true);
   } catch (e) { toast('재생목록 불러오기 실패: ' + e.message, 'err'); }
 }
+/* 지금 트는 곡은 대기열에서 뺀다.
+   예전엔 대기열에서 곡을 눌러 틀어도 그 곡이 대기열에 남아 있었다 —
+   곡이 끝나면 ytNext() 가 맨 앞(=방금 튼 그 곡)을 다시 꺼내 **첫 곡이 무한 반복**됐다.
+   목록 어디에서 틀었든 같은 곡이 대기열에 남아 있으면 안 된다. */
+function ytDropFromQueue(item) {
+  if (!item || !S.ytQueue || !S.ytQueue.length) return;
+  const n0 = S.ytQueue.length;
+  S.ytQueue = S.ytQueue.filter(q => !((item.id && q.id === item.id) || (!item.id && item.list && q.list === item.list)));
+  if (S.ytQueue.length !== n0) { save(); renderYtQueue(); }
+}
 function ytPlay(item, force) {
+  ytDropFromQueue(item);
   /* 여기로 들어온다는 것은 "이 곡을 새로 튼다"는 뜻이다 — 목록 클릭, 대기열 자동 진행(ytNext),
      전부 재생, 검색창에 주소 입력. 끊김 복구는 ytPlayDirect 를 직접 부르므로 여기를 거치지 않는다.
      남아 있던 이어보기 목표를 안 지우면 대기열에 같은 곡이 두 번 있을 때 두 번째가 중간부터 나온다. */
@@ -932,7 +943,9 @@ async function ytFillRelated(seed, silent) {
     return true;
   } catch (e) { toast('연관 곡 실패: ' + e.message, 'err'); return false; }
 }
-function ytPlayRelatedNow(item) { S.ytQueue = []; ytFillRelated(item).then(ok => { if (ok) ytNext(); }); }
+/* 대기열을 비우지 않는다 — 내가 넣어 둔 곡을 말없이 버리면 안 된다.
+   연관 곡은 지금 대기열 **뒤에** 붙고, 지금 트는 게 없을 때만 바로 이어서 튼다. */
+function ytPlayRelatedNow(item) { ytFillRelated(item).then(ok => { if (ok && !YT.cur) ytNext(); }); }
 /* 대기열에 여러 곡을 넣을 때, 이미 쌓여 있으면 어디에 넣을지 묻는다.
    그냥 뒤에 붙이면 앞선 수백 곡이 다 나온 뒤에야 재생돼서, 방금 넣은 재생목록이
    안 나오고 '엉뚱한 곡이 나온다'고 느끼게 된다. */
@@ -958,7 +971,14 @@ function ytAddMany(items, label) {
 function ytEnqueue(item) {
   if (S.ytQueue.some(q => q.id === item.id)) { toast('이미 대기열에 있습니다: ' + (item.title || '')); return; }
   if (S.ytQueue.length >= YT_QUEUE_MAX) { toast(`대기열이 가득 찼습니다 (${YT_QUEUE_MAX}곡) — 먼저 정리해 주세요`, 'err'); return; }
-  S.ytQueue.push(item); save(); renderYtQueue(); toast(`대기열 ${S.ytQueue.length}번째에 추가: ` + (item.title || ''));
+  /* 내가 고른 곡은 '알고리즘이 채워 둔 곡'(related) 보다 앞에 넣는다.
+     예전엔 무조건 맨 뒤라, 자동 이어듣기가 채운 10곡이 다 끝나야 방금 넣은 곡이 나왔다 —
+     "대기열에 넣었는데 왜 엉뚱한(알고리즘) 곡이 나오냐" 가 바로 이것이었다. */
+  const at = S.ytQueue.findIndex(q => q.related);
+  if (at >= 0) S.ytQueue.splice(at, 0, item); else S.ytQueue.push(item);
+  save(); renderYtQueue();
+  const pos = (at >= 0 ? at : S.ytQueue.length - 1) + 1;
+  toast(`대기열 ${pos}번째에 추가: ` + (item.title || '') + (at >= 0 ? ' (자동으로 채운 연관 곡보다 앞)' : ''));
 }
 function ytRemember(item) { // 최근 재생 기록 (최대 200곡) — 대기열에서 빠져도 여기 남음
   if (!item || !(item.id || item.list)) return;
@@ -1019,7 +1039,7 @@ function ytItemEl(it, opts) {
   if (opts.remove) { const xb = document.createElement('button'); xb.className = 'ic yt-add yt-del'; xb.title = opts.removeTip || '목록에서 빼기'; xb.textContent = '✕'; xb.onclick = e => { e.stopPropagation(); opts.remove(it); }; d.appendChild(xb); }
   if (it.noembed) d.classList.add('noembed');
   // 목록에서 직접 고른 것은 '처음부터 듣겠다'는 뜻이다 — 남아 있던 이어보기 목표를 버린다
-  d.onclick = () => { YT._resume = null; YT._qualCap = 0; YT._noHls = null; YT.altTries = 0; YT.altSeen = null; YT._embedTry = 0; YT._embedList = null; if (it.noembed && ytMode() === 'embed') { if (R.srvInfo && R.srvInfo.ytEngine) { toast('임베드가 막힌 영상 → 직접 재생'); ytPlayDirect(it); } else ytPopup(it); return; } ytPlay(it); };
+  d.onclick = () => { YT._resume = null; YT._qualCap = 0; YT._noHls = null; YT.altTries = 0; YT.altSeen = null; YT._embedTry = 0; YT._embedList = null; if (it.noembed && ytMode() === 'embed') { ytDropFromQueue(it); if (R.srvInfo && R.srvInfo.ytEngine) { toast('임베드가 막힌 영상 → 직접 재생'); ytPlayDirect(it); } else ytPopup(it); return; } ytPlay(it); };
   d.querySelector('.yt-add').onclick = e => { e.stopPropagation(); if (opts.queue) { S.ytQueue.splice(opts.idx, 1); save(); renderYtQueue(); } else ytEnqueue(it); };
   return d;
 }

@@ -1094,7 +1094,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.4';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.5';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -2912,6 +2912,62 @@ function isPromptTarget(t) {
   if (t.id === 'uc' || t.id === 'scUc' || t.id === 'scMainU' || t.classList.contains('cuc')) return false;
   return true;
 }
+/* 미러가 글을 **똑같은 자리에서** 접도록, 상자에 관한 모든 값을 textarea 에서 그대로 복사한다.
+   (예전엔 style.css 에서 손으로 맞췄다 — 스크롤바 폭·word-break·글꼴 크기에서 세 번 어긋났고,
+    한 번 어긋나면 그 아래 모든 줄의 강조가 통째로 밀린다.)
+   바뀐 게 있을 때만 손대므로 타이핑 중 비용은 거의 없다. */
+const MIRROR_PROPS = ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'fontVariant', 'fontStretch',
+  'letterSpacing', 'wordSpacing', 'lineHeight', 'textTransform', 'textIndent', 'textRendering',
+  'whiteSpace', 'overflowWrap', 'wordBreak', 'lineBreak', 'hyphens', 'tabSize', 'direction',
+  'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+  'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth'];
+function mirrorBox(ta, hl) {
+  const cs = getComputedStyle(ta);
+  /* 크기·위치는 rect 로 잰다. offsetWidth 는 정수로 반올림되므로, 실제 폭이 238.67 인데 239 로 잡히면
+     그 0.33px 때문에 글이 다른 자리에서 접히고 긴 프롬프트에서는 줄이 통째로 밀린다. */
+  const rect = ta.getBoundingClientRect();
+  if (!rect.width) return false;                     // 숨어 있는 칸은 건드리지 않는다
+  const bl = parseFloat(cs.borderLeftWidth) || 0, br = parseFloat(cs.borderRightWidth) || 0;
+  // 스크롤바 폭은 정수다 — 정수끼리 빼야 반올림 오차가 안 낀다
+  const sbw = Math.max(0, ta.offsetWidth - ta.clientWidth - Math.round(bl + br));
+  const par = hl.offsetParent ? hl.offsetParent.getBoundingClientRect() : { left: 0, top: 0 };
+  const left = rect.left - par.left, top = rect.top - par.top;
+  let sig = sbw + '|' + rect.width + 'x' + rect.height + '|' + left + ',' + top + '|';
+  for (const p of MIRROR_PROPS) sig += cs[p] + '\u0001';
+  if (hl._sig === sig) return false;
+  hl._sig = sig;
+  for (const p of MIRROR_PROPS) hl.style[p] = cs[p];
+  // 미러엔 스크롤바가 없다 → 그 폭만큼 오른쪽 안쪽 여백으로 채워 글이 접히는 폭을 같게 만든다
+  hl.style.paddingRight = ((parseFloat(cs.paddingRight) || 0) + sbw) + 'px';
+  hl.style.boxSizing = 'border-box';
+  hl.style.left = left + 'px'; hl.style.top = top + 'px';
+  hl.style.right = 'auto'; hl.style.bottom = 'auto';
+  hl.style.width = rect.width + 'px'; hl.style.height = rect.height + 'px';
+  hl._fit = 0;                                       // 상자가 바뀌었으니 미세 보정은 다시 찾는다
+  return true;
+}
+/* 맞췄다고 믿지 않고 결과를 본다 — 접힌 줄 수가 다르면 폭을 조금씩 흔들어 같아지게 만든다.
+   (소수점 스크롤바·테두리·브라우저 배율 때문에 계산만으로는 늘 어긋날 여지가 남는다) */
+function mirrorFit(ta, hl) {
+  /* 판단 기준은 '한 줄'. 1~2px 차이는 소수점 반올림이라 글이 밀린 게 아니다 —
+     그것까지 고치려 들면 폭만 흔들다 끝난다. 한 줄 이상 어긋났을 때만 손본다. */
+  const lh = parseFloat(getComputedStyle(hl).lineHeight) || 16;
+  const off = () => Math.abs(ta.scrollHeight - hl.scrollHeight) >= lh * 0.5;
+  if (!off()) return;                                // 평소엔 여기서 끝 (비교 한 번)
+  /* 폭을 흔들어 봐도 안 맞는 경우가 있다(글꼴 자체가 다른 등). 그때 매 글자마다 16번씩
+     다시 재면 타이핑이 눈에 띄게 느려진다 — 잠깐 쉬었다 다시 본다. */
+  const now = Date.now();
+  if (hl._fitAt && now - hl._fitAt < 400) return;
+  hl._fitAt = now;
+  const base = (parseFloat(hl.style.width) || ta.getBoundingClientRect().width) - (hl._fit || 0);
+  for (let d = 0.5; d <= 4.01; d += 0.5) {
+    for (const sgn of [-1, 1]) {
+      hl.style.width = (base + sgn * d) + 'px';
+      if (!off()) { hl._fit = sgn * d; hl._fitAt = 0; return; }
+    }
+  }
+  hl.style.width = base + 'px'; hl._fit = 0;         // 못 맞추면 원래대로 (줄 수가 원래 다른 경우)
+}
 function attachHighlight(ta) {
   if (!ta || ta.dataset.hl) return;
   ta.dataset.hl = '1';
@@ -2925,16 +2981,13 @@ function attachHighlight(ta) {
      청크 목록이 바뀌면 칩 색이 달라지므로 그때는 다시 그린다. */
   const sync = force => {
     const v = ta.value, n = (S.chunks || []).length;
-    /* 텍스트칸에 세로 스크롤바가 생기면 글이 그만큼 좁게 접히는데 미러엔 스크롤바가 없어
-       같은 글이 더 넓게 접혔다 — 긴 프롬프트에서 줄이 하나씩 밀리며 강조가 엉뚱한 글자 위에 떴다.
-       스크롤바 폭만큼 미러의 오른쪽 안쪽 여백을 늘려 접히는 폭을 똑같이 맞춘다. */
-    const sbw = Math.max(0, (ta.offsetWidth - ta.clientWidth) - (hl.offsetWidth - hl.clientWidth));
-    if (hl._pr == null) hl._pr = parseFloat(getComputedStyle(hl).paddingRight) || 0;
-    const pr = (hl._pr + sbw) + 'px';
-    if (hl.style.paddingRight !== pr) { hl.style.paddingRight = pr; force = true; }
+    // 상자가 달라졌으면(글꼴·여백·폭·스크롤바…) 다시 맞추고, 접히는 자리가 바뀌므로 강제로 다시 그린다
+    if (mirrorBox(ta, hl)) force = true;
     if (force !== true && hl._v === v && hl._n === n) { hl.scrollTop = ta.scrollTop; return; }
     hl._v = v; hl._n = n;
-    hl.innerHTML = hlHtml(v); hl.scrollTop = ta.scrollTop; hl.style.height = ta.offsetHeight + 'px';
+    hl.innerHTML = hlHtml(v);
+    mirrorFit(ta, hl);                 // 실제로 같은 자리에서 접혔는지 확인하고, 아니면 맞춘다
+    hl.scrollTop = ta.scrollTop;
   };
   ta.addEventListener('input', () => sync()); ta.addEventListener('scroll', () => { hl.scrollTop = ta.scrollTop; });
   // 크기가 바뀌면 높이를 다시 맞춰야 하므로 내용이 같아도 다시 그린다
