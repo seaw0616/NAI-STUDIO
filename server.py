@@ -47,7 +47,7 @@ VERSION = 17
 # 같은 PC 의 다른 프로그램은 127.0.0.1 에 닿을 수는 있어도 이 값은 모른다.
 SESSION_KEY = secrets.token_urlsafe(24)
 
-RELEASE = "12.5"   # 배포 버전. GitHub 릴리스 태그 "v12.5" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
+RELEASE = "12.6"   # 배포 버전. GitHub 릴리스 태그 "v12.6" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
 # 이 앱이 배포되는 저장소. 비워 두면 ⬆ 업데이트 버튼이 아예 안 뜬다 —
 # 사용자가 ⚙설정에 직접 타이핑해 넣기 전까지는 새 버전이 나온 줄도 모른다.
 # 실제로 그 때문에 옛 버전을 계속 쓰시는 분들이 있었다. 기본값을 박아 둔다.
@@ -286,6 +286,13 @@ def _merge_state(cur, inc):
             return False
         c = (item or {}).get("createdAt")
         return not (isinstance(c, (int, float)) and c > t)
+
+    # 대기열·기록은 "마지막에 쓴 쪽"이 아니라 "마지막에 실제로 바꾼 쪽"이 이긴다.
+    # 대기열을 건드리지도 않은 두 번째 창의 낡은 사본이 재생 중인 창의 진행을 되돌리면 안 된다.
+    if (cur.get("ytTouchedAt") or 0) > (inc.get("ytTouchedAt") or 0):
+        for k in ("ytQueue", "ytHistory", "ytTouchedAt"):
+            if k in cur:
+                out[k] = cur[k]
 
     for name, key, kind in _STATE_LISTS:
         a = inc.get(name)

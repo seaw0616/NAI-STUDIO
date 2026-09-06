@@ -342,7 +342,9 @@ function renderSceneEditor() {
       l.innerHTML = '기본 프롬프트<textarea class="ta ac" rows="3" spellcheck="false"></textarea>';
       const t = l.querySelector('textarea'); t.value = S.prompt || '';
       // 값을 코드로 바꿔치면 input 이 안 나서 뒤에 깔린 색칠 레이어가 옛 글자를 그대로 들고 있는다
-      t.addEventListener('input', () => { S.prompt = t.value; const m = $('#prompt'); if (m) { m.value = t.value; if (m._hlSync) m._hlSync(); } save(); drawMainPv(); });
+      /* markUserEdit: 부팅 직후에 쓴 글이 서버 값에 덮이지 않게 시각 도장을 찍는다.
+         savePrompt: 다 지우면 빈 프롬프트가 되는데, save() 는 서버 보호(409)에 걸려 되살아난다. */
+      t.addEventListener('input', () => { S.prompt = t.value; const m = $('#prompt'); if (m) { m.value = t.value; if (m._hlSync) m._hlSync(); } markUserEdit(); savePrompt(); drawMainPv(); });
       secs.appendChild(l); attachHighlight(t);
       return;
     }
@@ -356,7 +358,7 @@ function renderSceneEditor() {
         S.secText[sec.id] = t.value;
         syncPromptFromSections();
         if (typeof renderSections === 'function') renderSections();   // 메인 탭 쪽도 맞춰준다
-        save(); drawMainPv();
+        markUserEdit(); savePrompt(); drawMainPv();
       });
       secs.appendChild(l); attachHighlight(t);
     });
@@ -372,11 +374,11 @@ function renderSceneEditor() {
      씬 화면이 닫혀 있으면 아무 일도 하지 않는다. */
   window.refreshSceneMirror = () => { try { if (document.querySelector('#scMainSecs')) buildMainSecs(); } catch (e) {} };
   mu.value = S.uc || '';
-  mu.addEventListener('input', () => { S.uc = mu.value; const u = $('#uc'); if (u) { u.value = mu.value; if (u._hlSync) u._hlSync(); } save(); });
+  mu.addEventListener('input', () => { S.uc = mu.value; const u = $('#uc'); if (u) { u.value = mu.value; if (u._hlSync) u._hlSync(); } markUserEdit(); save(); });
   drawMainPv();
   um.onchange = () => { S.sceneUseMain = um.checked; save(); drawMainPv(); };
-  $('#scPrompt').addEventListener('input', () => { sc.prompt = $('#scPrompt').value; save(); });
-  $('#scUc').addEventListener('input', () => { sc.uc = $('#scUc').value; save(); });
+  $('#scPrompt').addEventListener('input', () => { sc.prompt = $('#scPrompt').value; markUserEdit(); save(); });
+  $('#scUc').addEventListener('input', () => { sc.uc = $('#scUc').value; markUserEdit(); save(); });
   // 사용자가 직접 고른 스타일만 "내용 있음"으로 친다 — 메인에서 상속된 스타일은 제외
   // (안 그러면 빈 씬까지 전체 생성에 끼어 기본 4장씩 뽑힌다)
   $('#scStyle').onchange = () => { sc.styleId = $('#scStyle').value || null; sc.styleExplicit = !!sc.styleId; save(); };
