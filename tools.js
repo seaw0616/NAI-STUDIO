@@ -424,12 +424,24 @@ function ytPopupUrl(item) {
   if (item.list && !item.id) return `https://www.youtube.com/playlist?list=${item.list}`;
   return `https://www.youtube.com/watch?v=${item.id}${item.list ? '&list=' + item.list : ''}`;
 }
-function ytStopLocal() { try { ytCmd('pauseVideo'); } catch (e) {} agcDetach(); if (typeof ytDestroyHls === 'function') ytDestroyHls(); const w = $('#ytPlayerWrap'); if (w) w.innerHTML = ''; ytPlayDirect._v = null; YT.direct = false; YT.playing = false; ytSetPlayIcon(false); }
+/* 예약해 둔 자동 넘김도 반드시 같이 끈다 — 안 끄면 🡕 유튜브 탭으로 넘어간 뒤
+   타이머가 터져 앱이 혼자 다음 곡을 틀어, 두 곳에서 음악이 동시에 난다. */
+function ytStopLocal() { clearTimeout(YT._skipT); try { ytCmd('pauseVideo'); } catch (e) {} agcDetach(); if (typeof ytDestroyHls === 'function') ytDestroyHls(); const w = $('#ytPlayerWrap'); if (w) w.innerHTML = ''; ytPlayDirect._v = null; YT.direct = false; YT.playing = false; ytSetPlayIcon(false); }
 function ytPopup(item) { // 유튜브 창(로그인 계정)으로 재생 — Premium이면 광고 없음. 창은 하나만 재사용, 대기열은 재생목록으로 함께 전달
   ytStopLocal();   // 내장 플레이어 정리 (두 곡 동시 재생 방지)
   let url = ytPopupUrl(item);
-  const ids = [item.id, ...S.ytQueue.map(q => q.id)].filter(Boolean);
-  if (item.id && ids.length > 1) { url = 'https://www.youtube.com/watch_videos?video_ids=' + ids.slice(0, 50).join(','); toast(`대기열 ${ids.length - 1}곡을 유튜브 재생목록으로 함께 넘겼습니다 (앱 대기열은 그대로 유지)`); }
+  /* 넘기는 순서도 ytNext 와 같아야 한다 — 예전엔 배열 순서 그대로 넘겨서,
+     앱 안에서는 내 곡이 먼저 나오는데 탭/팝업에서는 알고리즘 곡부터 나왔다.
+     넘긴 곡은 유튜브 창이 이어서 재생하므로 앱 대기열에서 뺀다. 남겨 두면
+     ⏭ 를 눌렀을 때 방금 유튜브에서 들은 곡이 0초부터 다시 나온다. */
+  const hand = ytOrder(S.ytQueue).filter(q => q.id).slice(0, 49);
+  if (item.id && hand.length) {
+    url = 'https://www.youtube.com/watch_videos?video_ids=' + [item.id, ...hand.map(q => q.id)].join(',');
+    const keys = new Set(hand.map(ytKey));
+    S.ytQueue = S.ytQueue.filter(q => !keys.has(ytKey(q)));
+    ytTouch(); save(); renderYtQueue();
+    toast(`대기열 ${hand.length}곡을 유튜브 창으로 넘겼습니다 — 유튜브가 이어서 재생하므로 앱 대기열에서는 뺐습니다`);
+  }
   ytRemember(item);
   const asTab = S.ytPopMode === 'tab';
   if (YT.popWin && !YT.popWin.closed && YT.popIsTab === asTab) {
@@ -645,6 +657,7 @@ async function ytPlayDirect(item) {
       /* 지워졌거나 비공개인 영상. 몇 번을 해도 안 되므로 오류 패널을 띄우지 않고 바로 넘긴다.
          (예전에는 502 로 와서 "서버 오류" 취급을 받고, 다른 클라이언트로 계속 다시 시도했다) */
       const j = await r.json().catch(() => ({}));
+      if (stale()) return;      // 그 사이 사용자가 다른 곡을 틀었다 — 옛 응답으로 지금 곡을 죽이면 안 된다
       if (j.gone) {
         load.hidden = true;
         YT.directFail = YT.directFail || {}; YT.directFail[item.id] = true;
@@ -653,7 +666,7 @@ async function ytPlayDirect(item) {
         return;
       }
     }
-    if (r.status === 503) { load.textContent = '엔진 미설치'; const ok = await ytEngineEnsure(true); if (ok) return ytPlayDirect(item); setYtMode('embed'); return ytPlay(item, true); }
+    if (r.status === 503) { load.textContent = '엔진 미설치'; const ok = await ytEngineEnsure(true); if (stale()) return; if (ok) return ytPlayDirect(item); setYtMode('embed'); return ytPlay(item, true); }
     if (!r.ok) throw await apiError(r);
     const j = await r.json();
     if (stale()) return;
@@ -700,7 +713,7 @@ async function ytPlayDirect(item) {
           : '';
         er.innerHTML = `<div>이 영상은 직접 재생이 안 됩니다 (${esc(me)})</div>${why ? `<div class="hint" style="color:#eee">${esc(why)}</div>` : ''}<div class="hint" style="color:#ccc">${esc(diag.join(' · ') || '진단 정보 없음')}</div><div class="row" style="justify-content:center;margin-top:6px">
           <button class="btn sm primary" id="ytDrRetry">↻ 다시 시도</button><button class="btn sm" id="ytDrEmbed">임베드로 재생</button><button class="btn sm" id="ytDrTab">🡕 유튜브 탭</button>${S.ytQueue.length ? '<button class="btn sm" id="ytDrNext">⏭ 다음 곡</button>' : ''}<button class="btn sm" id="ytDrUpd">엔진 업데이트</button></div>`;
-        er.querySelector('#ytDrRetry').onclick = () => { YT.directFail[item.id] = false; YT._noHls = null; ytPlayDirect(item); };
+        er.querySelector('#ytDrRetry').onclick = () => { clearTimeout(YT._skipT); YT.directFail[item.id] = false; YT._noHls = null; ytPlayDirect(item); };
         er.querySelector('#ytDrEmbed').onclick = () => {
           // 이 버튼은 이 곡만이 아니라 재생 방식 기본값 자체를 바꾼다 — 말없이 바꾸면 안 된다
           setYtMode('embed'); toast('재생 방식을 임베드로 바꿨습니다 (설정에서 되돌릴 수 있어요)');
@@ -708,7 +721,9 @@ async function ytPlayDirect(item) {
         };
         er.querySelector('#ytDrTab').onclick = () => ytPopup(item);
         const nb = er.querySelector('#ytDrNext'); if (nb) nb.onclick = ytNext;
-        er.querySelector('#ytDrUpd').onclick = async () => { toast('엔진 업데이트 중…'); const r = await apiFetch('/yt/engine', { method: 'POST' }); const jj = await r.json(); toast(jj.installed ? '업데이트 완료 ' + jj.version : '실패'); YT.directFail[item.id] = false; ytPlayDirect(item); };
+        /* 업데이트는 1분 넘게 걸릴 수 있다. 먼저 자동 넘김을 끄지 않으면 그 사이 다음 곡으로
+           넘어가 버리고, 끝난 뒤엔 실패했던 옛 곡을 다시 튼다. */
+        er.querySelector('#ytDrUpd').onclick = async () => { clearTimeout(YT._skipT); const was = YT.cur; toast('엔진 업데이트 중…'); const r = await apiFetch('/yt/engine', { method: 'POST' }); const jj = await r.json(); toast(jj.installed ? '업데이트 완료 ' + jj.version : '실패'); if (YT.cur !== was) return; YT.directFail[item.id] = false; ytPlayDirect(item); };
         logErr('직접 재생 실패 ' + item.id + ' ' + me + ' | ' + diag.join(' · '));
         ytAutoSkip('이 곡은 재생이 안 됩니다');
         return;
@@ -741,11 +756,14 @@ async function ytPlayDirect(item) {
     }
     tryNext();
   } catch (e) {
+    if (stale()) return;   // 그 사이 다른 곡으로 넘어갔다 — 죽은 요청의 실패로 지금 곡을 덮으면 안 된다
     load.hidden = true; const er = $('#ytErr'); er.hidden = false;
     /* 스트림 주소를 받는 데 실패한 자리다 (서버가 클라이언트 후보를 다 돌고도 못 고른 경우 등).
        예전에는 기록도 안 남고 "다음 곡" 버튼도 없어서, 대기열이 아무 흔적 없이 멈췄다. */
     er.innerHTML = `<div>${esc('스트림을 가져오지 못했습니다: ' + e.message)}</div><div class="row" style="justify-content:center;margin-top:6px"><button class="btn sm" id="ytDrEmbed">임베드로 재생</button>${S.ytQueue.length ? '<button class="btn sm" id="ytDrNext2">⏭ 다음 곡</button>' : ''}<button class="btn sm" id="ytDrUpd">엔진 업데이트</button></div>`;
-    er.querySelector('#ytDrEmbed').onclick = () => { clearTimeout(YT._skipT); S.ytMode = 'embed'; ytPlay(item, true); S.ytMode = 'direct'; };
+    /* 되돌릴 때 'direct' 를 박아 두면, 임베드/탭/팝업으로 쓰던 사람의 저장된 재생 방식이
+       이 버튼 한 번에 '직접' 으로 바뀐다(이 패널은 모드와 무관하게 뜬다). 원래 값으로 돌린다. */
+    er.querySelector('#ytDrEmbed').onclick = () => { clearTimeout(YT._skipT); const prev = S.ytMode; S.ytMode = 'embed'; ytPlay(item, true); S.ytMode = prev; };
     const nb2 = er.querySelector('#ytDrNext2'); if (nb2) nb2.onclick = () => { clearTimeout(YT._skipT); ytNext(); };
     er.querySelector('#ytDrUpd').onclick = async () => { clearTimeout(YT._skipT); toast('엔진 업데이트 중…'); const r = await apiFetch('/yt/engine', { method: 'POST' }); const j = await r.json(); toast(j.updated ? ('업데이트 완료 ' + j.version) : (j.log || '갱신할 수 없습니다'), j.updated ? '' : 'err'); ytPlayDirect(item); };
     logErr('스트림 준비 실패 ' + item.id + ' ' + e.message);
@@ -761,18 +779,13 @@ async function ytPlayList(item) { // 재생목록 → 서버가 항목을 풀어
     const r = await apiFetch('/yt/playlist?list=' + encodeURIComponent(item.list)); if (!r.ok) throw await apiError(r);
     const j = await r.json(); const items = j.items || [];
     if (!items.length) { toast('재생목록이 비어 있거나 비공개입니다', 'err'); return; }
-    /* 예전에는 여기만 중복 검사도 상한도 없었다(824·894 행엔 있다).
-       같은 재생목록을 두 번 부르면 대기열이 그대로 두 배가 됐다. */
-    const have = new Set((S.ytQueue || []).map(q => q.id));
-    const add = items.slice(1).filter(it => it && it.id && !have.has(it.id));
-    S.ytQueue = add.concat(S.ytQueue || []);
-    const over = S.ytQueue.length - YT_QUEUE_MAX;
-    if (over > 0) S.ytQueue.length = YT_QUEUE_MAX;
+    /* 넣는 문은 ytQueueAdd 하나. 예전엔 여기만 따로 중복·상한을 처리했고,
+       상한을 넘으면 배열 꼬리(=내가 모아 둔 곡)부터 잘라 냈다. */
+    const put = ytQueueAdd(items.slice(1), { front: true });   // 이 블록엔 이미 r(응답)이 있다
     save(); renderYtQueue();
-    const dup = items.length - 1 - add.length;
-    toast(`재생목록 "${(j.title || '').slice(0, 30)}" ${items.length}곡 중 ${add.length}곡 추가 — 첫 곡부터 재생` +
-      (dup > 0 ? ` (이미 있던 ${dup}곡 제외)` : '') +
-      (over > 0 ? ` · 상한 ${YT_QUEUE_MAX}곡을 넘어 뒤 ${over}곡은 뺐습니다` : ''));
+    /* 목록을 받아오는 동안 사용자가 다른 곡을 틀었으면 그 곡을 빼앗지 않는다 — 대기열만 채운다. */
+    if (YT.cur && ytKey(YT.cur) !== ytKey(item) && YT.playing) { toast('대기열에만 넣었습니다 (지금 곡은 그대로)'); return; }
+    toast(ytAddNote(put, `재생목록 "${(j.title || '').slice(0, 30)}" ${items.length}곡 중 ${put.added}곡 추가 — 첫 곡부터 재생`));
     ytPlay(items[0], true);
   } catch (e) { toast('재생목록 불러오기 실패: ' + e.message, 'err'); }
 }
@@ -784,7 +797,7 @@ function ytDropFromQueue(item) {
   if (!item || !S.ytQueue || !S.ytQueue.length) return;
   const n0 = S.ytQueue.length;
   S.ytQueue = S.ytQueue.filter(q => !((item.id && q.id === item.id) || (!item.id && item.list && q.list === item.list)));
-  if (S.ytQueue.length !== n0) { save(); renderYtQueue(); }
+  if (S.ytQueue.length !== n0) { ytTouch(); save(); renderYtQueue(); }
 }
 function ytPlay(item, force) {
   ytDropFromQueue(item);
@@ -804,13 +817,16 @@ function ytPlay(item, force) {
   YT.cur = item; ytRemember(item);
   if (item.list && !item.id && (R.srvInfo && R.srvInfo.ytEngine)) { ytPlayList(item); return; }
   // 영상 ID 가 있으면 믹스 링크라도 단일 영상으로 임베드할 수 있다 (id 없이 믹스만 있을 때만 포기)
-  if (item.list && !item.id && /^RD|^UL|^LL$/.test(item.list)) { toast('유튜브 자동생성 믹스/목록은 임베드가 안 됩니다 — 직접 재생 모드를 쓰세요'); return; }
+  if (item.list && !item.id && /^(RD|UL|LL)/.test(item.list)) { toast('유튜브 자동생성 믹스/목록은 임베드가 안 됩니다 — 직접 재생 모드를 쓰세요'); return; }
   const origin = encodeURIComponent(location.origin.startsWith('http') ? location.origin : 'http://127.0.0.1');
   const host = (YT._embedTry === 1) ? 'https://www.youtube-nocookie.com' : 'https://www.youtube.com'; // 1차 실패 시 nocookie 도메인으로 재시도
   let src;
   if (YT._embedList) src = `${host}/embed/videoseries?list=${YT._embedList}&autoplay=1&enablejsapi=1&origin=${origin}`;  // 2차: 임시 재생목록 트릭
   else if (item.list && !item.id) src = `${host}/embed/videoseries?list=${item.list}&autoplay=1&enablejsapi=1&origin=${origin}`;
-  else src = `${host}/embed/${item.id}?autoplay=1&enablejsapi=1&origin=${origin}${(item.list && !/^RD|^UL|^LL$/.test(item.list)) ? '&list=' + item.list : ''}`;
+  /* 예전엔 여기에 &list= 를 붙였다. 그러면 유튜브 플레이어가 **그 목록을 스스로 진행**해
+     우리 대기열을 통째로 무시한다 — "곡 틀면 그 곡의 알고리즘대로 다음 곡이 나온다" 가 이것이다.
+     다음 곡을 고르는 건 우리 대기열이지 유튜브가 아니다. 그래서 한 곡만 띄운다. */
+  else src = `${host}/embed/${item.id}?autoplay=1&enablejsapi=1&origin=${origin}`;
   $('#ytPlayerWrap').innerHTML = `<iframe id="ytFrame" src="${src}" referrerpolicy="strict-origin-when-cross-origin" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe><div id="ytErr" class="yt-err" hidden></div>`;
   const fr = $('#ytFrame');
   fr.onload = () => { try { fr.contentWindow.postMessage(JSON.stringify({ event: 'listening', id: 'nst' }), '*'); setTimeout(() => ytCmd('setVolume', [S.ytVol]), 800); } catch (e) {} };
@@ -830,8 +846,12 @@ async function ytEmbedError(code) { // 101/150 = 임베드 금지·연령제한�
     if (tries === 1) { toast('임베드 제한 — 다른 방식(nocookie)으로 다시 시도'); const it = YT.cur; setTimeout(() => ytPlay(it, true), 200); return; }
     if (tries === 2) {
       try {
-        const r = await apiFetch('/yt/templist?id=' + encodeURIComponent(YT.cur.id)); const j = await r.json();
-        if (j.list) { YT._embedList = j.list; toast('임시 재생목록으로 재시도'); const it = YT.cur; setTimeout(() => ytPlay(it, true), 200); return; }
+        /* 기다리는 동안 사용자가 다른 곡을 고르면, 옛 곡의 임시 목록을 새 곡에 씌우게 된다
+           → 방금 고른 곡 대신 아까 실패한 곡이 나온다. 기준 곡을 붙잡아 두고 확인한다. */
+        const it = YT.cur;
+        const r = await apiFetch('/yt/templist?id=' + encodeURIComponent(it.id)); const j = await r.json();
+        if (YT.cur !== it) return;
+        if (j.list) { YT._embedList = j.list; toast('임시 재생목록으로 재시도'); setTimeout(() => ytPlay(it, true), 200); return; }
       } catch (e) {}
     }
   }
@@ -844,13 +864,14 @@ async function ytEmbedError(code) { // 101/150 = 임베드 금지·연령제한�
   er.innerHTML = `<div>${esc(why)}</div><div class="row" style="justify-content:center;margin-top:6px">
     <button class="btn sm primary" id="ytErrDirect">⚡ 직접 재생 엔진 설치 후 재생</button>
     ${alt ? '<button class="btn sm" id="ytErrAlt">🔎 다른 업로드 찾기</button>' : ''}${S.ytQueue.length ? '<button class="btn sm" id="ytErrNext">⏭ 다음 곡</button>' : ''}</div>`;
-  er.querySelector('#ytErrDirect').onclick = async () => { const it = YT.cur; if (await ytEngineEnsure(true)) { setYtMode('direct'); ytPlayDirect(it); } };
+  er.querySelector('#ytErrDirect').onclick = async () => { clearTimeout(YT._skipT); const it = YT.cur; if (await ytEngineEnsure(true)) { if (YT.cur !== it) return; setYtMode('direct'); ytPlayDirect(it); } };
   const ab = er.querySelector('#ytErrAlt'); if (ab) ab.onclick = () => ytFindAlternative(YT.cur);
   const nb = er.querySelector('#ytErrNext'); if (nb) nb.onclick = () => { clearTimeout(YT._skipT); ytNext(); };
   ytAutoSkip(why);
 }
 async function ytFindAlternative(item) { // 제목으로 다시 검색해 재생 가능한 다른 업로드를 찾음
   if (!item) return;
+  clearTimeout(YT._skipT);   // 검색을 기다리는 동안 자동 넘김이 터지면 엉뚱한 곡 위에 덮어쓴다
   YT.altTries = (YT.altTries || 0) + 1; YT.altSeen = YT.altSeen || new Set(); YT.altSeen.add(item.id);
   const q = (item.title || '').replace(/[\[【（(][^\]】）)]*[\]】）)]/g, ' ').replace(/[|｜].*$/, '').replace(/\s+/g, ' ').trim().slice(0, 50);
   if (!q) { toast('제목이 없어 대체 영상을 찾을 수 없습니다', 'err'); return; }
@@ -860,6 +881,7 @@ async function ytFindAlternative(item) { // 제목으로 다시 검색해 재생
     if (!cands.length) { toast('대체 영상을 찾지 못했습니다', 'err'); return; }
     const chk = await (await apiFetch('/yt/check?ids=' + cands.slice(0, 15).map(c => c.id).join(','))).json().catch(() => ({ embeddable: {} }));
     const pick = cands.find(c => chk.embeddable && chk.embeddable[c.id] !== false) || cands[0];
+    if (YT.cur !== item) return;   // 그 사이 사용자가 직접 다른 곡을 골랐다
     toast('대체 재생: ' + (pick.title || '').slice(0, 40));
     ytPlay(pick, true);
   } catch (e) { toast('대체 영상 검색 실패: ' + e.message, 'err'); }
@@ -900,7 +922,11 @@ function ytToggle() {
    예약해 둔 건너뛰기는 조용히 취소된다. */
 function ytAutoSkip(reason, opt) {
   opt = opt || {};
-  if (!S.ytQueue.length) { toast(reason + ' — 대기열이 비어 있습니다', 'err'); return; }
+  /* 대기열이 비었어도 자동 이어듣기가 켜져 있으면 ytNext 가 연관 곡을 채워 이어 갈 수 있다.
+     예전엔 여기서 그냥 손을 떼서, 실패한 곡 하나에 음악이 통째로 멈췄다.
+     (614행 v.onended 는 처음부터 두 조건을 다 봤는데 여기만 빠져 있었다) */
+  const canGo = S.ytQueue.length || (S.ytAutoRelated !== false && YT.cur && YT.cur.id && R.srvInfo && R.srvInfo.ytEngine);
+  if (!canGo) { toast(reason + ' — 대기열이 비어 있습니다', 'err'); return; }
   /* 두 가지를 따로 센다.
      · 지워진 영상(gone) — 판정이 2초면 끝나고 아무리 기다려도 안 되니 바로 넘긴다.
        재생목록에 죽은 링크가 여럿 섞여 있는 건 흔한 일이라 여유를 더 준다.
@@ -915,16 +941,85 @@ function ytAutoSkip(reason, opt) {
   toast(`${reason} — 다음 곡으로 넘어갑니다 (${YT[key]}/${cap})`);
   YT._skipT = setTimeout(() => { if (YT._gen === g) ytNext(); }, wait);
 }
+/* 내가 넣은 곡 = related 표시가 없는 곡. 자동 이어듣기가 채운 곡만 related 다. */
+/* ── 대기열 규칙은 여기 한 곳에만 둔다 ───────────────────────────────────
+   같은 규칙이 ytNext·ytPopup·renderYtQueue·ytEnqueue·ytAddMany 에 따로 박혀 있어서,
+   한쪽을 고치면 다른 쪽에서 그대로 재발했다. 실제로 세 번 그랬다. */
+function ytKey(it) { return (it && (it.id || it.list)) || ''; }   // 곡을 가리키는 단 하나의 열쇠
+/* 대기열·기록을 **실제로 바꾼** 순간에만 찍는 시각. 창을 두 개 열어 뒀을 때,
+   대기열을 건드리지도 않은 창의 낡은 사본이 재생 중인 창의 진행을 되돌리는 것을 막는다. */
+function ytTouch() { S.ytTouchedAt = Date.now(); }
+function ytMineLeft() { return S.ytQueue.filter(q => !q.related).length; }
+/* 재생될 순서 — 내가 넣은 곡이 먼저, 자동 이어듣기가 채운 곡은 그 뒤.
+   ytNext 도 ytPopup 도 대기열 화면도 전부 이 함수 하나를 본다. */
+function ytOrder(q) { return q.filter(x => !x.related).concat(q.filter(x => x.related)); }
+/* 상한을 넘으면 **알고리즘 곡부터** 버린다. 예전엔 배열 꼬리를 그냥 잘라서
+   내가 하나하나 모아 둔 곡이 먼저 사라졌다. */
+function ytQueueTrim() {
+  let over = S.ytQueue.length - YT_QUEUE_MAX;
+  if (over <= 0) return 0;
+  const cut = over;
+  for (let i = S.ytQueue.length - 1; i >= 0 && over > 0; i--) if (S.ytQueue[i].related) { S.ytQueue.splice(i, 1); over--; }
+  if (over > 0) S.ytQueue.length = YT_QUEUE_MAX;
+  return cut;
+}
+/* 대기열에 넣는 단 하나의 문. 중복·지금 트는 곡·상한을 여기서 전부 막는다.
+   예전엔 넣는 길이 다섯 개였고 그중 셋에 방어가 없었다. */
+function ytQueueAdd(items, opt) {
+  opt = opt || {};
+  const have = new Set(S.ytQueue.map(ytKey).filter(Boolean));
+  const cur = YT.cur ? ytKey(YT.cur) : '';
+  let self = 0;
+  const add = [];
+  for (const it of (items || [])) {
+    const k = ytKey(it);
+    if (!k) continue;
+    if (k === cur) { self++; continue; }   // 지금 트는 곡을 다시 넣으면 끝나자마자 또 나온다
+    if (have.has(k)) continue;
+    have.add(k); add.push(it);
+  }
+  if (add.length) {
+    if (opt.front) S.ytQueue = add.concat(S.ytQueue);
+    else if (opt.related) S.ytQueue = S.ytQueue.concat(add);
+    else {                                 // 내가 고른 곡은 알고리즘 곡보다 앞에
+      const at = S.ytQueue.findIndex(q => q.related);
+      if (at >= 0) S.ytQueue.splice(at, 0, ...add); else S.ytQueue = S.ytQueue.concat(add);
+    }
+  }
+  const cut = ytQueueTrim();
+  if (add.length || cut) ytTouch();
+  return { added: add.length, dup: (items || []).length - add.length - self, self, cut };
+}
+function ytAddNote(r, head) {   // 넣은 결과를 숨기지 않고 그대로 알린다
+  return head + (r.dup ? ` (이미 있던 ${r.dup}곡 제외)` : '') + (r.self ? ' (지금 재생 중인 곡 제외)' : '')
+    + (r.cut ? ` · 상한 ${YT_QUEUE_MAX}곡을 넘어 알고리즘 곡 ${r.cut}곡을 뺐습니다` : '');
+}
 async function ytNext() {
+  /* 순서가 아니라 **자격**으로 고른다.
+     예전엔 무조건 맨 앞을 꺼냈는데, 자동 이어듣기가 채워 둔 알고리즘 곡이 대기열 중간에
+     박히면 내가 나중에 넣은 곡이 그 뒤로 밀려 "대기열 놔두고 알고리즘 곡을 튼다"가 됐다.
+     (실제로 대기열 148곡 중 117~137번째가 알고리즘 곡이었다)
+     이제 내가 넣은 곡이 하나라도 남아 있으면 알고리즘 곡은 절대 먼저 나가지 않는다.
+     위치와 무관한 규칙이라, 대기열에 넣는 새 경로가 생겨도 다시 깨지지 않는다. */
   if (!S.ytQueue.length) {
     if (S.ytAutoRelated !== false && YT.cur && YT.cur.id && R.srvInfo && R.srvInfo.ytEngine) { // 알고리즘 이어듣기: 유튜브 믹스에서 연관 곡을 채움
-      const ok = await ytFillRelated(YT.cur);
+      const was = YT.cur;
+      const ok = await ytFillRelated(YT.cur, true);
+      /* 연관 곡을 받아오는 몇 초 사이에 사용자가 직접 곡을 골랐으면 그쪽이 이긴다 —
+         알고리즘이 사람이 고른 곡을 밀어내면 안 된다. */
+      if (YT.cur !== was) return;
       if (!ok) { toast('연관 곡을 찾지 못했습니다'); return; }
     } else { toast('대기열이 비었습니다'); return; }
   }
-  const next = S.ytQueue.shift(); save(); ytPlay(next);
+  const next = ytOrder(S.ytQueue)[0];       // 남은 게 알고리즘 곡뿐일 때만 그걸 튼다
+  if (!next) { toast('대기열이 비었습니다'); return; }
+  S.ytQueue.splice(S.ytQueue.indexOf(next), 1);
+  ytTouch(); save(); ytPlay(next);
 }
 async function ytFillRelated(seed, silent) {
+  /* 자동 이어듣기(silent=자동 호출)는 내가 넣은 곡이 다 떨어졌을 때만 돈다.
+     🎶 버튼처럼 사용자가 직접 부른 경우는 그대로 채운다. */
+  if (silent && ytMineLeft()) return false;
   seed = seed || YT.cur || (S.ytHistory || [])[0];
   if (!seed || !seed.id) { toast('기준이 될 곡이 없습니다 — 먼저 한 곡 재생하거나 검색 결과의 🎶를 누르세요', 'err'); return false; }
   try {
@@ -938,8 +1033,9 @@ async function ytFillRelated(seed, silent) {
     const fresh = (j.items || []).filter(it => !played.has(it.id) && !S.ytQueue.some(q => q.id === it.id));
     const pick = fresh.slice(0, 10);
     if (!pick.length) { if (!silent) toast('새로운 연관 곡이 없습니다 (전부 최근에 들었거나 대기열에 있음)'); return false; }
-    pick.forEach(it => { it.related = true; S.ytQueue.push(it); }); save(); renderYtQueue();
-    if (!silent) toast(`🎶 알고리즘: "${(seed.title || '').slice(0, 24)}" 연관 곡 ${pick.length}곡을 대기열에 채웠습니다`);
+    pick.forEach(it => { it.related = true; });
+    ytQueueAdd(pick, { related: true }); save(); renderYtQueue();
+    if (!silent) toast(`🎶 알고리즘: "${(seed.title || '').slice(0, 24)}" 연관 곡 ${pick.length}곡 — 내가 넣은 곡이 다 나간 뒤에 재생됩니다`);
     return true;
   } catch (e) { toast('연관 곡 실패: ' + e.message, 'err'); return false; }
 }
@@ -952,10 +1048,16 @@ function ytPlayRelatedNow(item) { ytFillRelated(item).then(ok => { if (ok && !YT
 function ytAddMany(items, label) {
   if (!items || !items.length) { toast('넣을 곡이 없습니다', 'err'); return; }
   const ahead = S.ytQueue.length;
+  /* 예전엔 items 를 그대로 concat 만 했다 — 중복 검사도, 상한도, '지금 트는 곡 빼기'도 없었다.
+     기록 탭의 '＋ 전부 대기열' 은 S.ytHistory 를 통째로 넘기는데 그 첫 항목이 **지금 트는 곡**이라,
+     누르는 순간 지금 곡이 대기열 1번이 되고 끝나자마자 같은 곡이 다시 나왔다.
+     두 번 누르면 대기열이 정확히 두 배가 됐다. 이제 넣는 문은 ytQueueAdd 하나뿐이다. */
   const put = front => {
-    if (front) S.ytQueue = items.concat(S.ytQueue); else S.ytQueue = S.ytQueue.concat(items);
+    const r = ytQueueAdd(items, { front });
     save(); renderYtQueue();
-    toast(front ? `${items.length}곡을 대기열 맨 앞에 넣었습니다` : `${items.length}곡을 대기열 맨 뒤(${ahead + 1}번째부터)에 넣었습니다`);
+    if (!r.added) { toast(ytAddNote(r, '새로 넣을 곡이 없습니다'), 'err'); return; }
+    toast(ytAddNote(r, front ? `${r.added}곡을 대기열 맨 앞에 넣었습니다`
+      : `${r.added}곡을 대기열 뒤(${ahead + 1}번째부터)에 넣었습니다`));
   };
   if (ahead <= 3) { put(false); return; }
   // confirm 은 선택지가 둘뿐이라 '그만두기' 를 만들 수 없었다 → 앱 모달로 세 갈래를 준다
@@ -969,23 +1071,31 @@ function ytAddMany(items, label) {
   });
 }
 function ytEnqueue(item) {
-  if (S.ytQueue.some(q => q.id === item.id)) { toast('이미 대기열에 있습니다: ' + (item.title || '')); return; }
+  const k = ytKey(item);
+  if (!k) { toast('넣을 수 없는 항목입니다', 'err'); return; }
+  if (YT.cur && ytKey(YT.cur) === k) { toast('지금 재생 중인 곡입니다'); return; }
+  const i = S.ytQueue.findIndex(q => ytKey(q) === k);   // 열쇠는 id||list — 예전엔 id 만 봐서
+  if (i >= 0) {                                        // id 없는 재생목록끼리 같은 곡으로 판정됐다
+    if (!S.ytQueue[i].related) { toast('이미 대기열에 있습니다: ' + (item.title || '')); return; }
+    /* 알고리즘이 미리 담아 둔 곡을 내가 직접 골랐다 = **내 곡으로 승격**한다.
+       예전엔 '이미 있습니다' 로 거절해서, 그 곡은 🎶 딱지가 붙은 채 내 곡이 다 나갈 때까지
+       안 나오고 '알고리즘 곡 빼기' 에 같이 지워졌다. */
+    item = S.ytQueue.splice(i, 1)[0];
+    delete item.related;
+  }
   if (S.ytQueue.length >= YT_QUEUE_MAX) { toast(`대기열이 가득 찼습니다 (${YT_QUEUE_MAX}곡) — 먼저 정리해 주세요`, 'err'); return; }
-  /* 내가 고른 곡은 '알고리즘이 채워 둔 곡'(related) 보다 앞에 넣는다.
-     예전엔 무조건 맨 뒤라, 자동 이어듣기가 채운 10곡이 다 끝나야 방금 넣은 곡이 나왔다 —
-     "대기열에 넣었는데 왜 엉뚱한(알고리즘) 곡이 나오냐" 가 바로 이것이었다. */
-  const at = S.ytQueue.findIndex(q => q.related);
-  if (at >= 0) S.ytQueue.splice(at, 0, item); else S.ytQueue.push(item);
+  const r = ytQueueAdd([item]);              // 내가 고른 곡은 알고리즘 곡보다 앞에 (ytQueueAdd 기본)
   save(); renderYtQueue();
-  const pos = (at >= 0 ? at : S.ytQueue.length - 1) + 1;
-  toast(`대기열 ${pos}번째에 추가: ` + (item.title || '') + (at >= 0 ? ' (자동으로 채운 연관 곡보다 앞)' : ''));
+  if (!r.added) { toast('이미 대기열에 있습니다: ' + (item.title || '')); return; }
+  const pos = ytOrder(S.ytQueue).findIndex(q => ytKey(q) === k) + 1;   // 화면·재생과 같은 순서로 센다
+  toast(ytAddNote(r, `대기열 ${pos}번째에 추가: ` + (item.title || '')));
 }
 function ytRemember(item) { // 최근 재생 기록 (최대 200곡) — 대기열에서 빠져도 여기 남음
   if (!item || !(item.id || item.list)) return;
   S.ytHistory = (S.ytHistory || []).filter(h => !(h.id && h.id === item.id) && !(h.list && !h.id && h.list === item.list));
   S.ytHistory.unshift({ id: item.id, list: item.list, title: item.title, channel: item.channel, len: item.len, thumb: item.thumb, t: Date.now() });
   if (S.ytHistory.length > 200) S.ytHistory.length = 200;
-  save();
+  ytTouch(); save();
 }
 function renderYtHistory() {
   const box = $('#ytHist'); if (!box) return; box.innerHTML = '';
@@ -1018,8 +1128,8 @@ async function openYtRecover() { // 이전 브라우저/서버 이전 상태에�
       d.innerHTML = `<b>${esc(label)}</b><div class="hint">${p.savedAt ? new Date(p.savedAt).toLocaleString() : ''} · 대기열 ${q.length}곡 · 최근 재생 ${hist.length}곡 · 검색결과 ${res.length}개</div>
         <div class="row">${q.length ? '<button class="btn xs" data-a="q">대기열 ' + q.length + '곡 합치기</button>' : ''}${hist.length ? '<button class="btn xs" data-a="h">최근 재생 합치기</button>' : ''}${res.length ? '<button class="btn xs" data-a="r">검색결과 불러오기</button>' : ''}</div>`;
       d.querySelectorAll('button').forEach(b => b.onclick = () => {
-        if (b.dataset.a === 'q') { q.forEach(it => { if (!S.ytQueue.some(x => x.id === it.id)) S.ytQueue.push(it); }); renderYtQueue(); toast('대기열 복구됨'); }
-        if (b.dataset.a === 'h') { S.ytHistory = S.ytHistory || []; hist.forEach(it => { if (!S.ytHistory.some(x => x.id === it.id)) S.ytHistory.push(it); }); renderYtHistory(); toast('기록 복구됨'); }
+        if (b.dataset.a === 'q') { const r = ytQueueAdd(q); renderYtQueue(); toast(ytAddNote(r, `대기열 ${r.added}곡 복구됨`)); }
+        if (b.dataset.a === 'h') { S.ytHistory = S.ytHistory || []; hist.forEach(it => { if (ytKey(it) && !S.ytHistory.some(x => ytKey(x) === ytKey(it))) S.ytHistory.push(it); }); if (S.ytHistory.length > 200) S.ytHistory.length = 200; renderYtHistory(); toast('기록 복구됨'); }
         if (b.dataset.a === 'r') { ytLastResults = res; S.ytLastResults = res; renderYtResults(); $('#ytTabRes').click(); toast('검색결과 복구됨'); }
         save();
       });
@@ -1040,32 +1150,62 @@ function ytItemEl(it, opts) {
   if (it.noembed) d.classList.add('noembed');
   // 목록에서 직접 고른 것은 '처음부터 듣겠다'는 뜻이다 — 남아 있던 이어보기 목표를 버린다
   d.onclick = () => { YT._resume = null; YT._qualCap = 0; YT._noHls = null; YT.altTries = 0; YT.altSeen = null; YT._embedTry = 0; YT._embedList = null; if (it.noembed && ytMode() === 'embed') { ytDropFromQueue(it); if (R.srvInfo && R.srvInfo.ytEngine) { toast('임베드가 막힌 영상 → 직접 재생'); ytPlayDirect(it); } else ytPopup(it); return; } ytPlay(it); };
-  d.querySelector('.yt-add').onclick = e => { e.stopPropagation(); if (opts.queue) { S.ytQueue.splice(opts.idx, 1); save(); renderYtQueue(); } else ytEnqueue(it); };
+  /* 렌더 시점 인덱스로 지우면, 그 사이 대기열이 바뀌었을 때 엉뚱한 곡이 지워진다
+     (곡이 넘어가거나 설정을 가져온 직후에 실제로 그랬다). 항목 자체를 찾아 지운다. */
+  d.querySelector('.yt-add').onclick = e => { e.stopPropagation(); if (opts.queue) { const i = S.ytQueue.indexOf(it); if (i >= 0) S.ytQueue.splice(i, 1); ytTouch(); save(); renderYtQueue(); } else ytEnqueue(it); };
   return d;
 }
 function renderYtResults() { const box = $('#ytResults'); box.innerHTML = ''; ytLastResults.forEach(it => box.appendChild(ytItemEl(it, {}))); }
+/* S → 화면. 조작부는 initYouTube 에서 한 번만 세팅됐기 때문에, 서버에서 설정을 가져오거나
+   백업을 복원해 S 가 통째로 바뀌면 화면이 옛 값으로 남았다. 그 상태에서 체크박스를 만지면
+   화면의 잘못된 값이 진짜 설정을 덮어썼다 — '껐는데 다시 켜져 있다' 가 이것이다.
+   S 를 갈아끼우는 자리에서 반드시 이 함수를 부른다. */
+function syncYtUI() {
+  const set = (sel, fn) => { const el = $(sel); if (el) fn(el); };
+  set('#ytUsePop', el => { el.checked = !!S.ytUsePop; });
+  set('#ytAutoRelated', el => { el.checked = S.ytAutoRelated !== false; });
+  set('#ytNormalize', el => { el.checked = !!S.ytNormalize; });
+  /* 화질 목록은 곡을 틀어야 채워진다. 없는 값을 넣으면 select 가 빈 칸이 되므로,
+     있는 선택지일 때만 반영한다(없으면 다음 곡에서 ytFillQualSelect 가 맞춘다). */
+  set('#ytQual', el => { const want = S.ytQual || 'auto'; if ([...el.options].some(o => o.value === want)) el.value = want; });
+  set('#ytVol', el => { el.value = (S.ytVol == null ? 60 : S.ytVol); });
+  set('#ytModeLbl', el => { el.textContent = ({ direct: '직접', embed: '임베드', tab: '탭', popup: '팝업' })[ytMode()] || ''; });
+  if (typeof ytPaintAudioBtn === 'function') ytPaintAudioBtn();
+  if (typeof ytApplyPos === 'function' && !$('#ytFloat').hidden) ytApplyPos();
+  if (typeof ytCmd === 'function' && YT.cur) ytCmd('setVolume', [S.ytVol == null ? 60 : S.ytVol]);
+}
 function renderYtQueue() {
   const box = $('#ytQueue'); box.innerHTML = '';
   const n = S.ytQueue.length;
   if (n) {
     // 재생목록을 통째로 넣으면 수십~수백 곡이 쌓인다 → 한 곡씩 ✕ 말고 통째로 빼는 길도 준다
     const bar = document.createElement('div'); bar.className = 'row'; bar.style.padding = '2px 4px 6px';
-    bar.innerHTML = `<span class="hint" style="flex:1">${n}곡 · 각 줄의 ✕ 로 한 곡씩 뺄 수 있습니다</span>
+    /* 자동 이어듣기가 끼워 넣은 곡이 몇 곡인지 숨기지 않는다 — 예전엔 대기열 중간에 조용히
+       쌓여서 "내가 넣지도 않은 곡이 왜 나오나" 가 됐다. 내가 넣은 곡이 먼저 나간다는 것도 밝힌다. */
+    const nRel = S.ytQueue.filter(q => q.related).length;
+    bar.innerHTML = `<span class="hint" style="flex:1">${n}곡${nRel ? ` <b>(내가 넣은 ${n - nRel} + 🎶 알고리즘 ${nRel} — 내 곡 먼저)</b>` : ''} · 각 줄의 ✕ 로 한 곡씩</span>
+      ${nRel ? '<button class="btn xs" id="ytQNoRel" title="자동 이어듣기가 채운 곡만 뺍니다">🎶 알고리즘 곡 빼기</button>' : ''}
       <button class="btn xs" id="ytQDedup" title="같은 곡이 여러 번 들어간 것을 정리">중복 정리</button>
       <button class="btn xs danger" id="ytQClear" title="대기열을 통째로 비웁니다">🗑 전부 빼기</button>`;
     box.appendChild(bar);
+    const nr = bar.querySelector('#ytQNoRel');
+    if (nr) nr.onclick = () => { S.ytQueue = S.ytQueue.filter(q => !q.related); ytTouch(); save(); renderYtQueue(); toast(`알고리즘 곡 ${nRel}곡을 뺐습니다`); };
     bar.querySelector('#ytQClear').onclick = () => {
       if (!confirm(`대기열 ${n}곡을 전부 뺍니다. 계속할까요?\n(기록 탭에 남아 있어 되돌릴 수 있습니다)`)) return;
-      S.ytQueue = []; save(); renderYtQueue(); toast(`${n}곡을 대기열에서 뺐습니다`);
+      S.ytQueue = []; ytTouch(); save(); renderYtQueue(); toast(`${n}곡을 대기열에서 뺐습니다`);
     };
     bar.querySelector('#ytQDedup').onclick = () => {
       const seen = new Set(); const kept = S.ytQueue.filter(x => { const k = x.id || x.list; if (!k || seen.has(k)) return false; seen.add(k); return true; });
       const gone = n - kept.length;
       if (!gone) { toast('중복이 없습니다'); return; }
-      S.ytQueue = kept; save(); renderYtQueue(); toast(`중복 ${gone}곡 제거`);
+      S.ytQueue = kept; ytTouch(); save(); renderYtQueue(); toast(`중복 ${gone}곡 제거`);
     };
   }
-  S.ytQueue.forEach((it, i) => box.appendChild(ytItemEl(it, { queue: true, idx: i })));
+  /* 화면에 보이는 순서 = 실제로 나올 순서. 예전엔 배열 순서 그대로 그려서,
+     '내 곡 먼저' 라고 써 놓고 목록은 알고리즘 곡이 위에 있는 모순이 났다.
+     ✕ 는 화면 순서가 아니라 배열의 진짜 자리를 지워야 한다. */
+  const pos = new Map(S.ytQueue.map((it, i) => [it, i]));
+  ytOrder(S.ytQueue).forEach(it => box.appendChild(ytItemEl(it, { queue: true, idx: pos.get(it) })));
   if (!n) box.innerHTML = '<div class="hint" style="padding:8px">대기열이 비었습니다 — 검색 결과의 ＋ 로 추가</div>';
   $('#ytQueueN').textContent = n ? `(${n})` : '';
 }
@@ -1340,7 +1480,12 @@ function initYouTube() {
       const d = JSON.parse(e.data);
       if (d.event === 'onStateChange') {
         if (d.info === 0 && (S.ytQueue.length || S.ytAutoRelated !== false)) ytNext();
-        else if (d.info === 1) { YT.playing = true; ytSetPlayIcon(true); YT._embedTry = 0; YT._embedList = null; const er = $('#ytErr'); if (er) er.hidden = true; }
+        else if (d.info === 1) { YT.playing = true; ytSetPlayIcon(true); YT._embedTry = 0; YT._embedList = null;
+          /* 직접 재생은 onplaying 에서 하던 일을 임베드에도 똑같이 — 한 곡이라도 제대로 나왔으면
+             연속 실패 카운터를 0 으로 돌리고 예약된 자동 넘김을 끈다. 예전엔 이게 없어서
+             하루 동안 띄엄띄엄 3곡만 실패해도 그 뒤로 자동 넘김이 영영 멈췄다. */
+          YT._failRun = 0; YT._goneRun = 0; clearTimeout(YT._skipT);
+          const er = $('#ytErr'); if (er) er.hidden = true; }
         else if (d.info === 2) { YT.playing = false; ytSetPlayIcon(false); }
       }
       if (d.event === 'onError') ytEmbedError(d.info);
@@ -1351,7 +1496,7 @@ function initYouTube() {
       }
     } catch (x) {}
   });
-  renderYtQueue(); ytApplyPos();
+  renderYtQueue(); ytApplyPos(); syncYtUI();
   if (S.ytOpen || new URLSearchParams(location.search).get('yt')) ytOpen(true);
   // 직접 재생 엔진이 있으면 탭/팝업 모드로 남아 있던 예전 설정을 직접 재생으로 되돌림 (한 번)
   const fixMode = () => {
@@ -1634,7 +1779,9 @@ function applyMeta(meta) {
   S.aiChoice = !useCoords;
   /* 캐릭터는 통째로 바꾼다 — 예전엔 characterPrompts 가 없으면 이전 캐릭터가 그대로 남았다 */
   S.chars = chars.map(c => ({ prompt: c.prompt, uc: c.uc, x: c.x, y: c.y }));
-  save(); syncUI(); renderChars();
+  /* save() 가 아니라 savePrompt(). 불러온 프롬프트가 빈 이미지였을 때 save() 는
+     서버의 빈-프롬프트 보호(409)에 걸리고, 그 되돌림이 방금 불러온 설정까지 통째로 지웠다. */
+  savePrompt(); syncUI(); renderChars();
   toast('프롬프트·설정을 불러왔습니다 (시드 고정됨)');
 }
 async function importFromPng(blob) {
@@ -2362,7 +2509,12 @@ function openBackup() {
                  백업을 '합치기' 로 복원하면 캐릭터 라이브러리가 말없이 하나도 안 돌아왔다. */
             S.characters = mergeBy(S.characters, state.characters, 'name');
             S.scenes = mergeBy(S.scenes, state.scenes, 'id'); S.chunkCats = [...new Set([...(S.chunkCats || []), ...(state.chunkCats || [])])];
-            S.ytQueue = mergeBy(S.ytQueue, state.ytQueue, 'id'); S.ytHistory = mergeBy(S.ytHistory, state.ytHistory, 'id');
+            /* 'id' 만으로 합치면 id 가 없는 재생목록 항목끼리 전부 같은 것으로 판정돼
+               백업 속 재생목록이 하나만 돌아온다. 곡 열쇠는 id||list 다. */
+            const ytSame = (x, y) => ytKey(x) === ytKey(y);
+            S.ytQueue = S.ytQueue.concat((state.ytQueue || []).filter(x => ytKey(x) && !S.ytQueue.some(y => ytSame(y, x))));
+            S.ytHistory = S.ytHistory.concat((state.ytHistory || []).filter(x => ytKey(x) && !S.ytHistory.some(y => ytSame(y, x))));
+            ytQueueTrim(); if (S.ytHistory.length > 200) S.ytHistory.length = 200;
             /* 쌓기만 하는 기록들도 합친다 (서버 _merge_state 와 같은 규칙).
                채점 한 줄 = Gemini 호출 한 번(=요금 한 번)이라 버리면 돈을 다시 내야 한다.
                뭉갬 평소 기록은 버리면 "평소" 기준이 사라져 상태 판정이 한동안 헛돈다. */
@@ -2897,8 +3049,10 @@ async function ensureHlsLib() {
       s.src = R.api + '/vendor/hls.js'; s.onload = res; s.onerror = () => rej(new Error('hls.js 로드 실패'));
       document.head.appendChild(s);
     });
-    _hlsLib = window.Hls || false;
-  } catch (e) { _hlsLib = false; }
+    _hlsLib = window.Hls || null;      // 붙었는데 window.Hls 가 없으면 다음에 다시 시도
+  } catch (e) { _hlsLib = null; logErr('hls.js 로드 실패: ' + (e && e.message || e)); return false; }
+  /* 실패를 false 로 굳히면 안 된다 — 서버를 다시 켜는 중에 요청 하나만 실패해도
+     그 뒤로 영영 고화질을 못 쓰고 360p 로만 재생되면서, 화질을 바꿔도 안 바뀐다. */
   return _hlsLib;
 }
 function ytDestroyHls() { if (YT._hls) { try { YT._hls.destroy(); } catch (e) {} YT._hls = null; } }
@@ -2978,7 +3132,9 @@ async function ytPlayHls(video, variant, load, item, resumeAt) {
       const at = video.currentTime;
       const wasPlaying = done;   // 여기서 done 은 "성공으로 resolve 됐다"(=호출자는 이미 떠났다)는 뜻
       abandoned = true;
-      ytDestroyHls();
+      /* 3054행과 같은 규칙 — 전역으로 지우면 그 사이 시작된 '지금 나오는 곡' 의 인스턴스를 죽인다.
+         그러면 오류도 안 뜨고 다음 곡도 아닌 채로 화면만 검게 멈춘다. */
+      if (YT._hls === h) ytDestroyHls(); else { try { h.destroy(); } catch (e2) {} }
       if (wasPlaying) { ytHlsGiveUp(item, variant, at); return; }  // 재생 중이던 곡 → 다른 방법으로 이어서
       finish(false);                                               // 아직 시작 전 → 아래 progressive 후보로
     });

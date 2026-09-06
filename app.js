@@ -182,11 +182,16 @@ const DEFAULTS = {
   emphHl: true,           // 프롬프트 칸에서 {tag}·[tag]·N::tag:: 가중치를 색으로 표시 (NAI 도 기본 켬)
   mode: 'main', scenes: [], curScene: null, styles: [], activeStyle: null, characters: [],
 };
-/* 청크 이름→내용 캐시. 선언이 아래(chunkMap 옆)에 있으면 안 된다 —
+/* 청크 캐시 두 개. 선언이 아래(chunkMap 옆)에 있으면 안 된다 —
    바로 아래 normalizeState() 가 chunkMapClear() 를 부르는데, 그때는 아직 초기화 전(TDZ)이라
    ReferenceError 가 나고 catch 가 삼켜 **저장된 설정이 매번 통째로 버려졌다**.
-   (서버에서 다시 받아오기 때문에 눈에 잘 안 띄었지만, 서버가 꺼져 있으면 전부 기본값이 됐다) */
+   (서버에서 다시 받아오기 때문에 눈에 잘 안 띄었지만, 서버가 꺼져 있으면 전부 기본값이 됐다)
+
+   ★ 12.4 에서 _chunkByName 만 올리고 _chunkMapCache 를 아래 남겨 둬서 **같은 버그가 그대로 살아 있었다.**
+     chunkMapClear() 는 둘 다 건드리므로 둘 다 여기 있어야 한다.
+     같은 실수를 또 하지 않도록: chunkMapClear() 가 손대는 변수는 전부 이 자리에 둔다. */
 let _chunkByName = null;
+let _chunkMapCache = null;
 let S = { ...DEFAULTS };
 let _stateLoadErr = null;
 try { S = normalizeState({ ...DEFAULTS, ...(JSON.parse(localStorage.getItem('nst_state')) || {}) }); }
@@ -437,7 +442,10 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
        반대로 "무조건 서버 우선" 으로 바꿨더니, 서버가 뒤처진 사람의 설정이 날아갔다.
        그래서 판정은 시각대로 두되, '내용이 없는 쪽이 있는 쪽을 덮는' 경우만 막는다.
        이 조건은 어느 방향으로도 데이터를 없애지 않는다. */
-    const hasText = o => !!((o.prompt || '').trim() || Object.values(o.secText || {}).some(v => (v || '').trim()));
+    /* 캐릭터 프롬프트도 '글자' 다. 예전엔 chars 를 안 봐서, 메인 프롬프트를 비워 두고
+   캐릭터 칸만 채운 사람은 '빈 상태' 로 판정돼 서버가 무조건 이겼다 — 쓴 글이 사라졌다. */
+    const hasText = o => !!((o.prompt || '').trim() || Object.values(o.secText || {}).some(v => (v || '').trim())
+      || (o.chars || []).some(c => ((c && c.prompt) || '').trim() || ((c && c.uc) || '').trim()));
     const localBare = !hasText(S) && contentCount(S) === 0;
     const srvHasStuff = hasText(srv) || contentCount(srv) > 0;
     const localNewer = (S.savedAt || 0) >= srv.savedAt && !(localBare && srvHasStuff) && !forceMerge;
@@ -474,7 +482,18 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
     base.chunkCats = [...new Set([...(base.chunkCats || []), ...(other.chunkCats || [])])].filter(c => !isTombed(base.deleted, 'cat', c));
     // 복구용 백업은 "실제로 내용이 줄어드는" 경우에만 남긴다.
     // 예전엔 부팅할 때마다 무조건 덮어써서 🛟복구가 이미 깨진 상태만 보여줬다.
-    if (contentCount(base) < contentCount(S) || diverged) { try { localStorage.setItem('nst_state_prev', JSON.stringify(S)); } catch (e) {} }
+    /* contentCount 는 청크·스타일·캐릭터·씬만 센다. 대기열·기록만 통째로 갈린 사고에서는
+       스냅샷이 한 줄도 안 남아, 정작 🛟복구가 필요한 순간에 '복구할 이전 상태가 없습니다' 가 됐다. */
+    const musicShrank = (base.ytQueue || []).length < (S.ytQueue || []).length || (base.ytHistory || []).length < (S.ytHistory || []).length;
+    if (contentCount(base) < contentCount(S) || musicShrank || diverged) { try { localStorage.setItem('nst_state_prev', JSON.stringify(S)); } catch (e) {} }
+    /* 대기열·기록은 '마지막에 쓴 쪽' 이 아니라 '마지막에 **실제로 바꾼** 쪽' 이 이긴다.
+       창을 두 개 열어 두면, 대기열을 건드리지도 않은 창의 낡은 사본이 재생 중인 창의
+       진행을 통째로 되돌렸다(다 들은 곡이 되살아났다). */
+    if ((srv.ytTouchedAt || 0) > (S.ytTouchedAt || 0)) {
+      base.ytQueue = srv.ytQueue || []; base.ytHistory = srv.ytHistory || []; base.ytTouchedAt = srv.ytTouchedAt;
+    } else if ((S.ytTouchedAt || 0) > (srv.ytTouchedAt || 0)) {
+      base.ytQueue = S.ytQueue || []; base.ytHistory = S.ytHistory || []; base.ytTouchedAt = S.ytTouchedAt;
+    }
     R.seenBase = srv.savedAt || 0;
     try { localStorage.setItem('nst_base', String(srv.savedAt || 0)); } catch (e) {}   // 용량 초과로 pull 전체가 중단되면 안 된다
     if (textFromServer) {
@@ -510,6 +529,7 @@ async function pullStateFromServer(forceMerge) { // 서버 설정 가져오기: 
     if (typeof renderChunkBar === 'function') renderChunkBar();
     if (typeof renderStyleSelects === 'function') renderStyleSelects();
     if (typeof renderYtQueue === 'function') renderYtQueue();
+    if (typeof syncYtUI === 'function') syncYtUI();   // 조작부도 새 S 를 다시 읽어야 한다
     setMode(S.mode || 'main');
     R.booted = true; save();
     toast('서버에 저장된 설정(청크·스타일·씬)을 불러와 합쳤습니다');
@@ -719,7 +739,7 @@ const chunkKeyOf = tok => normKey(String(tok).replace(/^-?[\d.]+::/, '').replace
      한 덩어리(여러 줄) → 쉼표를 정리해 이어붙인 내용
      후보 목록         → <이름> 으로 넘긴다. 그래야 expandWild 가 한 줄만 뽑는다.
    (예전엔 이름만 적으면 114줄짜리 작가랜덤이 통째로 프롬프트에 실려 나갔다.) */
-let _chunkMapCache = null;
+/* _chunkMapCache 선언은 위(190행 근처)로 올라갔다 — 여기 두면 TDZ 로 부팅이 깨진다. */
 /* 청크가 중첩되면 expandChunks 가 재귀할 때마다 이 표를 새로 만들었다 —
    청크 77개 × 재귀 깊이만큼 반복돼 글자 하나 칠 때마다 화면이 끊겼다.
    chunkMapClear() 가 청크가 바뀔 때마다 이 캐시도 버린다. */
@@ -1094,7 +1114,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.5';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.6';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -1204,7 +1224,10 @@ function setSrvUI(ok, info) {
 async function guardPromptLoss() {
   try {
     if (!R.srvOk || R._guardDone) return;
-    const hasText = o => !!((o.prompt || '').trim() || Object.values(o.secText || {}).some(v => (v || '').trim()));
+    /* 캐릭터 프롬프트도 '글자' 다. 예전엔 chars 를 안 봐서, 메인 프롬프트를 비워 두고
+   캐릭터 칸만 채운 사람은 '빈 상태' 로 판정돼 서버가 무조건 이겼다 — 쓴 글이 사라졌다. */
+    const hasText = o => !!((o.prompt || '').trim() || Object.values(o.secText || {}).some(v => (v || '').trim())
+      || (o.chars || []).some(c => ((c && c.prompt) || '').trim() || ((c && c.uc) || '').trim()));
     if (hasText(S)) { R._guardDone = true; return; }          // 화면에 글자가 있으면 볼 것 없다
     const srv = await (await fetchT(R.api + '/state', { cache: 'no-store' }, 8000)).json().catch(() => null);
     if (!srv || !hasText(srv)) { R._guardDone = true; return; }
@@ -2458,8 +2481,10 @@ function charCard(c, i, onDel, onChange) { // 메인·씬 공용 카드
   /* 값을 코드로 바꿔치면 input 이 안 나므로, 뒤에 깔린 강조 층이 **이전 캐릭터 글자**를 그대로 들고 있다
      (칩 색·가중치 표시가 엉뚱한 자리에 남는다). 미러를 강제로 다시 그린다. */
   lib.onchange = () => { const ch = S.characters.find(x => x.id === lib.value); if (ch) { c.prompt = ch.prompt; c.uc = ch.uc || ''; c.libId = ch.id; tp.value = c.prompt; tu.value = c.uc; if (tp._hlSync) tp._hlSync(true); if (tu._hlSync) tu._hlSync(true); onChange(); } lib.value = ''; };
-  tp.addEventListener('input', () => { c.prompt = tp.value; onChange(); });
-  tu.addEventListener('input', () => { c.uc = tu.value; onChange(); });
+  /* markUserEdit 은 '부팅 전이라도 사람이 친 글자' 에 시각 도장을 찍어 서버 값에 안 덮이게 한다.
+     메인 프롬프트·#uc 에만 붙어 있어서, 앱을 켜자마자 캐릭터 칸에 쓴 글은 서버가 붙는 순간 사라졌다. */
+  tp.addEventListener('input', () => { c.prompt = tp.value; markUserEdit(); onChange(); });
+  tu.addEventListener('input', () => { c.uc = tu.value; markUserEdit(); onChange(); });
   card.querySelector('.del').onclick = onDel;
   card.querySelector('.pos').onclick = () => openPosPicker(c, () => { onChange(); card.querySelector('.pos').textContent = '위치: ' + posName(c); });
   card.querySelector('.savelib').onclick = () => { if (!c.prompt.trim()) { toast('프롬프트가 비었습니다', 'err'); return; } if (window.saveCharToLibrary) saveCharToLibrary(c); };
@@ -2741,6 +2766,9 @@ function setPromptText(text) { // 불러오기(PNG/메타)용: 한 칸 모드면
   S.prompt = text || '';
   if (!S.singleBox && S.sections && S.sections.length) { S.secText = {}; const tgt = S.sections.find(s => s.id === 'char') || S.sections[0]; S.secText[tgt.id] = S.prompt; }
   renderSections();
+  /* 씬 화면의 거울 칸도 같이 갱신한다. 안 하면 화면엔 옛 글이 보이고,
+     거기에 한 글자만 쳐도 방금 불러온 프롬프트가 통째로 날아갔다. */
+  if (window.refreshSceneMirror) refreshSceneMirror();
 }
 function renderSections() {
   const list = $('#secList'); if (!list) return;
@@ -2819,7 +2847,7 @@ function openSectionEditor() {
         d.querySelector('[data-a="up"]').onclick = () => { if (i > 0) { S.sections.splice(i - 1, 0, S.sections.splice(i, 1)[0]); syncPromptFromSections(); save(); renderSections(); draw(); } };
         d.querySelector('[data-a="dn"]').onclick = () => { if (i < S.sections.length - 1) { S.sections.splice(i + 1, 0, S.sections.splice(i, 1)[0]); syncPromptFromSections(); save(); renderSections(); draw(); } };
         /* 칸에 글이 들어 있으면 확인을 받는다 — 되돌리기가 없어 그대로 영구 손실이다 */
-        d.querySelector('[data-a="del"]').onclick = () => { if (S.sections.length <= 1) { toast('칸은 최소 1개', 'err'); return; } if ((((S.secText || {})[sec.id]) || '').trim() && !confirm('"' + (sec.name || '') + '" 칸에 쓴 내용도 함께 지웁니다. 계속할까요?')) return; delete S.secText[sec.id]; S.sections.splice(i, 1); syncPromptFromSections(); save(); renderSections(); draw(); };
+        d.querySelector('[data-a="del"]').onclick = () => { if (S.sections.length <= 1) { toast('칸은 최소 1개', 'err'); return; } if ((((S.secText || {})[sec.id]) || '').trim() && !confirm('"' + (sec.name || '') + '" 칸에 쓴 내용도 함께 지웁니다. 계속할까요?')) return; delete S.secText[sec.id]; S.sections.splice(i, 1); syncPromptFromSections(); savePrompt(); renderSections(); draw(); };   /* save() 면 결과가 빈 프롬프트일 때 서버 보호(409)에 걸려 지운 칸이 되살아난다 */
         rows.appendChild(d);
       });
     };
@@ -2835,7 +2863,7 @@ function openSectionEditor() {
       if (!wasSingle) for (const sec of S.sections) if ((oldText[sec.id] || '').trim()) keep[sec.id] = oldText[sec.id];
       if (Object.keys(keep).length) { S.secText = keep; S.prompt = getMainPrompt(); }
       else { S.secText = {}; if (cur) S.secText[S.sections[0].id] = cur; S.prompt = cur; }
-      save(); renderSections(); draw();
+      savePrompt(); renderSections(); draw();
     };
   }, true);
 }
@@ -3212,7 +3240,7 @@ function openSettings() {
       try { next = normalizeState({ ...DEFAULTS, ...JSON.parse(await f.text()) }); }
       catch (e) { toast('설정 파일이 아닙니다', 'err'); return; }
       const prev = S;
-      try { S = next; save(); syncUI(); renderChars(); if (window.renderChunkBar) renderChunkBar(); applyTheme(); toast('설정을 가져왔습니다'); closeModal(); }
+      try { S = next; save(); syncUI(); renderChars(); if (window.renderChunkBar) renderChunkBar(); if (window.renderYtQueue) renderYtQueue(); if (window.syncYtUI) syncYtUI(); applyTheme(); toast('설정을 가져왔습니다'); closeModal(); }
       catch (e) { S = prev; try { syncUI(); } catch (e2) {} toast('설정을 적용하지 못해 되돌렸습니다: ' + e.message, 'err'); }
     }, '.json');
     const pd = body.querySelector('#mPngDrop'); bindDrop(pd, f => importFromPng(f)); pd.onclick = () => pickFiles(false, f => importFromPng(f), 'image/png');
