@@ -34,6 +34,10 @@ import json
 import socket
 import threading
 import webbrowser
+import http.client
+import select
+import ssl
+import io
 import mimetypes
 import urllib.request
 import urllib.parse
@@ -47,7 +51,7 @@ VERSION = 17
 # 같은 PC 의 다른 프로그램은 127.0.0.1 에 닿을 수는 있어도 이 값은 모른다.
 SESSION_KEY = secrets.token_urlsafe(24)
 
-RELEASE = "12.6"   # 배포 버전. GitHub 릴리스 태그 "v12.6" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
+RELEASE = "12.7"   # 배포 버전. GitHub 릴리스 태그 "v12.7" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
 # 이 앱이 배포되는 저장소. 비워 두면 ⬆ 업데이트 버튼이 아예 안 뜬다 —
 # 사용자가 ⚙설정에 직접 타이핑해 넣기 전까지는 새 버전이 나온 줄도 모른다.
 # 실제로 그 때문에 옛 버전을 계속 쓰시는 분들이 있었다. 기본값을 박아 둔다.
@@ -1470,6 +1474,179 @@ def yt_search(q):
 
 
 # ─────────────────────────── HTTP ───────────────────────────
+# ---- 안 바뀐 파일은 다시 보내지 않는다 --------------------------------------
+# _send 의 기본값이 no-store 라 앱 파일과 태그 사전(수 MB)을 켤 때마다 다시 내려받았다.
+# ETag 에 RELEASE 를 넣어, 업데이트하면 반드시 새로 받게 한다.
+_asset_lock = threading.Lock()
+_asset_cache = {}
+
+
+def _asset_bytes(f):
+    """파일 내용을 메모리에 담아 둔다 (크기·수정시각이 바뀌면 다시 읽는다).
+       onefile exe 는 파일을 읽을 때마다 백신이 훑을 수 있어 디스크 읽기를 줄이는 게 이득이다."""
+    key = str(f)
+    try:
+        st = f.stat()
+        sig = (st.st_size, st.st_mtime_ns)
+    except OSError:
+        return f.read_bytes()
+    with _asset_lock:
+        hit = _asset_cache.get(key)
+        if hit and hit[0] == sig:
+            return hit[1]
+    data = f.read_bytes()
+    with _asset_lock:
+        _asset_cache[key] = (sig, data)
+    return data
+
+
+def _etag_of(f):
+    try:
+        st = f.stat()
+        return '"%s-%x-%x"' % (RELEASE, st.st_size, int(st.st_mtime))
+    except OSError:
+        return '"%s"' % RELEASE
+
+
+# ---- NAI 업스트림 연결 재사용 ----------------------------------------------
+# urllib.request 는 요청마다 새 TCP+TLS 를 연다. 실측 중앙값 973ms 대 374ms —
+# 생성 한 번마다 약 600ms 를 그냥 버렸다(공홈 브라우저는 연결 하나를 계속 쓴다).
+#
+# 과금 규칙 때문에 재시도 조건이 까다롭다. NAI 는 요청을 **받아들인 시점에** Anlas 를 뺀다:
+#   · conn.request() 실패 → 바이트가 서버에 닿지 않았다 → 새 연결로 한 번 다시 보내도 안전
+#   · getresponse() 실패  → 서버가 이미 받았을 수 있다 → 절대 다시 보내지 않는다
+_conn_lock = threading.Lock()
+_conn_pool = {}          # (host, port) -> [(conn, 마지막_사용시각), ...]
+_conn_ctx = None
+_CONN_IDLE_MAX = 15.0    # 이보다 오래 논 연결은 버린다 (상대가 조용히 닫았을 수 있다)
+_CONN_KEEP = 6           # 호스트당 보관 개수
+
+
+def _conn_alive(c):
+    """재사용 전에 정말 살아 있는지 본다. 읽을 게 있다면 = 상대가 닫았거나 쓰레기가 남았다."""
+    s = getattr(c, "sock", None)
+    if s is None:
+        return False
+    try:
+        r, _, x = select.select([s], [], [s], 0)
+        return not r and not x
+    except Exception:
+        return False
+
+
+def _conn_get(host, port, timeout):
+    global _conn_ctx
+    now = time.time()
+    with _conn_lock:
+        lst = _conn_pool.get((host, port)) or []
+        while lst:
+            c, used = lst.pop()
+            if now - used <= _CONN_IDLE_MAX and _conn_alive(c):
+                try:
+                    c.sock.settimeout(timeout)
+                except Exception:
+                    pass
+                return c, True
+            try:
+                c.close()
+            except Exception:
+                pass
+    if _conn_ctx is None:
+        _conn_ctx = ssl.create_default_context()
+    return http.client.HTTPSConnection(host, port, timeout=timeout, context=_conn_ctx), False
+
+
+def _conn_https_only(url):
+    """업스트림은 전부 https 다. 혹시라도 http 주소가 들어오면 풀을 쓰지 않는다 —
+       HTTPSConnection 으로 평문 포트에 붙으면 조용히 실패한다."""
+    return urllib.parse.urlsplit(url).scheme == "https"
+
+
+def _conn_put(host, port, c):
+    with _conn_lock:
+        lst = _conn_pool.setdefault((host, port), [])
+        if len(lst) < _CONN_KEEP and getattr(c, "sock", None) is not None:
+            lst.append((c, time.time()))
+            return
+    try:
+        c.close()
+    except Exception:
+        pass
+
+
+class _Upstream:
+    """업스트림 응답. 다 읽고 close() 하면 연결이 풀로 돌아간다."""
+
+    def __init__(self, conn, resp, host, port):
+        self.conn, self.resp, self.host, self.port = conn, resp, host, port
+        self.status = resp.status
+        self.headers = resp.headers
+        self._closed = False
+
+    def read(self, n=-1):
+        return self.resp.read() if n is None or n < 0 else self.resp.read(n)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        keep = False
+        try:
+            if not self.resp.isclosed():
+                self.resp.read()          # 남은 본문을 비워야 연결을 다시 쓸 수 있다
+            keep = not self.resp.will_close
+        except Exception:
+            keep = False
+        if keep:
+            _conn_put(self.host, self.port, self.conn)
+        else:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+
+def _upstream(method, url, body, headers, timeout):
+    """연결을 재사용해 업스트림에 보낸다. HTTPError 는 urllib 과 같은 모양으로 올린다."""
+    if not _conn_https_only(url):
+        raise ValueError("업스트림은 https 만 지원합니다: %s" % url)
+    u = urllib.parse.urlsplit(url)
+    host, port = u.hostname, u.port or 443
+    path = u.path + (("?" + u.query) if u.query else "")
+    h = dict(headers or {})
+    h.setdefault("Host", host)
+    sent = False
+    for attempt in (0, 1):
+        conn, reused = _conn_get(host, port, timeout)
+        try:
+            conn.request(method, path, body=body, headers=h)
+            sent = True
+            resp = conn.getresponse()
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            # 재사용한 연결이 **보내기 단계에서** 죽은 경우만 한 번 다시 시도한다.
+            # 응답을 기다리다 터진 것은 서버가 이미 받았을 수 있으므로 절대 다시 보내지 않는다.
+            if reused and not sent and attempt == 0:
+                continue
+            raise
+        up = _Upstream(conn, resp, host, port)
+        if up.status >= 400:
+            data = up.read()
+            up.close()
+            raise urllib.error.HTTPError(url, up.status, resp.reason, resp.headers, io.BytesIO(data))
+        return up
+    raise RuntimeError("업스트림 연결 실패")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -1539,6 +1716,21 @@ class Handler(BaseHTTPRequestHandler):
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
             pass
 
+    def _cached(self, data, ctype, etag, extra=None):
+        """ETag 가 같으면 304 로 끝낸다 (본문 없음). 다르면 평소대로 보낸다."""
+        hdr = {"Cache-Control": "max-age=0, must-revalidate", "ETag": etag}
+        hdr.update(extra or {})
+        inm = self.headers.get("If-None-Match") or ""
+        if etag in [x.strip() for x in inm.split(",") if x.strip()]:
+            self.send_response(304)
+            for k, v in hdr.items():
+                self.send_header(k, v)
+            self._cors()
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self._send(200, data, ctype, hdr)
+
     def _json(self, code, obj):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
                    "application/json; charset=utf-8")
@@ -1569,7 +1761,7 @@ class Handler(BaseHTTPRequestHandler):
                 if "generate-image-stream" in self.path:
                     started = False   # 본문(msgpack 프레임)을 흘리기 시작했는지
                     try:
-                        with urllib.request.urlopen(req, timeout=600) as r:
+                        with _upstream(self.command, url, body, dict(req.headers), 600) as r:
                             self.send_response(r.status)
                             self.send_header("Content-Type", r.headers.get("Content-Type", "application/x-msgpack"))
                             self.send_header("Cache-Control", "no-store")
@@ -1602,7 +1794,7 @@ class Handler(BaseHTTPRequestHandler):
                             self._json(502, {"message": "stream proxy error: %s" % e})
                     return True
                 try:
-                    with urllib.request.urlopen(req, timeout=600) as r:
+                    with _upstream(self.command, url, body, dict(req.headers), 600) as r:
                         data = r.read()
                         ctype = r.headers.get("Content-Type", "application/octet-stream")
                         self._send(r.status, data, ctype)
@@ -2815,15 +3007,14 @@ class Handler(BaseHTTPRequestHandler):
             if not f.exists():
                 f = DATA / name
             if f.exists():
-                self._send(200, f.read_bytes(), "application/json; charset=utf-8", {"Content-Encoding": "gzip"})
+                self._cached(_asset_bytes(f), "application/json; charset=utf-8", _etag_of(f), {"Content-Encoding": "gzip"})
             else:
                 self._send(204, b"", "application/json; charset=utf-8")
             return True
         if path == "/tags/kr.json":
             if TAG_JSON_GZ.exists():
-                data = TAG_JSON_GZ.read_bytes()
-                self._send(200, data, "application/json; charset=utf-8",
-                           {"Content-Encoding": "gzip"})
+                self._cached(_asset_bytes(TAG_JSON_GZ), "application/json; charset=utf-8",
+                             _etag_of(TAG_JSON_GZ), {"Content-Encoding": "gzip"})
             else:
                 if _tag_status["state"] in ("idle", "error"):
                     ensure_tag_db_async()
@@ -2853,7 +3044,7 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(str(f))[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype.endswith("javascript"):
             ctype += "; charset=utf-8"
-        data = f.read_bytes()
+        data = _asset_bytes(f)
         if rel2 == "index.html":
             # 이 페이지를 실제로 연 사람만 비밀값을 꺼낼 수 있게 열쇠를 심는다.
             # 캐시되면 옛 열쇠가 남으므로 index.html 은 캐시하지 않는다.
@@ -2864,7 +3055,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = tag + data
             self._send(200, data, ctype, {"Cache-Control": "no-store"})
             return True
-        self._send(200, data, ctype)
+        self._cached(data, ctype, _etag_of(f))
         return True
 
     def _drain(self):

@@ -549,6 +549,51 @@ const R = {
 
 /* ─────────────── 유틸 ─────────────── */
 const ERRLOG = [];
+/* ── 느림 기록 ───────────────────────────────────────────────────────────
+   "느리다" 는 신고를 짐작으로 고치지 않기 위한 장치다. 같은 설정을 복제해도
+   내 PC 에서는 재현이 안 되는 경우가 있어서, 앱이 스스로 무엇이 몇 초 걸렸는지 적는다. */
+const SLOWLOG = [];
+function slowNote(kind, what, ms, extra) {
+  const rec = { t: new Date().toLocaleTimeString(), kind, what: String(what || '').slice(0, 80), ms: Math.round(ms), extra: extra || '' };
+  SLOWLOG.push(rec);
+  if (SLOWLOG.length > 40) SLOWLOG.shift();
+  // 2초를 넘으면 새로고침해도 남도록 서버에도 적는다 (토큰·경로는 서버가 지운다)
+  if (rec.ms >= 2000) sendErr('slow', `느림 ${kind} ${rec.what} ${rec.ms}ms${rec.extra ? ' · ' + rec.extra : ''}`);
+}
+function slowLabel(el) {
+  if (!el || !el.closest) return '?';
+  const b = el.closest('button, a, label, .ytitem, .hitem, [role=button]') || el;
+  const id = b.id ? '#' + b.id : '';
+  const txt = (b.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 24);
+  return (id || '') + (txt ? (id ? ' ' : '') + txt : (b.className ? '.' + String(b.className).split(' ')[0] : b.tagName));
+}
+(function watchSlow() {
+  try {
+    /* 누른 순간부터 **화면이 다시 그려질 때까지**. 두 번째 rAF 는 그리기가 끝난 뒤에 온다.
+       e.timeStamp 와의 차이는 '이미 바쁜 main thread 때문에 눌러도 반응이 없던 시간' 이다. */
+    addEventListener('click', e => {
+      const enter = performance.now();
+      const queued = (typeof e.timeStamp === 'number' && e.timeStamp > 0) ? enter - e.timeStamp : 0;
+      const what = slowLabel(e.target);
+      /* rAF 는 창이 뒤로 가면 아예 안 온다 — 느린 동작 도중에 다른 창으로 넘어가면
+         기록이 통째로 사라진다. 타이머를 함께 걸고 먼저 오는 쪽을 쓴다. */
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        const total = performance.now() - enter + Math.max(0, queued);
+        if (total >= 400) slowNote('클릭', what, total, queued >= 150 ? `누를 때 이미 ${Math.round(queued)}ms 밀려 있었음` : '');
+      };
+      requestAnimationFrame(() => requestAnimationFrame(finish));
+      setTimeout(finish, 0);
+    }, true);
+  } catch (e) {}
+  try {
+    new PerformanceObserver(list => {
+      for (const en of list.getEntries()) if (en.duration >= 200) slowNote('멈춤', '브라우저가 멈춘 구간', en.duration);
+    }).observe({ entryTypes: ['longtask'] });
+  } catch (e) {}
+})();
 function logErr(msg, extra) {
   ERRLOG.push({ t: new Date().toLocaleTimeString(), msg: String(msg) });
   if (ERRLOG.length > 30) ERRLOG.shift();
@@ -1114,7 +1159,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.6';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.7';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -1326,7 +1371,13 @@ async function apiFetch(path, opts) {
     opts.headers = { ...(opts.headers || {}), 'X-NST-Key': window.__NST_KEY };
   }
   let res;
-  try { res = await fetch(R.api + path, opts); }
+  const _t0 = performance.now();
+  try {
+    res = await fetch(R.api + path, opts);
+    const _d = performance.now() - _t0;
+    // 생성은 원래 오래 걸린다 — 그건 느림이 아니다
+    if (_d >= 1000 && !/generate-image/.test(path)) slowNote('서버요청', path.split('?')[0], _d);
+  }
   catch (e) {
     if (e.name === 'AbortError') throw e;
     R.srvOk = false; setSrvUI(false);
@@ -3134,9 +3185,15 @@ function openSettings() {
     const st = body.querySelector('#mTokState'), diag = body.querySelector('#mDiag');
     const showDiag = () => {
       const errs = ERRLOG.slice(-6).reverse().map(e => `<div>· ${e.t} ${escHtml(e.msg)}</div>`).join('');
+      const slows = SLOWLOG.slice(-8).reverse().map(s => `<div>· ${s.t} <b>${escHtml(s.kind)}</b> ${escHtml(s.what)} — <b>${(s.ms / 1000).toFixed(1)}초</b>${s.extra ? ' (' + escHtml(s.extra) + ')' : ''}</div>`).join('');
       diag.innerHTML = `<b>진단</b> — 브라우저: ${escHtml(navigator.userAgent.match(/(Firefox|Edg|Chrome)\/[\d.]+/) ? navigator.userAgent.match(/(Firefox|Edg|Chrome)\/[\d.]+/)[0] : '?')} · 주소: ${escHtml(location.href.split('?')[0])}<br>
         서버: <b>${R.srvOk ? '연결됨 ' + (R.api || location.origin) : '연결 안 됨'}</b> · 서버 저장 토큰: <b>${R.srvToken ? '있음 ' + (R.srvTokenHint || '') : '없음'}</b> · 브라우저 토큰: <b>${getToken() ? '있음' : '없음'}</b>${R.lastErr ? ' · 마지막 API 오류: <b>' + escHtml(R.lastErr) + '</b>' : ''}
-        ${errs ? '<div class="errlog"><b>최근 오류</b>' + errs + '<button class="btn xs" id="mCopyErr">오류 로그 복사</button></div>' : ''}`;
+        ${errs ? '<div class="errlog"><b>최근 오류</b>' + errs + '<button class="btn xs" id="mCopyErr">오류 로그 복사</button></div>' : ''}
+        ${slows ? '<div class="errlog"><b>느린 동작</b> <span class="hint">0.4초 넘게 걸린 것만</span>' + slows + '<button class="btn xs" id="mCopySlow">느림 기록 복사</button></div>' : '<div class="hint">느린 동작 기록 없음 (0.4초 넘게 걸린 동작이 아직 없습니다)</div>'}`;
+      const sb = diag.querySelector('#mCopySlow');
+      if (sb) sb.onclick = () => navigator.clipboard.writeText(
+        SLOWLOG.map(s => `${s.t} ${s.kind} ${s.what} ${s.ms}ms ${s.extra}`).join('\n') + '\n' + navigator.userAgent)
+        .then(() => toast('복사됨 — 붙여넣어 주세요')).catch(() => toast('복사하지 못했습니다 — 위 목록을 직접 선택해 복사해 주세요', 'err'));
       const cb = diag.querySelector('#mCopyErr');
       if (cb) cb.onclick = () => navigator.clipboard.writeText(ERRLOG.map(e => e.t + ' ' + e.msg).join('\n') + '\n' + navigator.userAgent + '\n' + location.href)
         .then(() => toast('복사됨 — 붙여넣어 주세요'))
@@ -3554,28 +3611,57 @@ function init() {
   };
   $('#tApply').onclick = () => { const it = curItem(); if (it) applyMeta(it.meta); };
   $('#histFavOnly').onclick = () => { S.histFavOnly = !S.histFavOnly; save(); renderHist(); };
+  /* 실제로 지우는 일은 한 곳에만 둔다 — 두 버튼이 같은 길을 쓰게 해서,
+     한쪽만 고치고 다른 쪽에서 사고가 나는 일을 막는다. */
+  async function histWipe(targets) {
+    /* 비우기는 await 를 여러 번 탄다 — 그 사이에 연속 생성이 새 그림을 넣으면
+       예전엔 그것까지 같이 지웠다(방금 뽑은 그림이 사라지고 Anlas 는 이미 나간 뒤다).
+       누를 때 정한 목록만 지운다. */
+    for (const h of targets) {
+      URL.revokeObjectURL(h.url);
+      if (typeof LIB !== 'undefined' && LIB.sel) LIB.sel.delete(h);   // 지운 이미지가 라이브러리 선택에 남아 되살아나던 문제
+      if (h.id != null) await histDel(h.id).catch(() => {});
+    }
+    // 도중에 들어온 새 그림은 남긴다 (지우기로 정한 것만 뺀다)
+    R.hist = R.hist.filter(h => !targets.includes(h));
+    R.cur = R.hist.length - 1;
+    closeModal(); refreshAfterBulk();
+    if (typeof updateLibSel === 'function') updateLibSel();
+    toast(`${targets.length}장을 지웠습니다` + (R.hist.length ? ` · ${R.hist.length}장 남음` : ''));
+  }
+  /* 가장 최근에 나온 한 장. 목록은 시간순이라 보통 맨 뒤지만,
+     불러오기·복구로 순서가 섞일 수 있으니 시각으로 고른다. */
+  function newestHist() {
+    let best = null;
+    for (const h of R.hist) if (!best || (h.t || 0) >= (best.t || 0)) best = h;
+    return best;
+  }
   $('#histClear').onclick = () => {
     if (!R.hist.length) return;
     openModal('히스토리 비우기', body => {
-      body.innerHTML = `<div>즐겨찾기(★)를 제외한 ${R.hist.filter(h => !h.fav).length}장을 삭제합니다.</div>`;
-      const b = document.createElement('button'); b.className = 'btn danger'; b.textContent = '삭제';
-      b.onclick = async () => {
-        /* 비우기는 await 를 여러 번 탄다 — 그 사이에 연속 생성이 새 그림을 넣으면
-           예전엔 그것까지 같이 지웠다(방금 뽑은 그림이 사라지고 Anlas 는 이미 나간 뒤다).
-           지금 화면에 있는 것만 대상으로 삼는다. */
-        const targets = R.hist.filter(h => !h.fav);
-        const keep = R.hist.filter(h => h.fav);
-        for (const h of targets) {
-          URL.revokeObjectURL(h.url);
-          if (typeof LIB !== 'undefined' && LIB.sel) LIB.sel.delete(h);   // 지운 이미지가 라이브러리 선택에 남아 되살아나던 문제
-          if (h.id != null) await histDel(h.id).catch(() => {});
-        }
-        // 도중에 들어온 새 그림은 남긴다 (지우기로 정한 것만 뺀다)
-        R.hist = R.hist.filter(h => !targets.includes(h)); R.cur = R.hist.length - 1;
-        closeModal(); refreshAfterBulk();
-        if (typeof updateLibSel === 'function') updateLibSel();
+      const newest = newestHist();
+      const favN = R.hist.filter(h => h.fav).length;
+      body.innerHTML = `
+        <label class="row" style="gap:6px;align-items:center"><input type="checkbox" id="hcFav"><span>★ 즐겨찾기 ${favN}장도 함께 지우기</span></label>
+        <div class="hint" id="hcNote" style="margin:6px 0 10px"></div>
+        <div class="row">
+          <button class="btn danger" id="hcKeep1">방금 나온 1장만 남기기</button>
+          <button class="btn" id="hcAll">전부 지우기</button>
+          <button class="btn ghost" id="hcNo">그만두기</button>
+        </div>
+        <div class="hint" style="margin-top:8px">되돌릴 수 없습니다. 남길 그림은 ★ 를 눌러 즐겨찾기로 표시해 두세요.</div>`;
+      const fav = body.querySelector('#hcFav'), note = body.querySelector('#hcNote');
+      /* 누르기 전에 무엇이 몇 장 지워지는지 숫자로 보여 준다 — 되돌릴 수 없는 삭제다. */
+      const pick = keepOne => R.hist.filter(h => (fav.checked || !h.fav) && !(keepOne && h === newest));
+      const paint = () => {
+        note.innerHTML = `남길 한 장: <b>${escHtml((newest && newest.label) || ('seed ' + ((newest && newest.seed) || '?')))}</b>`
+          + ` · 1장만 남기면 <b>${pick(true).length}장</b> 삭제 · 전부 지우면 <b>${pick(false).length}장</b> 삭제`
+          + (fav.checked ? '' : (favN ? ` (★ ${favN}장은 남습니다)` : ''));
       };
-      body.appendChild(b);
+      fav.onchange = paint; paint();
+      body.querySelector('#hcNo').onclick = () => closeModal();
+      body.querySelector('#hcKeep1').onclick = () => histWipe(pick(true));
+      body.querySelector('#hcAll').onclick = () => histWipe(pick(false));
     });
   };
   $('#btnAutoStart').onclick = startAuto;
