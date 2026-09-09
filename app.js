@@ -84,8 +84,10 @@ const MODELS = {
    여기 없는 걸 보내면 NAI 가 거절하거나(400) 조용히 무시한다.
    특히 V5 는 바이브 트랜스퍼·캐릭터 레퍼런스·노이즈 스케줄·Variety+ 를 받지 않는다. */
 const CAPS = {
+  /* opusLimit: NAI 번들의 모델 능력 opusUsageLimit 그대로. **V5 만 true** —
+     V4.5 는 사용량 제한 자체가 없어 Opus 면 언제나 무료다. */
   50: { vibe: false, charRef: false, noiseSchedule: false, cfgDelay: false, cfgRescale: true,
-        transparency: true, maxChars: 32, freePos: true, autoText: true, text: true, tokens: 1471, tokensCurated: 703 },
+        transparency: true, maxChars: 32, freePos: true, autoText: true, text: true, tokens: 1471, tokensCurated: 703, opusLimit: true },
   45: { vibe: true, charRef: true, noiseSchedule: true, cfgDelay: true, cfgRescale: true,
         transparency: false, maxChars: 6, freePos: false, text: true, tokens: 512 },
   40: { vibe: true, charRef: false, noiseSchedule: true, cfgDelay: true, cfgRescale: true,
@@ -109,6 +111,12 @@ const capsOf = m => {
   return c;
 };
 const isV5 = m => (MODELS[m || S.model] || {}).ver === 50;
+/* 바이브 상한. NAI 문서: "You can apply up to 16 vibes when generating an image."
+   많이 붙일수록 생성이 느려지고, 5개째부터는 장당 2 Anlas 씩 더 나간다(V4 이상). */
+const VIBE_MAX = 16;
+/* 한 번에 뽑을 수 있는 장수. NAI 문서: 작은 해상도는 6장까지, 보통·큰 해상도는 4장까지.
+   상한을 넘겨 보내면 서버가 400 을 준다 — 화면에서 막고 payload 에서도 한 번 더 자른다. */
+const batchMax = (w, h) => ((w || S.w) * (h || S.h) <= 640 * 640 ? 6 : 4);
 /* 프롬프트 토큰 한도. V4/4.5 는 512 였지만 V5 는 Curated 703 · Full 1471 로 늘었다. */
 const tokenLimit = m => capsOf(m || S.model).tokens;
 /* 이 샘플러들에는 noise_schedule 을 보내지 않는다 — novelai.net 이 요청에서 지운다.
@@ -168,6 +176,7 @@ const DEFAULTS = {
   chunks: [], deleted: {}, ytQueue: [], ytPos: null, ytSize: 'normal', ytOpen: false, ytVol: 60, ytUsePop: false, ytPopMode: 'tab',
   theme: 'violet', lastDark: 'violet', lastLight: 'light', ov: {}, tagUnderscore: false,
   histFavOnly: false, transparent: false,   // V5 전용 — 투명 배경(straight_alpha)
+  furryMode: false,   // NAI 의 Furry mode — 프롬프트 맨 앞에 'fur dataset,' 을 붙인다 (V4 이상)
   /* 채점(🔬) 관련.
      judgeAuto: 0 = 끔. N = 생성 N장마다 1회 자동 채점. 기본이 0 인 이유는
      실측 생성 속도가 시간당 39장이라, 전량 자동 채점은 시간당 39회 유료 호출이 되기 때문이다.
@@ -846,6 +855,8 @@ function previewFinal() {
   const st = getStyle(S.activeStyle);
   // peek=true — 미리보기는 <*조각> 순차 카운터를 소모하지 않는다 (실제 생성 때 밀리면 안 됨)
   let p = expandAll(joinParts(st && st.prefix, getMainPrompt(), st && st.suffix), true);
+  /* Furry 모드 — NAI 는 프롬프트를 'fur dataset,' 으로 **시작**하게 한다 */
+  if (S.furryMode && (MODELS[S.model] || {}).ver >= 40) p = p ? 'fur dataset, ' + p : 'fur dataset';
   {
     let qs = S.quality ? String(getQuality(S.model) || '').replace(/^\s*,\s*/, '') : '';
     if (capsOf(S.model).transparency && S.transparent) qs = qs ? 'transparent background, ' + qs : 'transparent background';
@@ -857,7 +868,7 @@ function previewFinal() {
   /* V5 는 따옴표로 감싼 글자를 모아 "teXt: ..." 를 자동으로 붙인다 —
      미리보기에도 보여야 사용자가 무엇이 나가는지 안다. */
   if (capsOf(S.model).autoText && S.autoText !== false) {
-    const cs = (S.chars || []).filter(c => (c.prompt || '').trim())
+    const cs = (S.chars || []).filter(c => (c.prompt || '').trim() && !c.off)   // 꺼 둔 캐릭터는 뺀다
       .map(c => ({ prompt: expandAll(c.prompt.trim(), true), enabled: true,
                    center: { x: c.x != null ? c.x : 0.5, y: c.y != null ? c.y : 0.5 } }));
     p = autoTextV5(p, cs, !S.aiChoice && (S.chars || []).some(c => c.x != null));
@@ -1159,7 +1170,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.7';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.8';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -1372,11 +1383,23 @@ async function apiFetch(path, opts) {
   }
   let res;
   const _t0 = performance.now();
+  const _url = R.api + path;
   try {
-    res = await fetch(R.api + path, opts);
+    res = await fetch(_url, opts);
     const _d = performance.now() - _t0;
     // 생성은 원래 오래 걸린다 — 그건 느림이 아니다
-    if (_d >= 1000 && !/generate-image/.test(path)) slowNote('서버요청', path.split('?')[0], _d);
+    if (_d >= 1000 && !/generate-image/.test(path)) {
+      /* 이 숫자에는 '메인 스레드가 막혀 응답 처리가 못 돈 시간' 이 통째로 섞인다.
+         응답이 8ms 만에 와도 그때 3초짜리 작업 중이면 3초로 찍힌다 — 실측으로 확인했다.
+         진짜 네트워크 시간은 ResourceTiming 에만 있으므로 둘을 갈라 적는다.
+         안 그러면 브라우저가 멈춘 것을 서버 탓으로 기록하게 된다(실제로 그랬다). */
+      let net = null;
+      try { const e = performance.getEntriesByName(_url).pop(); if (e && e.duration) net = Math.round(e.duration); }
+      catch (e2) {}
+      slowNote(net != null && net < _d - 300 ? '화면멈춤' : '서버요청', path.split('?')[0], _d,
+        net != null ? `실제 네트워크 ${net}ms · 화면이 멈춰 있던 시간 ${Math.max(0, Math.round(_d - net))}ms`
+                    : '네트워크 시간 확인 불가');
+    }
   }
   catch (e) {
     if (e.name === 'AbortError') throw e;
@@ -1427,6 +1450,38 @@ async function apiError(res) {
   }
   return new Error(msg);
 }
+/* ── Opus 사용량 (NAI 번들 31a484c 의 식을 그대로 옮김) ──────────────────
+   usage = { percent, isNegative, timeUntilNextPercent } */
+function usagePct(u, clamp) {          // 남은 %
+  const v = u.isNegative ? 0 : Math.max(0, u.percent);
+  return clamp === false ? v : Math.min(100, v);
+}
+function usageImages(pct) { return Math.round(17.3 * pct); }   // % → 장수 (번들 상수 17.3)
+function usageDaily(u) {               // 하루에 몇 % 씩 차는가
+  return (!u || u.timeUntilNextPercent <= 0) ? 0
+    : Math.round(86400 / u.timeUntilNextPercent * 10) / 10;
+}
+function usageLow(u) { return !!u && (u.isNegative || u.percent < 5); }
+/* 사용량 막대. V5 처럼 제한을 받는 모델일 때만 뜬다(NAI 와 같은 조건).
+   '항상 표시' 를 켜면 다른 모델에서도 보인다. */
+function renderUsageBar() {
+  const box = $('#opusBar'); if (!box) return;
+  const u = R.usage;
+  const limited = !!capsOf(S.model).opusLimit;
+  if (!u || (!limited && !S.alwaysUsageBar)) { box.hidden = true; return; }
+  const pct = usagePct(u);
+  box.hidden = false;
+  box.classList.toggle('low', usageLow(u));
+  const daily = usageDaily(u);
+  $('#opusBarFill').style.width = Math.min(100, pct) + '%';
+  $('#opusBarTxt').textContent = u.isNegative
+    ? 'Opus 사용량 소진 — 이제부터 Anlas 가 나갑니다'
+    : `Opus ${pct}% 남음 (~${usageImages(pct)}장)`;
+  box.title = (u.isNegative ? '사용량이 소진됐습니다. Anlas 로는 계속 생성할 수 있습니다.\n'
+                            : `약 ${usageImages(pct)}장 분량이 남았습니다.\n`)
+    + (daily > 0 ? `하루에 ${daily}%씩 (~${usageImages(daily)}장) 자동 충전됩니다.` : '충전이 멈춰 있습니다.')
+    + '\n일반 해상도·28스텝 이하 V5 생성에만 적용됩니다 (V4.5 는 제한 없음).';
+}
 function updateAnlasLabel() {
   if (!hasToken()) { $('#anlas').textContent = '◈ 토큰 없음'; $('#anlas').title = '⚙설정에서 API 토큰 저장'; }
 }
@@ -1443,12 +1498,35 @@ async function refreshAnlas() {
     /* V5 부터 Opus 무료가 "무제한" 이 아니라 시간당 충전되는 사용량 한도가 됐다.
        구독 응답 어딘가에 남은 비율이 오는데 필드 이름이 확정적이지 않아, 0~1 또는 0~100
        범위의 값을 넓게 찾아 둔다. 못 찾으면 표시하지 않는다(없는 값을 지어내지 않는다). */
-    R.opusUsage = null;
+    /* 응답 원문을 그대로 들고 있는다 — ⚙설정 → 진단에서 눈으로 확인하고 복사할 수 있다. */
+    R.subRaw = j; R.subAt = Date.now(); R.opusFrom = '';
+    /* NAI 프론트엔드 번들(31a484c)에서 확인한 실제 필드다 — 더는 이름을 추측하지 않는다.
+         subscription.usage = { percent, isNegative, timeUntilNextPercent }
+       사용량 정보는 Opus(tier>=3) + 무제한 생성 권한이 있을 때만 온다. */
+    R.usage = (j.usage && typeof j.usage.percent === 'number') ? j.usage : null;
+    R.opusUsage = R.usage ? usagePct(R.usage) : null;
+    if (R.usage) R.opusFrom = 'usage.percent=' + R.usage.percent;
+    /* 최상위뿐 아니라 중첩(perks.* 등)까지 훑는다. 다만 **찾은 경로를 함께 남겨**
+       나중에 그게 정말 맞는 값이었는지 확인할 수 있게 한다. */
+    const NAMES = /(opus|usage|limit|quota|remain|left|unlimited)/i;
+    const walk = (o, path, depth) => {
+      if (R.opusUsage != null || depth > 3 || o == null || typeof o !== 'object') return;
+      for (const k of Object.keys(o)) {
+        const v = o[k], p = path ? path + '.' + k : k;
+        if (typeof v === 'number' && NAMES.test(k) && v >= 0 && v <= 100) {
+          // 0~1 을 비율로 볼지 개수로 볼지 알 수 없다 — 단정하지 않고 경로와 원값을 남긴다
+          R.opusUsage = v <= 1 ? Math.round(v * 100) : Math.round(v);
+          R.opusFrom = p + '=' + v;
+          return;
+        }
+        if (v && typeof v === 'object') walk(v, p, depth + 1);
+      }
+    };
     for (const k of ['opusUsageLimit', 'usageLimit', 'generationUsage', 'imageGenerationLimit']) {
       const v = j[k];
       if (v == null) continue;
       const pct = typeof v === 'number' ? v : (v.remaining != null ? v.remaining : v.percent);
-      if (typeof pct === 'number') { R.opusUsage = pct <= 1 ? Math.round(pct * 100) : Math.round(pct); break; }
+      if (typeof pct === 'number') { R.opusUsage = pct <= 1 ? Math.round(pct * 100) : Math.round(pct); R.opusFrom = k + '=' + pct; break; }
     }
     $('#anlas').textContent = '◈ ' + total.toLocaleString(); updateCostHint();
     $('#anlas').title = 'Anlas ' + total.toLocaleString() + (j.tier === 3 ? ' · Opus' : '')
@@ -1657,6 +1735,9 @@ function buildPayload(ov) {
   R.lastSeed = seed;
   const style = ov.style !== undefined ? ov.style : getStyle(S.activeStyle);
   let prompt = ov.prompt != null ? ov.prompt : expandAll(joinParts(style && style.prefix, getMainPrompt(), style && style.suffix));
+  /* Furry 모드는 맨 앞에 붙는다. ov.prompt 로 프롬프트를 직접 넘긴 경우(그림체 튜닝 등)는
+     부르는 쪽이 이미 완성한 문자열이므로 건드리지 않는다. */
+  if (ov.prompt == null && S.furryMode && (MODELS[m] || {}).ver >= 40) prompt = prompt ? 'fur dataset, ' + prompt : 'fur dataset';
   /* 투명 배경 + 품질 태그는 **한 덩어리로** 붙인다.
      NAI 는 투명 배경을 품질 프리셋의 suffix 앞에 끼워 넣고(번들 rr()),
      그 덩어리를 addQualityTag 가 정하는 자리에 넣는다.
@@ -1695,7 +1776,8 @@ function buildPayload(ov) {
   const ucPresetIsNone = !ucPreNow.text || ucPreNow.onlyIfEmpty;
   if (ov.uc == null && S.autoNsfw !== false && !NSFW_EXEMPT.includes(m) && !ucPresetIsNone && getUcText(m, ucIdx(m)) && !prompt.toLowerCase().includes('nsfw') && !/^nsfw\b/i.test(uc)) uc = uc ? 'nsfw, ' + uc : 'nsfw';
   const caps = capsOf(m);
-  let chars = (ov.chars || S.chars.filter(c => c.prompt.trim())).map(c => ({ ...c }));
+  /* 꺼 둔 캐릭터(c.off)는 생성에서 뺀다 — 지운 게 아니라 잠시 끈 것이라 프롬프트는 남는다 */
+  let chars = (ov.chars || S.chars.filter(c => c.prompt.trim() && !c.off)).map(c => ({ ...c }));
   /* 캐릭터를 아예 안 받는 모델(V3 계열)로 바꿔 놓고 캐릭터 칸을 채워 두면, 예전엔 말없이 통째로 빠졌다.
      인원 초과는 알려 주면서 '전부 빠짐' 만 조용했다 — 결과가 왜 다른지 알 길이 없다. */
   if (!caps.maxChars && chars.length && typeof toast === 'function' && !ov.quiet) {
@@ -1734,6 +1816,9 @@ function buildPayload(ov) {
   if (caps.autoText && S.autoText !== false) {
     prompt = autoTextV5(prompt, p.characterPrompts, useCoords);
   }
+  /* 화면 잠금을 우회해 상한을 넘긴 장수가 남아 있을 수 있다 — 보내기 직전에 한 번 더 자른다.
+     넘겨 보내면 NAI 가 400 을 주고, 그 사이 요청은 이미 받아들여져 돈이 나갈 수 있다. */
+  if (p.n_samples > 1) { const mx = batchMax(p.width, p.height); if (p.n_samples > mx) p.n_samples = mx; }
   const body = { input: prompt, model: m, action: 'generate', parameters: p };
   if (info.ver >= 40) {
     p.v4_prompt = { caption: { base_caption: prompt, char_captions: p.characterPrompts.map(c => ({ char_caption: c.prompt, centers: [c.center] })) }, use_coords: useCoords, use_order: true };
@@ -1941,25 +2026,52 @@ function anlasEstimate(o) {
   const perImage = Math.max(Math.ceil(base * strength), 2);
   /* Opus 무료 조건(일반 해상도 이하 · 28스텝 이하)은 그대로지만, V5 부터는 그 위에
      "사용량 한도" 가 하나 더 붙는다. 한도가 0% 면 무료가 아니라 Anlas 가 나간다. */
-  const free = px <= 1048576 && (o.steps || 0) <= 28 && !!o.isOpus && o.opusLeft !== 0;
+  /* NAI 번들 원문: D = caps.opusUsageLimit && (usage?.isNegative ?? false); 무료 = tier>=3 && 무제한 && !D
+     즉 **사용량이 모자란 것만으로는 유료가 아니다** — 완전히 소진(isNegative)돼야 한다.
+     그리고 V4.5 처럼 opusLimit 이 없는 모델은 사용량과 무관하게 늘 무료다. */
+  const limited = !!capsOf(o.model).opusLimit;
+  const spent = limited && !!o.usageNegative;
+  const free = px <= 1048576 && (o.steps || 0) <= 28 && !!o.isOpus && !spent;
   // Opus 무료는 '한 장' 에만 걸린다. 예전엔 장수 전체를 0 으로 표시해서, 4장을 뽑아도
   // 비용이 0 으로 보이고 실제로는 Anlas 가 빠져나갔다.
   // 모르는 쪽으로 틀릴 때는 적게 표시하는 것보다 많게 표시하는 편이 낫다.
   const generation = free ? perImage * Math.max(0, (o.batch || 1) - 1) : perImage * (o.batch || 1);
   const charRef = (o.charRefCount || 0) * 5 * (o.batch || 1);   // 캐릭터 레퍼런스 장당 5
   const vibeEncoding = (o.unencodedVibes || 0) * 2;             // encode-vibe 1회 2 (캐시되면 0)
-  return { perImage, generation, charRef, vibeEncoding, free,
-           total: generation + charRef + vibeEncoding };
+  /* 바이브 5개째부터 장당 2 Anlas. NAI 문서 기준이며 V4 이상에서만 붙는다.
+     예전엔 이 항목이 아예 없어, 5개 이상 쓰면 화면에 안 뜨는 요금이 나갔다. */
+  const vibeExtra = ((MODELS[o.model] || {}).ver >= 40)
+    ? Math.max(0, (o.vibeCount || 0) - 4) * 2 * (o.batch || 1) : 0;
+  return { perImage, generation, charRef, vibeEncoding, vibeExtra, free,
+           total: generation + charRef + vibeEncoding + vibeExtra };
 }
 /* opusLeft: Opus 무료 잔여 %(R.opusUsage). 0 이면 무료가 아니라 실제로 Anlas 가 나간다.
    null(=한도를 못 읽음)이면 확정할 수 없다 — 그럴 땐 0 을 돌려주되 화면에서 '확인 불가' 라고 말한다.
    생성 쪽 추정(app.js:1364)은 이미 이 값을 보는데 디렉터·스마트 툴만 안 봐서
    무료 한도가 바닥난 뒤에도 계속 "Opus 무료" 라고 표시했다. */
-function directorToolCost(w, h, isOpus, opusLeft) {
-  const px = w * h;
-  if (isOpus && px <= 409600 && opusLeft !== 0) return 0;
-  if (px <= 262144) return 1; if (px <= 409600) return 2; if (px <= 524288) return 3; if (px <= 786432) return 5;
-  return 7;
+/* 디렉터 툴에 보내기 전 NAI 가 하는 크기 보정 (번들 31a484c 의 Bu·Rj 그대로).
+   너무 크면 줄이고, 너무 작으면 키운다 — 비용도 이 보정된 크기로 매겨진다. */
+const TOOL_PX_MAX = 3145728;   // 314만 화소 (1536×2048)
+const TOOL_PX_MIN = 1048576;   // 104만 화소
+function fitForTool(w, h) {
+  let W = Math.max(1, w | 0), H = Math.max(1, h | 0);
+  if (W * H > TOOL_PX_MAX - 2000) { const r = Math.sqrt((TOOL_PX_MAX - 2000) / (W * H)); W = Math.floor(W * r); H = Math.floor(H * r); }
+  if (W * H < 1011712) { const r = Math.sqrt(TOOL_PX_MIN / (W * H)); W = Math.floor(W * r); H = Math.floor(H * r); }
+  return { w: W, h: H };
+}
+/* 디렉터 툴 비용 — NAI 번들의 식을 그대로 옮겼다.
+   예전에는 화소 구간별 상수표(1·2·3·5·7)를 썼는데 NAI 와 아무 관계가 없는 값이었다.
+   ★ 배경 제거는 두 가지가 다르다: ① Opus 무료 차감을 건너뛴다 ② 값이 3배+5 다.
+     그래서 Opus 여도 **절대 무료가 아니다**(101만 화소 기준 65 Anlas). */
+function directorToolCost(w, h, isOpus, opusLeft, tool) {
+  const f = fitForTool(w, h), px = f.w * f.h;
+  const bg = tool === 'bg-removal';
+  const base = Math.ceil(2.951823174884865e-6 * px + 5.753298233447344e-7 * px * 28);
+  const per = Math.max(base, 2);
+  // 무료 1장 차감. 배경 제거는 이 차감을 받지 못한다(번들에서 m=true 로 넘어간다).
+  const free = !bg && isOpus && px <= 1048576 && opusLeft !== 0;
+  const price = free ? 0 : per;
+  return bg ? 3 * price + 5 : price;
 }
 
 /* ─────────────── 생성 ─────────────── */
@@ -2259,6 +2371,36 @@ async function loadHistory() {
   }
   renderHist(); if (R.hist.length) showImage(R.hist.length - 1);
 }
+/* 이미지를 크게 보기 — 뷰어 칸이 작아 원본을 볼 수 없다는 지적에서 나왔다.
+   클릭하면 화면 전체에 띄우고, 휠로 확대/축소, 끌어서 이동, 한 번 더 클릭하면 1:1 ↔ 맞춤. */
+function openFullView(it) {
+  if (!it || !it.url) return;
+  const ov = document.createElement('div');
+  ov.className = 'fullview';
+  ov.innerHTML = `<img src="${it.url}" alt=""><div class="fv-tip">휠 = 확대 · 끌기 = 이동 · 더블클릭 = 1:1 ↔ 맞춤 · Esc / 클릭 = 닫기</div>`;
+  const img = ov.querySelector('img');
+  let z = 0, tx = 0, ty = 0, drag = null, moved = false;   // z=0 이면 '맞춤'
+  const paint = () => {
+    img.style.transform = z ? `translate(${tx}px, ${ty}px) scale(${z})` : '';
+    img.classList.toggle('fit', !z);
+  };
+  paint();
+  ov.addEventListener('wheel', e => {
+    e.preventDefault();
+    const cur = z || 1;
+    z = Math.min(8, Math.max(0.2, cur * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+    paint();
+  }, { passive: false });
+  ov.addEventListener('pointerdown', e => { drag = { x: e.clientX - tx, y: e.clientY - ty }; moved = false; ov.setPointerCapture(e.pointerId); });
+  ov.addEventListener('pointermove', e => { if (!drag) return; tx = e.clientX - drag.x; ty = e.clientY - drag.y; moved = true; paint(); });
+  ov.addEventListener('pointerup', () => { drag = null; });
+  img.addEventListener('dblclick', e => { e.stopPropagation(); z = z ? 0 : 1; tx = ty = 0; paint(); });
+  const close = () => { ov.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  ov.onclick = e => { if (!moved && e.target === ov) close(); };
+  document.body.appendChild(ov);
+}
 function visibleHist() { const idx = []; R.hist.forEach((h, i) => { if (!S.histFavOnly || h.fav) idx.push(i); }); return idx; }
 /* 카드 한 장을 만든다. renderHist 와 refreshHistCard 가 같은 것을 쓰도록 뽑아 둔다. */
 function histCardEl(i) {
@@ -2271,7 +2413,38 @@ function histCardEl(i) {
     if (it.saved) { const s = document.createElement('span'); s.className = 'svd'; s.textContent = '💾'; s.title = it.saved.how === 'download' ? '다운로드로 넘김 (받았는지는 확인 불가)' : '저장됨'; d.appendChild(s); }
     // 채점해 둔 점수를 카드에도 — 어떤 그림이 문제였는지 목록에서 바로 보이게
     if (it.judge && it.judge.overall != null) { const j = document.createElement('span'); j.className = 'jdg' + judgeCls(it.judge.overall); j.textContent = '🔬' + it.judge.overall; j.title = judgeTip(it.judge); d.appendChild(j); }
-    d.onclick = () => showImage(i);
+    /* NAI 와 같은 수식어 클릭 (docs.novelai.net/en/image/history/):
+         Ctrl+클릭 = 시드 뺀 전체 설정 · Shift+클릭 = 시드만 · Ctrl+Shift+클릭 = 설정+시드
+       예전엔 그냥 띄우기만 해서, 설정을 가져오려면 클릭하고 툴바를 또 눌러야 했다. */
+    d.onclick = e => {
+      const meta = it.meta;
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey) { applyMeta(meta); toast('설정 + 시드를 가져왔습니다'); return; }
+      if (e.ctrlKey || e.metaKey) {
+        const keep = S.seed, keepR = S.randomSeed;
+        applyMeta(meta);
+        S.seed = keep; S.randomSeed = keepR;   // 시드는 그대로 둔다 (NAI 와 같음)
+        syncUI(); save(); toast('설정을 가져왔습니다 (시드 제외)');
+        return;
+      }
+      if (e.shiftKey) {
+        if (it.seed == null) { toast('이 이미지에는 시드가 없습니다', 'err'); return; }
+        S.seed = String(it.seed); S.randomSeed = false; syncUI(); save();
+        toast('시드 ' + it.seed + ' 를 가져왔습니다');
+        return;
+      }
+      showImage(i);
+    };
+    d.title = (d.title ? d.title + '\n' : '')
+      + 'Ctrl+클릭 = 설정 가져오기 (시드 제외) · Shift+클릭 = 시드만 · Ctrl+Shift+클릭 = 둘 다';
+    /* 마우스를 올리면 뜨는 ✕ — 지우려고 굳이 먼저 열어 볼 필요가 없어야 한다 */
+    const xb = document.createElement('button');
+    xb.className = 'hdel'; xb.textContent = '✕'; xb.title = '이 이미지 지우기';
+    xb.onclick = e => {
+      e.stopPropagation();
+      if (!confirm('이 이미지를 지웁니다. 계속할까요?')) return;
+      deleteItem(it);
+    };
+    d.appendChild(xb);
     return d;
   }
 }
@@ -2511,19 +2684,47 @@ function renderChars() {
   /* 카드를 통째로 다시 만들면 R.lastTA 가 사라진 노드를 가리킨다 —
      그 상태에서 태그를 넣으면 캐릭터 칸이 아니라 1번 칸으로 들어갔다. */
   if (R.lastTA && !document.contains(R.lastTA)) R.lastTA = null;
-  S.chars.forEach((c, i) => list.appendChild(charCard(c, i, () => { S.chars.splice(i, 1); save(); renderChars(); }, () => save())));
+  S.chars.forEach((c, i) => list.appendChild(charCard(c, i, () => { S.chars.splice(i, 1); save(); renderChars(); }, () => save(),
+    { list: S.chars, redraw: renderChars })));
   $('#aiChoiceBtn').classList.toggle('on', !!S.aiChoice);
   $('#aiChoiceBtn').textContent = S.aiChoice ? '✔ AI 자동 배치' : '☐ 좌표 지정 사용';
 }
-function charCard(c, i, onDel, onChange) { // 메인·씬 공용 카드
+function charCard(c, i, onDel, onChange, opts) { // 메인·씬 공용 카드
+  /* opts.list / opts.redraw — 순서 바꾸기가 어느 배열을 다뤄야 하는지 알려 준다.
+     안 넘기면 메인(S.chars)으로 본다. */
+  opts = opts || {};
   const card = document.createElement('div'); card.className = 'char-card';
-  card.innerHTML = `<div class="ch-top"><span class="ch-name">캐릭터 ${i + 1}</span>
+  card.innerHTML = `<div class="ch-top"><button class="ic ch-off" title="이 캐릭터를 생성에서 빼기 (지우지 않음)">⏻</button><span class="ch-name">캐릭터 ${i + 1}</span>
+      <button class="ic ch-up" title="위로">▲</button><button class="ic ch-dn" title="아래로">▼</button>
       <select class="ch-lib" title="캐릭터 라이브러리에서 불러오기"><option value="">라이브러리…</option></select>
       <button class="btn xs pos">위치: ${posName(c)}</button><button class="btn xs ghost savelib" title="이 캐릭터를 라이브러리에 저장">저장</button><button class="ic del" title="삭제">✕</button></div>
     <textarea class="ac cprompt" rows="2" spellcheck="false" placeholder="캐릭터 프롬프트 (외모·의상 등)"></textarea>
     <div class="chunkbar mini"></div>
     <details class="sub"><summary>캐릭터 네거티브</summary><textarea class="ac cuc" rows="1" spellcheck="false"></textarea></details>`;
   const tp = card.querySelector('.cprompt'), tu = card.querySelector('.cuc'), lib = card.querySelector('.ch-lib');
+  /* 켜기/끄기. 끄면 카드가 흐려지고 생성에서 빠진다 — 프롬프트는 그대로 남는다. */
+  const offBtn = card.querySelector('.ch-off');
+  const paintOff = () => {
+    card.classList.toggle('off', !!c.off);
+    offBtn.textContent = c.off ? '⭘' : '⏻';
+    offBtn.title = c.off ? '꺼져 있음 — 눌러서 다시 쓰기' : '이 캐릭터를 생성에서 빼기 (지우지 않음)';
+  };
+  offBtn.onclick = () => { c.off = !c.off; paintOff(); onChange(); if (window.applyCharFold) applyCharFold(); };
+  /* 순서 바꾸기 — NAI 도 캐릭터 줄에 ▲▼ 를 둔다.
+     V4+ 는 캐릭터 순서가 결과에 영향을 준다(use_order). 지웠다 다시 만들 필요가 없어야 한다. */
+  const move = d => {
+    const arr = opts.list || S.chars;
+    const j = i + d;
+    if (j < 0 || j >= arr.length) return;
+    const [x] = arr.splice(i, 1); arr.splice(j, 0, x);
+    onChange();
+    (opts.redraw || renderChars)();
+  };
+  const up = card.querySelector('.ch-up'), dn = card.querySelector('.ch-dn');
+  up.onclick = () => move(-1); dn.onclick = () => move(1);
+  up.disabled = i === 0;
+  dn.disabled = i === ((opts.list || S.chars).length - 1);
+  paintOff();
   tp.value = c.prompt || ''; tu.value = c.uc || '';
   tp.id = tp.id || ('cta_' + uid());
   const cb = card.querySelector('.chunkbar'); cb.dataset.ta = tp.id; if (typeof renderChunkBar === 'function') renderChunkBar(cb);
@@ -2667,10 +2868,10 @@ function renderVibes() {
   updateRefBadge();
 }
 async function addVibe(blob) {
-  if (R.vibes.length >= 4) { toast('바이브는 최대 4개', 'err'); return; }
+  if (R.vibes.length >= VIBE_MAX) { toast(`바이브는 최대 ${VIBE_MAX}개`, 'err'); return; }
   const b64 = await blobToB64(blob);
   // 여러 장을 한 번에 넣으면 위 검사는 전부 통과한 뒤에야 push 가 일어난다 → 넣기 직전에 다시 센다
-  if (R.vibes.length >= 4) { toast('바이브는 최대 4개', 'err'); return; }
+  if (R.vibes.length >= VIBE_MAX) { toast(`바이브는 최대 ${VIBE_MAX}개`, 'err'); return; }
   R.vibes.push({ b64, thumb: URL.createObjectURL(blob), strength: 0.6, ie: 1, enc: null, state: '대기 (생성 시 인코딩)', stateCls: '' });
   renderVibes(); switchRefTab('vibe');
 }
@@ -2734,7 +2935,7 @@ async function openVibeLib() {
         d.innerHTML = `<img src="${rec.thumb || ''}"><div class="vl-name"></div><div class="hint">${encs.length}개 인코딩${has ? ' · 현재 모델 ✔' : ''}</div><div class="row"><button class="btn xs" data-a="use">사용</button><button class="btn xs ghost danger" data-a="del">✕</button></div>`;
         d.querySelector('.vl-name').textContent = rec.name;
         d.querySelector('[data-a="use"]').onclick = () => {
-          if (R.vibes.length >= 4) { toast('바이브는 최대 4개', 'err'); return; }
+          if (R.vibes.length >= VIBE_MAX) { toast(`바이브는 최대 ${VIBE_MAX}개`, 'err'); return; }
           /* 저장된 인코딩의 키는 '모델|IE' 다. IE 를 1 로 고정하면 다른 IE 로 인코딩해 둔 것을
              못 찾아, 돈 주고 만든 인코딩을 두고 또 인코딩하게 된다.
              → 현재 모델로 저장된 것 중 하나를 골라 그 IE 를 쓴다. */
@@ -2940,7 +3141,9 @@ function emphOpen(w) { const p = emphPct(w); return p ? '<span class="hl-emph ' 
 function hlHtml(text) {
   if (!S.emphHl) return hlSeg(text, false) + '\n';
   let out = '', last = 0, m;
-  const G = /(-?[\d.]+)::([^:]*?)::/g;
+  /* 태그 이름에 콜론이 있어도(artist:xxx) 잡아야 한다 — 예전 `[^:]` 는 그걸 통째로 놓쳤다.
+     콜론 하나는 허용하고 닫는 `::` 에서만 끊는다. */
+  const G = /(-?[\d.]+)::((?:[^:]|:(?!:))*?)::/g;
   while ((m = G.exec(text))) {
     out += hlSeg(text.slice(last, m.index), true);
     const op = emphOpen(parseFloat(m[1]));   // "." 이나 "-" 하나뿐이면 NaN → 표시 없이 예전대로
@@ -3186,10 +3389,23 @@ function openSettings() {
     const showDiag = () => {
       const errs = ERRLOG.slice(-6).reverse().map(e => `<div>· ${e.t} ${escHtml(e.msg)}</div>`).join('');
       const slows = SLOWLOG.slice(-8).reverse().map(s => `<div>· ${s.t} <b>${escHtml(s.kind)}</b> ${escHtml(s.what)} — <b>${(s.ms / 1000).toFixed(1)}초</b>${s.extra ? ' (' + escHtml(s.extra) + ')' : ''}</div>`).join('');
+      /* V5 사용량 잔여가 어느 필드로 오는지 아직 확정하지 못했다(필드 이름을 추측만 하던 코드였다).
+         원문을 눈으로 볼 수 있어야 그 자리에서 확정된다 — 토큰은 이 응답에 들어 있지 않다. */
+      const sub = R.subRaw
+        ? '<div class="errlog"><b>구독 응답</b> <span class="hint">V5 잔여 표시를 확정하려면 이걸 복사해 주세요</span>'
+          + '<div>· 등급(tier) ' + escHtml(String(R.subRaw.tier)) + ' · 잔여 판정 '
+          + escHtml(R.opusUsage == null ? '못 찾음' : R.opusUsage + '% (' + (R.opusFrom || '?') + ')') + '</div>'
+          + '<div style="max-height:8em;overflow:auto">· ' + escHtml(JSON.stringify(R.subRaw).slice(0, 1500)) + '</div>'
+          + '<button class="btn xs" id="mCopySub">구독 응답 복사</button></div>'
+        : '<div class="hint">구독 응답을 아직 못 받았습니다 (◈ 잔액을 한 번 누르면 받아옵니다)</div>';
       diag.innerHTML = `<b>진단</b> — 브라우저: ${escHtml(navigator.userAgent.match(/(Firefox|Edg|Chrome)\/[\d.]+/) ? navigator.userAgent.match(/(Firefox|Edg|Chrome)\/[\d.]+/)[0] : '?')} · 주소: ${escHtml(location.href.split('?')[0])}<br>
         서버: <b>${R.srvOk ? '연결됨 ' + (R.api || location.origin) : '연결 안 됨'}</b> · 서버 저장 토큰: <b>${R.srvToken ? '있음 ' + (R.srvTokenHint || '') : '없음'}</b> · 브라우저 토큰: <b>${getToken() ? '있음' : '없음'}</b>${R.lastErr ? ' · 마지막 API 오류: <b>' + escHtml(R.lastErr) + '</b>' : ''}
         ${errs ? '<div class="errlog"><b>최근 오류</b>' + errs + '<button class="btn xs" id="mCopyErr">오류 로그 복사</button></div>' : ''}
-        ${slows ? '<div class="errlog"><b>느린 동작</b> <span class="hint">0.4초 넘게 걸린 것만</span>' + slows + '<button class="btn xs" id="mCopySlow">느림 기록 복사</button></div>' : '<div class="hint">느린 동작 기록 없음 (0.4초 넘게 걸린 동작이 아직 없습니다)</div>'}`;
+        ${slows ? '<div class="errlog"><b>느린 동작</b> <span class="hint">0.4초 넘게 걸린 것만</span>' + slows + '<button class="btn xs" id="mCopySlow">느림 기록 복사</button></div>' : '<div class="hint">느린 동작 기록 없음 (0.4초 넘게 걸린 동작이 아직 없습니다)</div>'}
+        ${sub}`;
+      const ub = diag.querySelector('#mCopySub');
+      if (ub) ub.onclick = () => navigator.clipboard.writeText(JSON.stringify(R.subRaw, null, 2))
+        .then(() => toast('복사됨 — 붙여넣어 주세요')).catch(() => toast('복사하지 못했습니다', 'err'));
       const sb = diag.querySelector('#mCopySlow');
       if (sb) sb.onclick = () => navigator.clipboard.writeText(
         SLOWLOG.map(s => `${s.t} ${s.kind} ${s.what} ${s.ms}ms ${s.extra}`).join('\n') + '\n' + navigator.userAgent)
@@ -3327,12 +3543,21 @@ function checkCanvasBug() {
 function syncUI() {
   $('#model').value = S.model; rebuildUcPresets();
   $('#w').value = S.w; $('#h').value = S.h; syncSizePreset();
-  $$('#batchSeg button').forEach(b => b.classList.toggle('on', +b.dataset.n === S.n));
+  { /* 해상도에 따라 낼 수 있는 장수가 다르다 (NAI: 작은 해상도 6장, 그 외 4장).
+       넘는 버튼은 잠그고, 이미 고른 값이 상한을 넘으면 끌어내린다. */
+    const mx = batchMax();
+    if (S.n > mx) S.n = mx;
+    $$('#batchSeg button').forEach(b => {
+      const n = +b.dataset.n;
+      b.disabled = n > mx;
+      b.title = n > mx ? `이 해상도에서는 ${mx}장까지 낼 수 있습니다` : '';
+      b.classList.toggle('on', n === S.n);
+    }); }
   const setR = k => { $('#' + k).value = S[k]; $('#' + k + 'V').textContent = S[k]; };
   ['steps', 'scale', 'rescale', 'strength', 'noise', 'enhStr', 'enhNoise', 'varStr', 'varNoise', 'ucStrength'].forEach(setR);
   $('#enhScale').value = S.enhScale; $('#sampler').value = S.sampler; $('#schedule').value = S.schedule;
   $('#seed').value = S.seed; $('#randomSeed').checked = S.randomSeed;
-  ['quality', 'variety', 'decrisper', 'smea', 'smeaDyn', 'legacyUc', 'vibeNormalize', 'autoSaveOn', 'stripOnSave', 'slashWild', 'transparent', 'chunkFloatOn', 'emphHl'].forEach(k => { const el = $('#' + k); if (el) el.checked = !!S[k]; });
+  ['quality', 'variety', 'decrisper', 'smea', 'smeaDyn', 'legacyUc', 'vibeNormalize', 'autoSaveOn', 'stripOnSave', 'slashWild', 'transparent', 'furryMode', 'chunkFloatOn', 'emphHl'].forEach(k => { const el = $('#' + k); if (el) el.checked = !!S[k]; });
   $('#autoNsfw').checked = S.autoNsfw !== false;
   $('#prompt').value = S.prompt; $('#uc').value = S.uc;
   renderSections();
@@ -3347,6 +3572,8 @@ function syncUI() {
   $('#optSum').textContent = [S.quality ? '퀄리티' : '', 'UC ' + uName, S.variety ? 'Variety+' : '', S.decrisper ? 'Decrisper' : ''].filter(Boolean).join(' · ');
   /* 투명 배경은 V5 만 받는다 — 다른 모델에서는 칸 자체를 숨겨,
      켜 둔 줄 알고 기다리는 일이 없게 한다. */
+  { const row = $('#furryRow'), cb = $('#furryMode');
+    if (row && cb) { const ok = (MODELS[S.model] || {}).ver >= 40; row.hidden = !ok; cb.checked = ok && !!S.furryMode; } }
   { const row = $('#transpRow'), cb = $('#transparent');
     if (row && cb) { const ok = capsOf(S.model).transparency; row.hidden = !ok; cb.checked = ok && !!S.transparent; } }
   /* 이 모델이 안 받는 옵션은 화면에서도 끈다 — 요청에서는 지워지는데 체크박스만 켜져 있으면
@@ -3443,6 +3670,8 @@ function updateCostHint() {
   const caps = capsOf(S.model);
   const est = anlasEstimate({ width: S.w, height: S.h, steps: S.steps, batch: S.n, model: S.model,
     strength: R.i2iBlob ? S.strength : 1, isOpus, opusLeft: R.opusUsage,
+    usageNegative: !!(R.usage && R.usage.isNegative),
+    vibeCount: caps.vibe ? R.vibes.length : 0,
     charRefCount: caps.charRef ? R.prefs.length : 0,   // 그 모델이 안 받으면 비용도 0
     /* "인코딩이 있으면 공짜" 가 아니다. ensureVibes 는 모델이나 Info Extracted 가
        바뀌면 같은 조건(v.encModel === S.model && v.encIe === v.ie)으로 다시 인코딩한다.
@@ -3450,12 +3679,19 @@ function updateCostHint() {
        장당 2 Anlas 씩 더 나갔다. 여기도 같은 조건으로 센다. */
     unencodedVibes: caps.vibe ? R.vibes.filter(v => v.b64 && !(v.enc && v.encModel === S.model && v.encIe === v.ie)).length : 0 });
   const el = $('#genCost');
+  renderUsageBar();   // 사용량 막대는 토큰 유무와 무관하게 갱신한다 (없으면 스스로 숨는다)
   if (!hasToken()) { el.textContent = ''; return; }
   /* "Opus 무료" 라고만 쓰면, V5 에서 한도가 떨어졌을 때 예고 없이 Anlas 가 나간다.
      남은 비율을 알면 함께 보여준다. */
+  /* V4.5 는 Opus 무료에 한도가 없다. V5 부터는 사용량 한도가 붙어, 0 이 되면 실제로 Anlas 가 나간다.
+     한도를 못 읽는 상태에서 그냥 'Opus 무료' 라고 단정하면 예고 없이 돈이 빠진다 —
+     스마트 툴(tools.js)은 이미 '한도 확인 불가' 를 붙이는데 배치 4장이 나가는 여기만 빠져 있었다. */
+  const lim = !!capsOf(S.model).opusLimit;
   el.textContent = est.total === 0
-    ? ('Opus 무료' + (R.opusUsage != null ? ` (잔여 ${R.opusUsage}%)` : ''))
+    ? ('Opus 무료' + (lim && R.opusUsage != null ? ` (${R.opusUsage}%)`
+        : (lim && R.usage == null ? ' (사용량 확인 전)' : '')))
     : `◈ ${est.total}` + (S.n > 1 ? ` (${S.n}장)` : '');
+  renderUsageBar();
   el.title = `장당 ${est.perImage} · 생성 ${est.generation}` + (est.charRef ? ` · 레퍼런스 ${est.charRef}` : '') + (est.vibeEncoding ? ` · 바이브 인코딩 ${est.vibeEncoding}` : '') + (isOpus ? '' : ' (Opus 구독이면 1024²·28스텝 이하 무료)');
 }
 
@@ -3517,7 +3753,7 @@ function init() {
   $('#btnDice').onclick = () => fixSeed(randSeed());
   $('#btnSeedLast').onclick = () => { if (R.lastSeed != null) fixSeed(R.lastSeed); };
   const bindCk = (id, key, after) => { $('#' + id).onchange = () => { S[key] = $('#' + id).checked; save(); if (after) after(); }; };
-  ['randomSeed', 'quality', 'variety', 'decrisper', 'legacyUc', 'vibeNormalize', 'autoSaveOn', 'stripOnSave', 'smeaDyn', 'autoNsfw', 'slashWild', 'transparent', 'chunkFloatOn'].forEach(k => bindCk(k, k, updateCostHint));
+  ['randomSeed', 'quality', 'variety', 'decrisper', 'legacyUc', 'vibeNormalize', 'autoSaveOn', 'stripOnSave', 'smeaDyn', 'autoNsfw', 'slashWild', 'transparent', 'furryMode', 'chunkFloatOn'].forEach(k => bindCk(k, k, updateCostHint));
   bindCk('emphHl', 'emphHl', () => { if (typeof refreshHighlights === 'function') refreshHighlights(); });
   bindCk('smea', 'smea', () => { $('#smeaDyn').disabled = !S.smea; if (!S.smea) { S.smeaDyn = false; $('#smeaDyn').checked = false; } updateCostHint(); });
   $('#aiChoiceBtn').onclick = () => { S.aiChoice = !S.aiChoice; save(); renderChars(); };
@@ -3548,10 +3784,33 @@ function init() {
      예전엔 자동완성이 붙은 칸(.ac)이면 무엇이든 기억해서, AI 프롬프트 창에서 결과칸을 한 번 클릭한 뒤
      "프롬프트에 넣기" 를 누르면 그 결과칸 자기 자신에 넣고 창이 닫혔다(= 아무 데도 안 들어감).
      네거티브 칸을 마지막으로 만졌으면 정보 화면의 "프롬프트 칸에 넣기" 가 네거티브로 갔다. */
-  document.addEventListener('focusin', e => { if (e.target.matches && e.target.matches('textarea.ac') && isPromptTarget(e.target)) R.lastTA = e.target; });
+  document.addEventListener('focusin', e => {
+    if (!e.target.matches || !e.target.matches('textarea.ac')) return;
+    if (isPromptTarget(e.target)) R.lastTA = e.target;
+    /* 네거티브까지 포함해 '사용자가 마지막으로 만진 칸' 을 따로 기억한다.
+       위 R.lastTA 는 네거티브를 일부러 뺀다(이미지 정보창이 네거티브로 새지 않게).
+       그 탓에 **태그 검색이 마스터가 찍은 네거티브 칸을 몰라** 늘 첫 칸(중요 태그)에 넣었다. */
+    if (!e.target.closest('#modalBody')) R.lastAnyTA = e.target;
+  });
   $('#autoCount').onchange = () => { S.autoCount = Math.max(0, +$('#autoCount').value || 0); save(); };
   $('#autoDelay').onchange = () => { S.autoDelay = Math.max(0, +$('#autoDelay').value || 0); save(); };
   /* 상한은 모델마다 다르다 — V4/4.5 는 6명, V5 는 32명. 6 으로 못 박아 두어 V5 에서 7번째를 못 넣었다. */
+  /* 캐릭터 프롬프트 칸을 통째로 접었다 편다 (NAI 처럼).
+     캐릭터를 안 쓰는 그림에서는 이 칸이 화면만 차지한다. 접은 상태는 기억한다.
+     ※ 접는 것은 **보이기만** 바꾼다 — 접었다고 캐릭터가 생성에서 빠지지는 않는다.
+        빼시려면 카드마다 있는 켜기/끄기(⏻)를 쓰신다. */
+  function applyCharFold() {
+    const on = S.charsOpen !== false;
+    const list = $('#charList'), btn = $('#btnCharFold');
+    if (list) list.hidden = !on;
+    if (btn) { btn.textContent = on ? '▾' : '▸'; btn.title = on ? '캐릭터 프롬프트 접기' : '캐릭터 프롬프트 펴기'; }
+    const n = (S.chars || []).length, off = (S.chars || []).filter(x => x && x.off).length;
+    const cc = $('#charCount');
+    if (cc) cc.textContent = n ? (off ? `${n}명 중 ${n - off}명 사용` : `${n}명`) : '';
+  }
+  window.applyCharFold = applyCharFold;
+  $('#btnCharFold').onclick = () => { S.charsOpen = S.charsOpen === false; save(); applyCharFold(); };
+  applyCharFold();
   $('#btnAddChar').onclick = () => { const mx = capsOf(S.model).maxChars || 0; if (!mx) { toast(MODELS[modelOf(S.model)].name + ' 은 캐릭터 프롬프트를 받지 않습니다', 'err'); return; } if (S.chars.length >= mx) { toast('이 모델은 캐릭터를 최대 ' + mx + '명까지 받습니다', 'err'); return; } S.chars.push({ prompt: '', uc: '', x: null, y: null }); save(); renderChars(); };
 
   $$('.reftab').forEach(b => b.onclick = () => switchRefTab(b.dataset.t));
@@ -3664,6 +3923,9 @@ function init() {
       body.querySelector('#hcAll').onclick = () => histWipe(pick(false));
     });
   };
+  /* 뷰어의 그림을 누르면 크게 본다 (한 번만 걸어 둔다 — showImage 는 src 만 갈아끼운다) */
+  { const vi = $('#viewerImg');
+    if (vi) { vi.style.cursor = 'zoom-in'; vi.title = '클릭하면 크게 봅니다'; vi.onclick = () => openFullView(curItem()); } }
   $('#btnAutoStart').onclick = startAuto;
   $('#btnAutoStop').onclick = stopAuto;
   $('#btnPickDir').onclick = async () => {

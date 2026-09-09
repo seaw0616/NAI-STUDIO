@@ -58,6 +58,7 @@ try {
     <button id="btnChunks" class="pill" title="프롬프트 청크">🧩<span class="lbl"> 청크</span></button>
     <button id="btnStyles" class="pill" title="스타일 프리셋 (고정 프롬프트)">🎨<span class="lbl"> 스타일</span></button>
     <button id="btnCharLib" class="pill" title="캐릭터 라이브러리">👤<span class="lbl"> 캐릭터</span></button>
+    <div id="opusBar" hidden title=""><span id="opusBarTxt"></span><span id="opusBarTrack"><span id="opusBarFill"></span></span></div>
     <button id="btnNaiImport" class="pill" title="NAI 웹에서 만든 PNG를 드롭해 설정 그대로 재현">📥<span class="lbl"> NAI PNG</span></button>
     <button id="btnExif" class="pill" title="EXIF/메타데이터 도구">🧹</button>
     <button id="btnYt" class="pill" title="YouTube 플레이어">🎵</button>
@@ -143,7 +144,7 @@ try {
         </div>
         <div class="seg mini" id="batchSeg" title="한 번에 생성할 장수">
           <span class="seg-label">장수</span>
-          <button data-n="1" class="on">1</button><button data-n="2">2</button><button data-n="3">3</button><button data-n="4">4</button>
+          <button data-n="1" class="on">1</button><button data-n="2">2</button><button data-n="3">3</button><button data-n="4">4</button><button data-n="5">5</button><button data-n="6">6</button>
         </div>
       </div>
     </div>
@@ -170,7 +171,7 @@ try {
           <textarea id="uc" class="ta ac" rows="2" spellcheck="false" placeholder="프리셋 뒤에 이어붙을 네거티브"></textarea>
         </details>
         <div class="chead">
-          <span class="ptitle">캐릭터 프롬프트 <span class="hint">V4+</span></span>
+          <span class="ptitle"><button id="btnCharFold" class="ic xs" title="캐릭터 프롬프트 접기/펴기">▾</button> 캐릭터 프롬프트 <span class="hint">V4+</span> <span class="hint" id="charCount"></span></span>
           <div class="row"><button id="aiChoiceBtn" class="btn xs" title="캐릭터 위치: AI 자동 배치 / 좌표 지정">✔ AI 자동 배치</button><button id="btnAddChar" class="btn xs">＋ 캐릭터</button></div>
         </div>
         <div id="charList"></div>
@@ -233,6 +234,7 @@ try {
         <div class="grid2"><label class="ck"><input type="checkbox" id="variety"> Variety+</label><label class="ck"><input type="checkbox" id="decrisper"> Decrisper</label></div>
         <label class="ck" title="켜면 프롬프트 칸에 커서를 둘 때 아래에 청크 칩 띠가 뜹니다. 기본은 꺼져 있습니다 — 글 쓰는 데 걸리적거린다는 얘기가 있었습니다."><input type="checkbox" id="chunkFloatOn"> 청크 칩 띠 띄우기 <span class="hint">(프롬프트 칸을 누르면 청크 칩이 아래에 뜹니다)</span></label>
         <label class="ck" title="{tag}·[tag]·1.2::tag:: 같은 가중치 표기를 프롬프트 칸에서 색으로 보여줍니다. 올린 건 빨강, 내린 건 파랑이고 진할수록 세게 준 것입니다. 청크 칩 색은 그대로 같이 보입니다."><input type="checkbox" id="emphHl"> 가중치 강조 표시 <span class="hint">({tag} · 1.2::tag::)</span></label>
+        <label class="ck" id="furryRow" hidden title="프롬프트 맨 앞에 fur dataset, 을 붙입니다 (NAI 의 Furry mode 와 같습니다)."><input type="checkbox" id="furryMode"> Furry 모드 <span class="hint">fur dataset</span></label>
         <label class="ck" id="transpRow" hidden title="배경을 투명하게 (V5 전용). 인물만 남기고 알파 채널로 뽑습니다."><input type="checkbox" id="transparent"> 투명 배경 <span class="hint">V5 전용</span></label>
         <label class="ck" title="NAI 웹과 동일: 프롬프트에 nsfw가 없으면 네거티브 맨 앞에 'nsfw, ' 자동 추가"><input type="checkbox" id="autoNsfw"> 네거티브에 nsfw 자동 추가 (NAI 웹과 동일)</label>
         <label class="ck" title="(a/b/c) 와 a/b/c 를 랜덤 선택으로 씁니다. fate/zero, (fate/apocrypha), k/da 처럼 슬래시가 이름에 들어간 정상 태그가 깨지므로 기본은 꺼둡니다. &lt;a|b|c&gt; 와 &lt;조각이름&gt; 은 이 설정과 무관하게 항상 동작합니다."><input type="checkbox" id="slashWild"> 슬래시 와일드카드 (a/b/c) 사용 — 태그가 깨질 수 있음</label>

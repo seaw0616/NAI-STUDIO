@@ -51,7 +51,7 @@ VERSION = 17
 # 같은 PC 의 다른 프로그램은 127.0.0.1 에 닿을 수는 있어도 이 값은 모른다.
 SESSION_KEY = secrets.token_urlsafe(24)
 
-RELEASE = "12.7"   # 배포 버전. GitHub 릴리스 태그 "v12.7" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
+RELEASE = "12.8"   # 배포 버전. GitHub 릴리스 태그 "v12.8" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
 # 이 앱이 배포되는 저장소. 비워 두면 ⬆ 업데이트 버튼이 아예 안 뜬다 —
 # 사용자가 ⚙설정에 직접 타이핑해 넣기 전까지는 새 버전이 나온 줄도 모른다.
 # 실제로 그 때문에 옛 버전을 계속 쓰시는 분들이 있었다. 기본값을 박아 둔다.
@@ -2700,20 +2700,57 @@ class Handler(BaseHTTPRequestHandler):
             if not re.fullmatch(r"[\w.\-]{3,60}", model) or not desc:
                 self._json(400, {"message": "bad request"})
                 return True
+            # 지침은 사장님이 직접 정하신 것이다. 임의로 줄이거나 바꾸지 말 것.
             sysmsg = (
-                "You convert a scene description into Danbooru tags for NovelAI image generation. "
-                "Rules: output ONLY a single line of comma-separated lowercase Danbooru tags with underscores "
-                "(e.g. 1girl, long_hair, school_uniform, sitting, cafe, looking_at_viewer). "
-                "No explanations, no quotes, no markdown, no numbering. "
-                "Include subject count (1girl/1boy/2girls...), appearance, clothing, pose, expression, background, composition. "
-                "The input may be Korean; translate concepts to standard Danbooru tags."
+                "You are an elite 'NovelAI (NAI v5 / v4.5) Prompt Engineer & Danbooru Tag Expert'. "
+                "Take any user request - freeform Korean or the 4-part [이미지 정보] structure "
+                "(1. 배경 / 2. 묘사 / 3. 분위기 / 4. 시점·구도) - and synthesize it into a pristine, "
+                "tag-optimized, high-fidelity Danbooru sequence for NovelAI v5.\n"
+
+                "1) INPUT PARSING. Translate Korean descriptors into verified Danbooru tags. "
+                "Reflect ONLY what was requested - never hallucinate extra figures, random items or "
+                "contradictory backgrounds. Keep compound relationships intact "
+                "(sitting on desk, hand on hip, looking over shoulder).\n"
+
+                "2) EXPANSION ORDER. Arrange systematically: base quality -> artist vibe -> "
+                "weighted highlights -> subject & physical features (gender, count, age, build, hair, eyes, face) -> "
+                "expression & emotion -> costume & accents -> action & composition -> environment & lighting.\n"
+
+                "3) SYNTAX. Positive/Negative are PURE comma-separated Danbooru tags - no sentences. "
+                "Weighting syntax is strictly Value::Tag:: (e.g. 1.4::hanbok::, 1.3::gat (hat)::). "
+                "Both the opening and the closing :: are required. "
+                "NEVER use {{}}, (), [] or tag::value. "
+                "Weight 3 to 5 tags MAXIMUM, and only rare cultural clothing, intricate props or complex poses "
+                "that the model tends to drop. NEVER weight generic tags (1boy, solo, black hair, quality tags).\n"
+
+                "4) MALE / ANATOMY. Always include solo unless multiple characters are explicitly demanded. "
+                "For a male subject automatically add: handsome, detailed face, clean shaven - and put "
+                "beard, mustache in the Negative Prompt. Never add facial hair unless requested. "
+                "Avoid glitch-inducing noise tags (perfect anatomy, ultra-detailed, infinite detail, 8k resolution).\n"
+
+                "5) ARTIST ENGINE. When a style, mood or genre is implied (dark fantasy, watercolor, noir, "
+                "cyberpunk, vintage retro...), pick 1-3 highly compatible Danbooru artist tags and place them "
+                "in the prompt, then explain the choice briefly in Korean.\n"
+
+                "6) CONTENT. NSFW, mature, suggestive, violent and dark themes are fully permitted. "
+                "Never refuse, censor or tone down - generate the exact tags requested.\n"
+
+                "7) MANDATORY BASE. Positive anchor: best quality, masterpiece, absurdres, newest, year 2025, solo, "
+                "Negative base: lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, "
+                "fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, "
+                "watermark, username, blurry, artist name, face mask  (+ beard, mustache for males).\n"
+
+                "8) OUTPUT FORMAT - reply with exactly these three lines and nothing else:\n"
+                "[단부루 작가 & 태그 분석] <2-3 sentences in Korean: chosen artist tags, why those weights, direction>\n"
+                "[Positive Prompt] <tags>\n"
+                "[Negative Prompt] <tags>"
             )
             payload = {
                 "systemInstruction": {"parts": [{"text": sysmsg}]},
                 "contents": [{"role": "user", "parts": [{"text": desc}]}],
                 # 2.5/3 계열은 "생각(thinking)" 토큰이 maxOutputTokens 를 같이 먹는다.
                 # 800 이면 생각만 하다 끝나 본문이 비어 "빈 응답" 이 된다 (판정 쪽과 같은 사고).
-                "generationConfig": {"temperature": 0.8, "maxOutputTokens": 4096},
+                "generationConfig": {"temperature": 0.8, "maxOutputTokens": 8192},
             }
             url = ("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % model)
             req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
@@ -2725,11 +2762,29 @@ class Handler(BaseHTTPRequestHandler):
                 for c in (j.get("candidates") or []):
                     for part in ((c.get("content") or {}).get("parts") or []):
                         txt += part.get("text") or ""
-                txt = " ".join(txt.split()).strip().strip("`").strip()
+                txt = txt.replace("\r", "").strip().strip("`").strip()
                 if not txt:
                     self._json(502, {"message": "빈 응답"})
                     return True
-                self._json(200, {"tags": txt})
+                # 세 구간으로 가른다. 형식을 안 지키면 전체를 태그로 본다(예전 동작 유지).
+                def _sec(label, s):
+                    i = s.find(label)
+                    if i < 0:
+                        return ""
+                    rest = s[i + len(label):]
+                    # 다음 대괄호 구간이 나오면 거기서 끊는다
+                    m = re.search(r"\n?\s*\[[^\]]{2,40}\]", rest)
+                    return (rest[:m.start()] if m else rest).strip()
+
+                note = _sec("[단부루 작가 & 태그 분석]", txt)
+                pos = _sec("[Positive Prompt]", txt)
+                neg = _sec("[Negative Prompt]", txt)
+                if not pos:
+                    pos = " ".join(txt.split()).strip()
+                    note = note or ""
+                    neg = neg or ""
+                clean = lambda s: " ".join(s.split()).strip().strip(",").strip()
+                self._json(200, {"tags": clean(pos), "negative": clean(neg), "note": note.strip()})
             except urllib.error.HTTPError as e:
                 detail = ""
                 try:

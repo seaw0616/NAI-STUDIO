@@ -319,7 +319,7 @@ function renderSceneEditor() {
   if (typeof refreshHighlights === 'function') refreshHighlights();   // 이미 붙어 있던 칸이면 색칠이 안 따라온다
   renderStyleSelects();
   sc.chars = sc.chars || [];
-  const drawChars = () => { const l = $('#scCharList'); l.innerHTML = ''; sc.chars.forEach((c, i) => l.appendChild(charCard(c, i, () => { sc.chars.splice(i, 1); save(); drawChars(); }, () => save()))); };
+  const drawChars = () => { const l = $('#scCharList'); l.innerHTML = ''; sc.chars.forEach((c, i) => l.appendChild(charCard(c, i, () => { sc.chars.splice(i, 1); save(); drawChars(); }, () => save(), { list: sc.chars, redraw: drawChars }))); };
   drawChars();
   $('#scAddChar').onclick = () => { const mx = capsOf(S.model).maxChars || 0;
     if (!mx) { toast(MODELS[modelOf(S.model)].name + ' 은 캐릭터 프롬프트를 받지 않습니다', 'err'); return; }

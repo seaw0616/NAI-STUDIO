@@ -18,6 +18,20 @@
 const TAGDB = { rows: null, map: null, state: 'idle', msg: '', idx: null, groups: null, extraLoaded: false, koLoaded: false, nsfw: null };
 const CAT_NAME = { 0: '일반', 1: '아티스트', 3: '작품', 4: '캐릭터', 5: '메타' };
 const hasKo = s => /[가-힣ㄱ-ㅎㅏ-ㅣ]/.test(s);
+/* 무거운 루프를 프레임 사이로 쪼갠다.
+   태그 사전 22만 행을 한 태스크에서 돌리면 메인 스레드가 5.8~7.1초 통째로 멈춘다
+   (마스터 PC 실측). 총 시간은 비슷하지만, 쪼개면 그 사이 클릭·타이핑이 정상으로 먹는다. */
+const yieldToUI = () => new Promise(r =>
+  (window.scheduler && scheduler.yield) ? scheduler.yield().then(r, () => setTimeout(r, 0)) : setTimeout(r, 0));
+
+/* 색인 만들기를 모아서 한 번만 한다.
+   예전엔 kr → extra → koalias 마다 새로 만들어 세 번 돌았고, 앞의 두 번은 통째로 버려졌다
+   (실측 2,069ms 낭비). 마지막 것만 쓰이므로 짧게 미뤄 합친다. */
+let _idxTimer = null;
+function scheduleTagIndex(delay) {
+  clearTimeout(_idxTimer);
+  _idxTimer = setTimeout(() => { _idxTimer = null; buildTagIndex(); }, delay == null ? 250 : delay);
+}
 
 async function loadTagDb() {
   if (TAGDB.rows || TAGDB.state === 'loading') return;
@@ -33,14 +47,17 @@ async function loadTagDb() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const rows = await res.json();
     const map = new Map();
-    for (const r of rows) {
-      // r: [tag, cat, cnt, path, kw, desc] → 검색 문자열 미리 계산해 r[6..10] 에 채움
+    // r: [tag, cat, cnt, path, kw, desc] → 검색 문자열 미리 계산해 r[6..10] 에 채움
+    // 11만 행을 한 번에 돌면 1.5초 멈춘다 → 8,192행마다 화면에 양보한다
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
       prepRow(r);
       map.set(r[0], r);
+      if ((i & 8191) === 8191) await yieldToUI();
     }
     TAGDB.rows = rows; TAGDB.map = map; TAGDB.state = 'ready';
     console.log('[tags] loaded', rows.length);
-    buildTagIndex();
+    scheduleTagIndex(0);   // 자동완성이 바로 필요하다 — 다만 쪼개서 만든다
     tagDbNotify();
     loadExtraTags();     // 영문 보강 사전(작가·캐릭터 위주)은 뒤이어 비동기로 덧붙인다
   } catch (e) {
@@ -58,11 +75,13 @@ function prepRow(r) {
 }
 /* 단어 시작 2글자 → 행 번호 목록.
    이게 없으면 키 입력마다 전체(20만 행)를 훑어 90~230ms 씩 멈춘다. 인덱스로 1~8ms. */
-function buildTagIndex() {
+async function buildTagIndex() {
   const rows = TAGDB.rows; if (!rows) return;
   const t0 = performance.now();
   const idx = new Map();
   for (let i = 0; i < rows.length; i++) {
+    // 22만 행이면 1초 가까이 멈춘다 → 4,096행마다 화면에 양보
+    if ((i & 4095) === 4095) await yieldToUI();
     const s = rows[i][6]; if (!s) continue;
     let prev = -1;
     for (let j = 0; j <= s.length; j++) {
@@ -88,11 +107,12 @@ async function loadExtraTags() {
     if (res.status === 204 || !res.ok) return;
     const rows = await res.json();
     let added = 0;
-    for (const r of rows) {
-      if (TAGDB.map.has(r[0])) continue;
-      prepRow(r); TAGDB.rows.push(r); TAGDB.map.set(r[0], r); added++;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      if (!TAGDB.map.has(r[0])) { prepRow(r); TAGDB.rows.push(r); TAGDB.map.set(r[0], r); added++; }
+      if ((i & 8191) === 8191) await yieldToUI();
     }
-    if (added) { buildTagIndex(); console.log('[tags] +extra', added, '→', TAGDB.rows.length); }
+    if (added) { scheduleTagIndex(); console.log('[tags] +extra', added, '→', TAGDB.rows.length); }
   } catch (e) {
     // 서버가 아직 안 떴을 뿐일 수 있다. 표시를 되돌려 다음에 다시 받아오게 한다
     // (안 그러면 작가·캐릭터 태그가 그 세션 내내 통째로 빠진다)
@@ -118,7 +138,7 @@ async function loadKoAlias() {
       prepRow(r); n++;
     }
     TAGDB.nsfw = new Set(j.nsfw || []);
-    if (n) { buildTagIndex(); console.log('[tags] +한글표현', n); }
+    if (n) { scheduleTagIndex(); console.log('[tags] +한글표현', n); }
   } catch (e) { TAGDB.koLoaded = false; /* 다음에 다시 시도 */ }
   finally { tagDbNotify(); }
 }
@@ -315,6 +335,30 @@ function fmtTag(tag) {
   if (/^[\W_]+$/.test(tag)) return tag; // ^_^ @_@ 같은 기호 태그
   return tag.replace(/_/g, ' ');
 }
+/* 조상 <details> 를 전부 편다. 접힌 채로 넣으면 화면엔 아무 변화가 없어
+   "삽입이 안 된다" 로 보인다. */
+function unfoldTA(t) {
+  let d = t && t.closest ? t.closest('details') : null;
+  while (d) { d.open = true; d = d.parentElement && d.parentElement.closest('details'); }
+}
+/* 접힌 details 안이면 '펴면 보이는 칸' 으로 친다.
+   탭이 통째로 숨은 경우엔 details 자신도 offsetParent 가 null 이라 여기서 걸러진다. */
+function taOnScreen(t) {
+  if (!t || !document.contains(t)) return false;
+  if (t.offsetParent !== null) return true;
+  let d = t.closest ? t.closest('details') : null;
+  while (d) { if (d.offsetParent !== null) return true; d = d.parentElement && d.parentElement.closest('details'); }
+  return false;
+}
+/* 태그 검색·작가 창이 넣을 칸. **네거티브도 그대로 존중한다.**
+   activeTA() 는 네거티브를 일부러 빼므로 여기서 대신 고른다. */
+function insertTargetTA() {
+  const ae = document.activeElement;   // 포커스가 아직 칸에 남아 있는 경우
+  if (ae && ae.tagName === 'TEXTAREA' && ae.classList.contains('ac')
+      && !ae.closest('#modalBody') && taOnScreen(ae)) return ae;
+  if (taOnScreen(R.lastAnyTA)) return R.lastAnyTA;   // 버튼을 눌러 포커스가 빠진 경우
+  return activeTA();                                 // 아무것도 없으면 종전 규칙
+}
 function activeTA() { // 보이는 프롬프트 칸 (숨겨진 #prompt 로 들어가 사라지는 것 방지)
   const vis = t => t && document.contains(t) && t.offsetParent !== null;
   if (vis(R.lastTA) && (typeof isPromptTarget !== 'function' || isPromptTarget(R.lastTA))) return R.lastTA;
@@ -323,8 +367,10 @@ function activeTA() { // 보이는 프롬프트 칸 (숨겨진 #prompt 로 들�
   const p = $('#prompt'); if (vis(p)) return p;
   return null;   // 보이는 칸이 없다 (라이브러리·스마트툴 탭) — 숨은 칸에 몰래 넣지 않는다
 }
-function insertIntoPrompt(text) {
-  let ta = activeTA();
+function insertIntoPrompt(text, target) {
+  /* 대상을 넘겨받으면 그것을 쓴다 — 창을 열면 포커스가 창 안으로 옮겨가
+     '어디에 넣을지' 를 잃어버리기 때문에, 부르는 쪽이 열기 전에 붙잡아 둔다. */
+  let ta = (target && taOnScreen(target)) ? target : insertTargetTA();
   /* 라이브러리·스마트툴 탭에는 프롬프트 칸이 하나도 안 보인다.
      예전엔 마지막 폴백으로 "숨어 있는 칸" 에 넣어서, 화면은 그대로인데 메인 프롬프트가
      바뀌어 있었다. 넣을 곳이 없으면 메인 탭으로 옮기고 나서 넣는다. */
@@ -334,6 +380,7 @@ function insertIntoPrompt(text) {
     if (ta) toast('메인 탭으로 옮겨 넣었습니다');
   }
   if (!ta) { toast('프롬프트 칸을 먼저 클릭하세요', 'err'); return; }
+  unfoldTA(ta);   // 접혀 있으면 펴 준다 (안 그러면 넣고도 안 보여 '안 된다' 로 보인다)
   const v = ta.value;
   let a = ta.selectionStart, b = ta.selectionEnd;
   if (a == null) { a = b = v.length; }
@@ -481,6 +528,8 @@ async function danFetch(path) {
   return j;
 }
 function openArtistBrowser(initial) {
+  /* 태그 검색과 같은 이유 — 창을 열면 포커스가 창 안으로 가서 대상 칸을 잃는다 */
+  const abTgt = insertTargetTA();
   openModal('🎨 작가 태그 — 실제 그림을 보고 고르기', body => {
     body.innerHTML = `
       <div class="tsbar"><input type="text" id="abQ" placeholder="작가 이름 일부 (예: dishwasher, wlop, mery) — 내 사전 + 단부루에서 찾습니다" autocomplete="off">
@@ -512,7 +561,7 @@ function openArtistBrowser(initial) {
       head.innerHTML = `<b>artist:${escHtml(fmtTag(name))}</b>
         <button class="btn xs primary" id="abIns">프롬프트에 넣기</button>
         <button class="btn xs" id="abFrag">작가랜덤 조각에 추가</button>`;
-      head.querySelector('#abIns').onclick = () => insertIntoPrompt('artist:' + fmtTag(name));
+      head.querySelector('#abIns').onclick = () => insertIntoPrompt('artist:' + fmtTag(name), abTgt);
       head.querySelector('#abFrag').onclick = () => {
         const c = S.chunks.find(x => normKey(x.name) === normKey('작가랜덤'));
         const line = 'artist:' + fmtTag(name);
@@ -577,6 +626,9 @@ function openArtistBrowser(initial) {
   }, true);
 }
 function openTagSearch(initial) {
+  /* 창을 열기 전에 '지금 쓰던 칸' 을 붙잡는다 — 열고 나면 포커스가 창 안으로 옮겨가
+     어디에 넣을지 잃어버린다. 그래서 네거티브에서 불러도 늘 첫 칸으로 갔다. */
+  const tgt = insertTargetTA();
   openModal('태그 검색 — 한글/영어 · 클릭하면 프롬프트에 삽입', body => {
     body.innerHTML = `
       <div class="tsbar"><input type="text" id="tsQ" placeholder="예: 흰머리, 미소, white hair, hatsune miku …" autocomplete="off">
@@ -652,7 +704,7 @@ function openTagSearch(initial) {
         };
         d.onclick = e => {
           if (e.shiftKey) { navigator.clipboard.writeText(fmtTag(r[0])).then(() => toast('복사: ' + fmtTag(r[0]))).catch(() => toast('복사하지 못했습니다', 'err')); return; }
-          insertIntoPrompt(fmtTag(r[0])); toast('삽입: ' + fmtTag(r[0]));
+          insertIntoPrompt(fmtTag(r[0]), tgt); toast('삽입: ' + fmtTag(r[0]) + (tgt && tgt.id === 'uc' ? ' → 네거티브' : ''));
         };
         list.appendChild(d);
       }
@@ -727,7 +779,9 @@ function adjustWeight(ta, dir) {
     /* 먼저 `1.2::red hair, blue eyes::` 처럼 여러 태그를 한 묶음으로 감싼 V4 가중치 안인지
        본다. 쉼표를 경계로 삼으면 묶음 한가운데가 잘려, 잘린 조각에 가중치를 또 씌우고
        :: 짝이 어긋난다 (되돌리기도 안 된다). 묶음 안이면 묶음 전체를 대상으로 잡는다. */
-    const GROUP = /(-?[\d.]+)::([^:]*?)::/g;
+    /* artist:xxx 처럼 이름에 콜론이 든 태그도 한 묶음으로 잡아야 한다 —
+       못 잡으면 쉼표 기준으로 잘려 `::` 짝이 어긋난다. */
+    const GROUP = /(-?[\d.]+)::((?:[^:]|:(?!:))*?)::/g;
     let g;
     while ((g = GROUP.exec(v))) {
       if (a > g.index && a < g.index + g[0].length) { a = g.index; b = g.index + g[0].length; break; }

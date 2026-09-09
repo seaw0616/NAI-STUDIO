@@ -1571,10 +1571,14 @@ const DIRECTOR = [
   ['colorize', '🎨 채색', '선화/흑백을 채색 (프롬프트·강도)'], ['emotion', '🙂 감정 변경', '표정 변경 (감정 선택)'], ['declutter', '🧽 정리', '텍스트·잡동사니 제거'],
   ['declutter-keep-bubbles', '💬 정리(말풍선 유지)', '잡동사니만 지우고 말풍선은 남김'],
 ];
-// NAI 웹 번들 확정 19종 (여기 없는 감정은 서버가 받지 않는다)
-const EMOTIONS = ['neutral', 'happy', 'sad', 'angry', 'scared', 'surprised', 'shy', 'disgusted', 'smug', 'bored', 'laughing', 'irritated', 'aroused', 'embarrassed', 'worried', 'love', 'determined', 'hurt', 'playful'];
+/* NAI 웹 번들(31a484c, chunks/5196)의 감정 enum 전체 24종 — 순서까지 그대로.
+   예전엔 19종만 있었고 주석에 '확정 19종' 이라고 적혀 있었다(틀린 주석이었다).
+   빠져 있던 것: tired · excited · nervous · thinking · confused */
+const EMOTIONS = ['neutral', 'happy', 'sad', 'angry', 'scared', 'surprised', 'tired', 'excited',
+  'nervous', 'thinking', 'confused', 'shy', 'disgusted', 'smug', 'bored', 'laughing', 'irritated',
+  'aroused', 'embarrassed', 'worried', 'love', 'determined', 'hurt', 'playful'];
 function dtCostLabel(it) {
-  const c = typeof directorToolCost === 'function' ? directorToolCost(it.w, it.h, R.tier === 3, R.opusUsage) : null;
+  const c = typeof directorToolCost === 'function' ? directorToolCost(it.w, it.h, R.tier === 3, R.opusUsage, key) : null;
   // 한도를 못 읽었으면 '무료' 라고 단정하지 않는다 — 실제로는 Anlas 가 나갈 수 있다
   return c == null ? '' : (c === 0 ? (R.opusUsage == null ? 'Opus 무료(한도 확인 불가)' : 'Opus 무료') : '◈ ' + c + ' 소모');
 }
@@ -1604,10 +1608,44 @@ function openDirector() {
     }
   });
 }
+/* 캔버스로 정확히 그 크기에 다시 그린다 (NAI 가 보내기 전에 하는 것과 같은 일). */
+async function resampleBlob(blob, w, h) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise((res, rej) => {
+      const im = new Image();
+      im.onload = () => res(im); im.onerror = () => rej(new Error('이미지를 읽지 못했습니다'));
+      im.src = url;
+    });
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const g = cv.getContext('2d');
+    g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+    g.drawImage(img, 0, 0, w, h);
+    return await new Promise(r => cv.toBlob(r, 'image/png'));
+  } finally { URL.revokeObjectURL(url); }
+}
 async function runDirector(req, label, srcItem) {
   if (R.gen) { toast('이미 작업 중'); return; }
   R.gen = true; setGenStatus(label + ' 처리 중…'); $('#btnGen').disabled = true;
   try {
+    /* 보내기 전 크기 맞추기 — NAI 와 같은 범위(104만~314만 화소)로.
+       작으면 키워야 품질이 나오고, 크면 줄여야 서버가 거절하지 않는다.
+       원본 blob 이 없으면(예: 이미 base64 만 있는 경로) 건드리지 않는다. */
+    if (typeof fitForTool === 'function' && srcItem && srcItem.blob && req.width && req.height) {
+      const f = fitForTool(req.width, req.height);
+      if (f.w !== req.width || f.h !== req.height) {
+        try {
+          const rb = await resampleBlob(srcItem.blob, f.w, f.h);
+          if (rb) {
+            req.image = await blobToB64(rb);
+            const was = req.width + '×' + req.height;
+            req.width = f.w; req.height = f.h;
+            setGenStatus(`${label} — ${was} → ${f.w}×${f.h} 로 맞춰 보냅니다`);
+          }
+        } catch (e) { logErr('툴 크기 보정 실패(원본 그대로 보냅니다): ' + e.message); }
+      }
+    }
     const res = await apiFetch('/img/ai/augment-image', { method: 'POST', headers: authHeaders(true), body: JSON.stringify(req) });
     if (!res.ok) throw await apiError(res);
     /* 결과에 붙일 메타는 '방금 처리한 그 이미지' 것이어야 한다.
@@ -1615,7 +1653,17 @@ async function runDirector(req, label, srcItem) {
        다른 이미지를 올려두면 엉뚱한 이미지의 프롬프트·씬·파일명이 붙었다. */
     const it = srcItem || curItem();
     let last = null;
-    for (const b of await respImages(res)) { const item = await addToHistory(b, (it && it.meta) || { parameters: {} }, label); last = item; if (S.autoSaveOn) autoSave(item); }
+    /* 배경 제거는 세 장이 온다. 번들 원문 {"bg-removal":["masked","generated","blend"]} 대로
+       ZIP 안 순서가 곧 마스크·생성·혼합이다. 예전엔 셋 다 같은 라벨이라 어느 게 무엇인지 알 수 없었다. */
+    const SUB = { 'bg-removal': ['마스크(Masked)', '생성(Generated)', '혼합(Blend)'] };
+    const subs = SUB[req.req_type];
+    const imgs = await respImages(res);
+    for (let i = 0; i < imgs.length; i++) {
+      const nm = (subs && subs[i]) ? `${label} · ${subs[i]}` : label;
+      const item = await addToHistory(imgs[i], (it && it.meta) || { parameters: {} }, nm);
+      last = item; if (S.autoSaveOn) autoSave(item);
+    }
+    if (subs && imgs.length > 1) toast(`${imgs.length}장이 들어왔습니다 — ${subs.slice(0, imgs.length).join(' · ')}`);
     // 스마트 툴 탭에서 돌렸으면 결과를 그 화면에 바로 올려준다 (연달아 툴을 걸 수 있게).
     // 예전엔 히스토리에만 들어가서, 방금 만든 결과가 아니라 원본에 다음 툴이 걸렸다.
     if (last && S.mode === 'tools' && typeof stSet === 'function') stSet(last.blob, last.meta);
@@ -2832,7 +2880,7 @@ const ST_TOOLS = [
 function renderSmartTools() {
   const list = $('#stList'); if (!list) return;
   const has = !!ST.blob;
-  const cost = has && typeof directorToolCost === 'function' ? directorToolCost(ST.w, ST.h, R.tier === 3, R.opusUsage) : null;
+  const cost = has && typeof directorToolCost === 'function' ? directorToolCost(ST.w, ST.h, R.tier === 3, R.opusUsage, ST.tool) : null;
   const ce = $('#stCost'); if (ce) ce.textContent = has && cost != null
     ? (cost === 0 ? (R.opusUsage == null ? 'Opus 무료(한도 확인 불가)' : 'Opus 무료') : '디렉터 툴 ◈' + cost) : '';
   list.innerHTML = '';
@@ -2982,10 +3030,15 @@ function openAiPrompt(targetTA) {
       <label class="fld">모델<select id="aiModel">${GEMINI_MODELS.map(([v, n]) => `<option value="${v}"${v === (S.aiModel || 'gemini-2.5-flash') ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
       <label class="fld">장면 설명<textarea id="aiDesc" class="ta" rows="4" placeholder="예: 카페에서 커피를 마시는 은발 소녀, 창밖은 비, 위에서 내려다보는 구도"></textarea></label>
       <div class="row"><button class="btn primary" id="aiGo">✨ 생성</button><span class="hint">Ctrl+Enter 로도 생성</span></div>
+      <div class="hint" id="aiNote" hidden style="white-space:pre-wrap;padding:6px 8px;border-radius:6px"></div>
       <label class="fld">결과 (수정 가능)<textarea id="aiOut" class="ta ac" rows="4" placeholder="여기에 태그가 나옵니다"></textarea></label>
       <div class="row"><button class="btn go" id="aiIns">프롬프트에 넣기</button><button class="btn sm" id="aiApp">뒤에 이어붙이기</button>
-        <span class="hint" id="aiMsg"></span></div>`;
+        <span class="hint" id="aiMsg"></span></div>
+      <label class="fld" id="aiNegWrap" hidden>네거티브 (수정 가능)<textarea id="aiNeg" class="ta ac" rows="3"></textarea></label>
+      <div class="row" id="aiNegRow" hidden><button class="btn sm" id="aiNegIns">네거티브 칸에 넣기</button><button class="btn sm" id="aiNegApp">네거티브 뒤에 이어붙이기</button></div>`;
     const desc = body.querySelector('#aiDesc'), out = body.querySelector('#aiOut'), msg = body.querySelector('#aiMsg');
+    const note = body.querySelector('#aiNote'), neg = body.querySelector('#aiNeg');
+    const negWrap = body.querySelector('#aiNegWrap'), negRow = body.querySelector('#aiNegRow');
     const mdl = body.querySelector('#aiModel');
     mdl.onchange = () => { S.aiModel = mdl.value; save(); };
     const go = async () => {
@@ -2998,6 +3051,10 @@ function openAiPrompt(targetTA) {
         const j = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(j.message || ('HTTP ' + res.status));
         out.value = j.tags || '';
+        /* 새 지침은 한국어 분석과 네거티브까지 준다. 받아 놓고 안 쓰면 의미가 없다. */
+        note.textContent = j.note || ''; note.hidden = !j.note;
+        neg.value = j.negative || '';
+        negWrap.hidden = negRow.hidden = !j.negative;
         // 실제로 존재하는 태그인지 표시 (AI가 없는 태그를 만들어 낼 수 있음)
         const parts = out.value.split(',').map(x => x.trim()).filter(Boolean);
         // 사전이 아직 안 읽혔으면 검사를 못 한 것이다 — 그걸 "전부 실존" 이라고 하면 안 된다
@@ -3031,6 +3088,18 @@ function openAiPrompt(targetTA) {
     };
     body.querySelector('#aiIns').onclick = () => put(false);
     body.querySelector('#aiApp').onclick = () => put(true);
+    /* 네거티브는 대상 칸을 찾을 필요가 없다 — 언제나 #uc 다.
+       (씬 화면에서도 #uc 가 본체이고 씬 칸은 거울이라 input 이벤트로 따라온다) */
+    const putNeg = append => {
+      const v = neg.value.trim(); if (!v) { toast('네거티브가 비어 있습니다', 'err'); return; }
+      const u = $('#uc'); if (!u) { toast('네거티브 칸을 찾지 못했습니다', 'err'); return; }
+      u.value = append && u.value.trim() ? u.value.replace(/,\s*$/, '') + ', ' + v : v;
+      u.dispatchEvent(new Event('input', { bubbles: true }));
+      if (u._hlSync) u._hlSync();
+      toast(append ? '네거티브 뒤에 이어붙였습니다' : '네거티브에 넣었습니다');
+    };
+    body.querySelector('#aiNegIns').onclick = () => putNeg(false);
+    body.querySelector('#aiNegApp').onclick = () => putNeg(true);
     setTimeout(() => desc.focus(), 40);
   }, true);
 }
