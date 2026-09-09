@@ -718,3 +718,34 @@ input.sc-name-in:hover, input.sc-name-in:focus { border-bottom-color: var(--acc)
 @media (max-width: 860px) { .im-wrap { grid-template-columns: 1fr; } .im-pic { position: static; } }
 .im-char { margin-bottom: 8px; }
 .im-cuc { opacity: .75; }
+
+/* 꺼 둔 캐릭터 — 지운 게 아니라 이번 생성에서만 빠진다는 것이 한눈에 보여야 한다 */
+.char-card.off { opacity: .45; }
+.char-card.off .cprompt, .char-card.off .cuc { text-decoration: line-through; }
+.char-card .ch-off { margin-right: 2px; }
+
+/* Opus 사용량 막대 (NAI 와 같은 정보: 남은 % · 장수 · 하루 충전량) */
+#opusBar { display: flex; align-items: center; gap: 6px; font-size: 11px; opacity: .85; cursor: help; }
+#opusBar #opusBarTrack { display: inline-block; width: 72px; height: 6px; border-radius: 3px;
+  background: color-mix(in srgb, currentColor 18%, transparent); overflow: hidden; }
+#opusBar #opusBarFill { display: block; height: 100%; background: currentColor; transition: width .3s; }
+#opusBar.low { color: #e5534b; opacity: 1; font-weight: 600; }
+
+/* 썸네일 위 삭제 버튼 — 지우려고 굳이 열어 볼 필요가 없게 */
+.hitem { position: relative; }
+.hitem .hdel { position: absolute; top: 2px; right: 2px; opacity: 0; transition: opacity .12s;
+  border: 0; border-radius: 4px; cursor: pointer; font-size: 11px; line-height: 1;
+  padding: 2px 4px; background: rgba(0,0,0,.62); color: #fff; }
+.hitem:hover .hdel, .hitem .hdel:focus-visible { opacity: 1; }
+.hitem .hdel:hover { background: #c0392b; }
+
+/* 크게 보기 */
+.fullview { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,.88);
+  display: flex; align-items: center; justify-content: center; overflow: hidden; cursor: zoom-out; }
+.fullview img { transform-origin: center center; image-rendering: auto; user-select: none; -webkit-user-drag: none; }
+.fullview img.fit { max-width: 100vw; max-height: 100vh; object-fit: contain; }
+.fullview .fv-tip { position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%);
+  font-size: 11px; color: #ddd; background: rgba(0,0,0,.5); padding: 4px 10px; border-radius: 10px; pointer-events: none; }
+
+/* 바이브가 최대 16개까지 늘어 목록이 길어진다 — 스스로 스크롤되게 */
+#vibeList { max-height: 46vh; overflow-y: auto; }
