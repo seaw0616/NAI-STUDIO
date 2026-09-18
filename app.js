@@ -111,6 +111,26 @@ const capsOf = m => {
   return c;
 };
 const isV5 = m => (MODELS[m || S.model] || {}).ver === 50;
+/* Furry 모드 규칙 — 붙이는 곳(미리보기·요청)과 떼는 곳(불러오기)이 모두 이것만 쓴다.
+   NAI 번들 d5612fd 원문:
+     붙이기: !hasFurryMode || mode!==furry || p.startsWith("fur dataset") || p.startsWith("background dataset") ? p : "fur dataset, "+p
+     떼기:   hasFurryMode && (mode = p.startsWith("fur dataset, ") ? furry : anime, p = p.replace(/^fur dataset, /, ""))
+   hasFurryMode 는 V4·V4.5·V5 에만 있다(V3 이하 없음).
+   12.8 은 붙이기만 있고 떼기가 없어, Furry 로 만든 그림에서 설정을 가져오면
+   'fur dataset, fur dataset, …' 으로 두 번 붙었다. 이미 그렇게 시작하는 프롬프트에도 또 붙였다. */
+const hasFurry = m => (MODELS[m || S.model] || {}).ver >= 40;
+function addFurry(p, m) {
+  if (!S.furryMode || !hasFurry(m)) return p;
+  if (/^(fur|background) dataset/.test(p || '')) return p;
+  return p ? 'fur dataset, ' + p : 'fur dataset';
+}
+function stripFurry(p, m) {   // → { prompt, furry }  (furry: null = 이 모델엔 Furry 모드가 없다)
+  p = String(p || '');
+  if (!hasFurry(m)) return { prompt: p, furry: null };
+  if (p.startsWith('fur dataset, ')) return { prompt: p.slice(13), furry: true };
+  if (p === 'fur dataset') return { prompt: '', furry: true };   // 빈 프롬프트에 붙였던 것 (addFurry 참고)
+  return { prompt: p, furry: false };
+}
 /* 바이브 상한. NAI 문서: "You can apply up to 16 vibes when generating an image."
    많이 붙일수록 생성이 느려지고, 5개째부터는 장당 2 Anlas 씩 더 나간다(V4 이상). */
 const VIBE_MAX = 16;
@@ -567,8 +587,31 @@ function slowNote(kind, what, ms, extra) {
   SLOWLOG.push(rec);
   if (SLOWLOG.length > 40) SLOWLOG.shift();
   // 2초를 넘으면 새로고침해도 남도록 서버에도 적는다 (토큰·경로는 서버가 지운다)
-  if (rec.ms >= 2000) sendErr('slow', `느림 ${kind} ${rec.what} ${rec.ms}ms${rec.extra ? ' · ' + rec.extra : ''}`);
+  // 뒤에서 도는 요청(업데이트 확인 등)은 사용자가 기다린 게 아니다 — 화면 기록에만 남긴다
+  if (rec.ms >= 2000 && kind !== '백그라운드') sendErr('slow', `느림 ${kind} ${rec.what} ${rec.ms}ms${rec.extra ? ' · ' + rec.extra : ''}`);
 }
+/* 최근 멈춤 구간(longtask). 느린 요청이 '서버가 느렸던 것' 인지 '그동안 화면이 멈춰 응답을 못 받은 것' 인지
+   가르는 데 쓴다. 12.8 은 이걸 ResourceTiming 으로 가르려 했는데, 평소 R.api 가 '' 라 주소가 상대경로여서
+   기록을 한 번도 못 찾았다 — 실제 기록 6건이 전부 '네트워크 시간 확인 불가' 였다. */
+const LONGTASKS = [];
+let _ltObs = null;
+function noteLongTasks(entries) {
+  for (const en of entries) {
+    LONGTASKS.push({ s: en.startTime, e: en.startTime + en.duration });
+    if (LONGTASKS.length > 60) LONGTASKS.shift();
+    if (en.duration >= 200) slowNote('멈춤', '브라우저가 멈춘 구간', en.duration);
+  }
+}
+function blockedBetween(a, b) {
+  /* 관찰자 콜백은 한가할 때 늦게 온다 — 앱이 바쁘면(태그 사전 처리 중) 수백 ms 뒤에야 온다.
+     아직 전달 안 된 기록을 지금 꺼내 와야 판정이 맞는다(실제로 한 번은 멈춘 1.3초를 못 봤다). */
+  try { if (_ltObs) noteLongTasks(_ltObs.takeRecords()); } catch (e) {}
+  let t = 0;
+  for (const x of LONGTASKS) { const o = Math.min(b, x.e) - Math.max(a, x.s); if (o > 0) t += o; }
+  return t;
+}
+/* 사용자가 누르고 기다리는 게 아니라 뒤에서 스스로 도는 요청 */
+const SLOW_BG = /^\/(update\/check|nai\/status|health|errors|selfcheck|state)\b/;
 function slowLabel(el) {
   if (!el || !el.closest) return '?';
   const b = el.closest('button, a, label, .ytitem, .hitem, [role=button]') || el;
@@ -590,6 +633,9 @@ function slowLabel(el) {
       const finish = () => {
         if (done) return;
         done = true;
+        /* 그사이 창이 가려졌으면(팝업·새 탭을 여는 버튼 등) 타이머가 1초 단위로 늦춰져
+           빠른 클릭도 '1.3초' 로 찍힌다 — 잴 수 없는 경우라 적지 않는다. */
+        if (document.visibilityState === 'hidden') return;
         const total = performance.now() - enter + Math.max(0, queued);
         if (total >= 400) slowNote('클릭', what, total, queued >= 150 ? `누를 때 이미 ${Math.round(queued)}ms 밀려 있었음` : '');
       };
@@ -598,9 +644,13 @@ function slowLabel(el) {
     }, true);
   } catch (e) {}
   try {
-    new PerformanceObserver(list => {
-      for (const en of list.getEntries()) if (en.duration >= 200) slowNote('멈춤', '브라우저가 멈춘 구간', en.duration);
-    }).observe({ entryTypes: ['longtask'] });
+    _ltObs = new PerformanceObserver(list => noteLongTasks(list.getEntries()));
+    _ltObs.observe({ entryTypes: ['longtask'] });
+  } catch (e) {}
+  /* ResourceTiming 은 기본 250건이 차면 더 쌓지 않는다 — 오래 켜 두면 요청 시간을 영영 못 찾는다 */
+  try {
+    performance.setResourceTimingBufferSize(600);
+    performance.addEventListener('resourcetimingbufferfull', () => performance.clearResourceTimings());
   } catch (e) {}
 })();
 function logErr(msg, extra) {
@@ -856,7 +906,7 @@ function previewFinal() {
   // peek=true — 미리보기는 <*조각> 순차 카운터를 소모하지 않는다 (실제 생성 때 밀리면 안 됨)
   let p = expandAll(joinParts(st && st.prefix, getMainPrompt(), st && st.suffix), true);
   /* Furry 모드 — NAI 는 프롬프트를 'fur dataset,' 으로 **시작**하게 한다 */
-  if (S.furryMode && (MODELS[S.model] || {}).ver >= 40) p = p ? 'fur dataset, ' + p : 'fur dataset';
+  p = addFurry(p, S.model);
   {
     let qs = S.quality ? String(getQuality(S.model) || '').replace(/^\s*,\s*/, '') : '';
     if (capsOf(S.model).transparency && S.transparent) qs = qs ? 'transparent background, ' + qs : 'transparent background';
@@ -1170,7 +1220,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.8';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.9';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -1391,14 +1441,21 @@ async function apiFetch(path, opts) {
     if (_d >= 1000 && !/generate-image/.test(path)) {
       /* 이 숫자에는 '메인 스레드가 막혀 응답 처리가 못 돈 시간' 이 통째로 섞인다.
          응답이 8ms 만에 와도 그때 3초짜리 작업 중이면 3초로 찍힌다 — 실측으로 확인했다.
-         진짜 네트워크 시간은 ResourceTiming 에만 있으므로 둘을 갈라 적는다.
-         안 그러면 브라우저가 멈춘 것을 서버 탓으로 기록하게 된다(실제로 그랬다). */
-      let net = null;
-      try { const e = performance.getEntriesByName(_url).pop(); if (e && e.duration) net = Math.round(e.duration); }
-      catch (e2) {}
-      slowNote(net != null && net < _d - 300 ? '화면멈춤' : '서버요청', path.split('?')[0], _d,
-        net != null ? `실제 네트워크 ${net}ms · 화면이 멈춰 있던 시간 ${Math.max(0, Math.round(_d - net))}ms`
-                    : '네트워크 시간 확인 불가');
+         그래서 그 사이 화면이 멈춰 있던 시간(longtask)을 빼고 판정한다.
+         멈춤 기록은 그 작업이 끝난 **뒤에** 들어오므로 잠깐 기다렸다가 센다. */
+      const t1 = performance.now(), what = path.split('?')[0];
+      let abs = _url; try { abs = new URL(_url, location.href).href; } catch (e2) {}
+      setTimeout(() => {
+        const blocked = Math.round(blockedBetween(_t0, t1));
+        let net = null;   // 참고값: 요청을 보낸 뒤 첫 바이트까지 (절대 주소로 찾아야 나온다)
+        try {
+          const en = performance.getEntriesByName(abs).filter(x => x.startTime >= _t0 - 5).pop();
+          if (en && en.responseStart > 0) net = Math.round(en.responseStart - en.startTime);
+        } catch (e3) {}
+        const kind = blocked >= 300 && blocked >= _d * 0.3 ? '화면멈춤' : SLOW_BG.test(what) ? '백그라운드' : '서버요청';
+        slowNote(kind, what, _d, [blocked ? `그동안 화면이 멈춰 있던 시간 ${blocked}ms` : '',
+          net != null ? `첫 응답까지 ${net}ms` : ''].filter(Boolean).join(' · '));
+      }, 80);
     }
   }
   catch (e) {
@@ -1737,7 +1794,7 @@ function buildPayload(ov) {
   let prompt = ov.prompt != null ? ov.prompt : expandAll(joinParts(style && style.prefix, getMainPrompt(), style && style.suffix));
   /* Furry 모드는 맨 앞에 붙는다. ov.prompt 로 프롬프트를 직접 넘긴 경우(그림체 튜닝 등)는
      부르는 쪽이 이미 완성한 문자열이므로 건드리지 않는다. */
-  if (ov.prompt == null && S.furryMode && (MODELS[m] || {}).ver >= 40) prompt = prompt ? 'fur dataset, ' + prompt : 'fur dataset';
+  if (ov.prompt == null) prompt = addFurry(prompt, m);
   /* 투명 배경 + 품질 태그는 **한 덩어리로** 붙인다.
      NAI 는 투명 배경을 품질 프리셋의 suffix 앞에 끼워 넣고(번들 rr()),
      그 덩어리를 addQualityTag 가 정하는 자리에 넣는다.
@@ -2062,14 +2119,17 @@ function fitForTool(w, h) {
 /* 디렉터 툴 비용 — NAI 번들의 식을 그대로 옮겼다.
    예전에는 화소 구간별 상수표(1·2·3·5·7)를 썼는데 NAI 와 아무 관계가 없는 값이었다.
    ★ 배경 제거는 두 가지가 다르다: ① Opus 무료 차감을 건너뛴다 ② 값이 3배+5 다.
-     그래서 Opus 여도 **절대 무료가 아니다**(101만 화소 기준 65 Anlas). */
+     그래서 Opus 여도 **절대 무료가 아니다**(101만 화소 기준 65 Anlas).
+   ★ NAI 는 툴 요금을 **V3 모델 기준**으로 매긴다: GI(req, user, naiDiffusionV3, isBgRemoval) (번들 d5612fd).
+     V3 에는 사용량 한도(opusUsageLimit)가 없으므로 **V5 사용량이 바닥나도 툴은 Opus 무료**다.
+     12.8 까지는 잔여 0% 면 유료로 표시했다 — 틀린 표시였다. opusLeft 는 이제 쓰지 않는다(호출부 호환용). */
 function directorToolCost(w, h, isOpus, opusLeft, tool) {
   const f = fitForTool(w, h), px = f.w * f.h;
   const bg = tool === 'bg-removal';
   const base = Math.ceil(2.951823174884865e-6 * px + 5.753298233447344e-7 * px * 28);
   const per = Math.max(base, 2);
   // 무료 1장 차감. 배경 제거는 이 차감을 받지 못한다(번들에서 m=true 로 넘어간다).
-  const free = !bg && isOpus && px <= 1048576 && opusLeft !== 0;
+  const free = !bg && isOpus && px <= 1048576;
   const price = free ? 0 : per;
   return bg ? 3 * price + 5 : price;
 }
@@ -2376,10 +2436,10 @@ async function loadHistory() {
 function openFullView(it) {
   if (!it || !it.url) return;
   const ov = document.createElement('div');
-  ov.className = 'fullview';
-  ov.innerHTML = `<img src="${it.url}" alt=""><div class="fv-tip">휠 = 확대 · 끌기 = 이동 · 더블클릭 = 1:1 ↔ 맞춤 · Esc / 클릭 = 닫기</div>`;
+  ov.className = 'img-zoom';   // ⚠ '.fullview' 는 씬·툴·라이브러리 화면이 쓰는 이름이다 (style.css 참고)
+  ov.innerHTML = `<img src="${it.url}" alt=""><div class="fv-tip">휠 = 확대 · 끌기 = 이동 · 그림 더블클릭 = 1:1 ↔ 맞춤 · ←/→ = 이전·다음 · 바깥 클릭 / Esc = 닫기</div>`;
   const img = ov.querySelector('img');
-  let z = 0, tx = 0, ty = 0, drag = null, moved = false;   // z=0 이면 '맞춤'
+  let z = 0, tx = 0, ty = 0, drag = null, moved = false, downOn = null;   // z=0 이면 '맞춤'
   const paint = () => {
     img.style.transform = z ? `translate(${tx}px, ${ty}px) scale(${z})` : '';
     img.classList.toggle('fit', !z);
@@ -2387,18 +2447,40 @@ function openFullView(it) {
   paint();
   ov.addEventListener('wheel', e => {
     e.preventDefault();
-    const cur = z || 1;
-    z = Math.min(8, Math.max(0.2, cur * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+    // 맞춤 상태에서 첫 휠은 '지금 보이는 크기' 에서 시작한다 (1:1 로 튀지 않게)
+    const cur = z || (img.naturalWidth ? img.getBoundingClientRect().width / img.naturalWidth : 1);
+    z = Math.min(8, Math.max(0.1, cur * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
     paint();
   }, { passive: false });
-  ov.addEventListener('pointerdown', e => { drag = { x: e.clientX - tx, y: e.clientY - ty }; moved = false; ov.setPointerCapture(e.pointerId); });
-  ov.addEventListener('pointermove', e => { if (!drag) return; tx = e.clientX - drag.x; ty = e.clientY - drag.y; moved = true; paint(); });
+  /* 누르는 순간 포인터를 붙잡으면 그림 위 클릭까지 바깥(ov) 클릭으로 바뀌어, 더블클릭의 첫 클릭에 창이 닫혔다.
+     실제로 4px 넘게 끌었을 때만 붙잡는다. */
+  ov.addEventListener('pointerdown', e => { drag = { x: e.clientX - tx, y: e.clientY - ty, sx: e.clientX, sy: e.clientY, id: e.pointerId }; moved = false; downOn = e.target; });
+  ov.addEventListener('pointermove', e => {
+    if (!drag) return;
+    if (!moved && Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) > 4) { moved = true; try { ov.setPointerCapture(drag.id); } catch (e2) {} }
+    if (!moved) return;
+    tx = e.clientX - drag.x; ty = e.clientY - drag.y; paint();
+  });
   ov.addEventListener('pointerup', () => { drag = null; });
   img.addEventListener('dblclick', e => { e.stopPropagation(); z = z ? 0 : 1; tx = ty = 0; paint(); });
-  const close = () => { ov.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = e => { if (e.key === 'Escape') close(); };
-  document.addEventListener('keydown', onKey);
-  ov.onclick = e => { if (!moved && e.target === ov) close(); };
+  const close = () => { ov.remove(); document.removeEventListener('keydown', onKey, true); };
+  /* 열려 있는 동안 키보드는 이 창이 맡는다. 안 그러면 뒤에 있는 앱 단축키가 그대로 살아서
+     Delete 를 누르면 보고 있던 그림이 확인도 없이 지워지고, ←/→ 는 뒤에서만 넘어가 화면과 어긋났다. */
+  const onKey = e => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;   // Ctrl+C 같은 브라우저 단축키는 건드리지 않는다
+    e.stopPropagation();
+    if (e.key === 'Escape') { close(); return; }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      stepImage(e.key === 'ArrowLeft' ? -1 : 1);
+      const cur = curItem(); if (cur && cur.url) { img.src = cur.url; z = 0; tx = ty = 0; paint(); }
+      return;
+    }
+    if (e.key === 'Delete' || e.key === 'Backspace') e.preventDefault();   // 크게 보는 중엔 지우지 않는다
+  };
+  document.addEventListener('keydown', onKey, true);
+  // 바깥(검은 곳)을 눌렀다 뗐을 때만 닫는다 — 그림을 끌다가 바깥에서 손을 떼도 닫히지 않게
+  ov.onclick = e => { if (!moved && e.target === ov && downOn === ov) close(); };
   document.body.appendChild(ov);
 }
 function visibleHist() { const idx = []; R.hist.forEach((h, i) => { if (!S.histFavOnly || h.fav) idx.push(i); }); return idx; }
@@ -2688,6 +2770,9 @@ function renderChars() {
     { list: S.chars, redraw: renderChars })));
   $('#aiChoiceBtn').classList.toggle('on', !!S.aiChoice);
   $('#aiChoiceBtn').textContent = S.aiChoice ? '✔ AI 자동 배치' : '☐ 좌표 지정 사용';
+  /* 접힘·개수 표시도 여기서 같이 맞춘다. 12.8 은 ⏻ 를 누를 때만 갱신해서, 캐릭터를 추가·삭제하거나
+     PNG 에서 불러와도 '2명' 같은 옛 숫자가 그대로 남았다. */
+  if (window.applyCharFold) applyCharFold();
 }
 function charCard(c, i, onDel, onChange, opts) { // 메인·씬 공용 카드
   /* opts.list / opts.redraw — 순서 바꾸기가 어느 배열을 다뤄야 하는지 알려 준다.
@@ -3540,19 +3625,26 @@ function checkCanvasBug() {
 }
 
 /* ─────────────── UI 동기화 ─────────────── */
+/* 해상도에 따라 낼 수 있는 장수가 다르다 (NAI: 작은 해상도 6장, 그 외 4장).
+   넘는 버튼은 잠그고, 이미 고른 값이 상한을 넘으면 끌어내린다.
+   12.8 은 이걸 syncUI 에만 두어, 크기를 바꿔도(프리셋·가로·세로·뒤집기) 6장이 그대로 남았다 —
+   화면과 비용은 6장인데 실제로는 4장만 나갔다. 크기를 바꾸는 곳은 전부 이것을 부른다. */
+function syncBatch(tell) {
+  const mx = batchMax();
+  const was = S.n;
+  if (S.n > mx) S.n = mx;
+  $$('#batchSeg button').forEach(b => {
+    const n = +b.dataset.n;
+    b.disabled = n > mx;
+    b.title = n > mx ? `이 해상도에서는 ${mx}장까지 낼 수 있습니다` : '';
+    b.classList.toggle('on', n === S.n);
+  });
+  if (tell && was !== S.n) toast(`이 해상도에서는 ${mx}장까지라 장수를 ${S.n}장으로 줄였습니다`);
+}
 function syncUI() {
   $('#model').value = S.model; rebuildUcPresets();
   $('#w').value = S.w; $('#h').value = S.h; syncSizePreset();
-  { /* 해상도에 따라 낼 수 있는 장수가 다르다 (NAI: 작은 해상도 6장, 그 외 4장).
-       넘는 버튼은 잠그고, 이미 고른 값이 상한을 넘으면 끌어내린다. */
-    const mx = batchMax();
-    if (S.n > mx) S.n = mx;
-    $$('#batchSeg button').forEach(b => {
-      const n = +b.dataset.n;
-      b.disabled = n > mx;
-      b.title = n > mx ? `이 해상도에서는 ${mx}장까지 낼 수 있습니다` : '';
-      b.classList.toggle('on', n === S.n);
-    }); }
+  syncBatch();
   const setR = k => { $('#' + k).value = S[k]; $('#' + k + 'V').textContent = S[k]; };
   ['steps', 'scale', 'rescale', 'strength', 'noise', 'enhStr', 'enhNoise', 'varStr', 'varNoise', 'ucStrength'].forEach(setR);
   $('#enhScale').value = S.enhScale; $('#sampler').value = S.sampler; $('#schedule').value = S.schedule;
@@ -3573,7 +3665,7 @@ function syncUI() {
   /* 투명 배경은 V5 만 받는다 — 다른 모델에서는 칸 자체를 숨겨,
      켜 둔 줄 알고 기다리는 일이 없게 한다. */
   { const row = $('#furryRow'), cb = $('#furryMode');
-    if (row && cb) { const ok = (MODELS[S.model] || {}).ver >= 40; row.hidden = !ok; cb.checked = ok && !!S.furryMode; } }
+    if (row && cb) { const ok = hasFurry(S.model); row.hidden = !ok; cb.checked = ok && !!S.furryMode; } }
   { const row = $('#transpRow'), cb = $('#transparent');
     if (row && cb) { const ok = capsOf(S.model).transparency; row.hidden = !ok; cb.checked = ok && !!S.transparent; } }
   /* 이 모델이 안 받는 옵션은 화면에서도 끈다 — 요청에서는 지워지는데 체크박스만 켜져 있으면
@@ -3729,10 +3821,10 @@ function init() {
     }
     syncUI(); save();
   };
-  $('#sizePreset').onchange = () => { const s = SIZES[$('#sizePreset').value]; if (s[1]) { S.w = s[1]; S.h = s[2]; $('#w').value = S.w; $('#h').value = S.h; updateCostHint(); save(); } };
-  $('#w').onchange = () => { S.w = snap64(+$('#w').value); $('#w').value = S.w; syncSizePreset(); updateCostHint(); save(); };
-  $('#h').onchange = () => { S.h = snap64(+$('#h').value); $('#h').value = S.h; syncSizePreset(); updateCostHint(); save(); };
-  $('#btnSwap').onclick = () => { [S.w, S.h] = [S.h, S.w]; $('#w').value = S.w; $('#h').value = S.h; syncSizePreset(); save(); };
+  $('#sizePreset').onchange = () => { const s = SIZES[$('#sizePreset').value]; if (s[1]) { S.w = s[1]; S.h = s[2]; $('#w').value = S.w; $('#h').value = S.h; syncBatch(true); updateCostHint(); save(); } };
+  $('#w').onchange = () => { S.w = snap64(+$('#w').value); $('#w').value = S.w; syncSizePreset(); syncBatch(true); updateCostHint(); save(); };
+  $('#h').onchange = () => { S.h = snap64(+$('#h').value); $('#h').value = S.h; syncSizePreset(); syncBatch(true); updateCostHint(); save(); };
+  $('#btnSwap').onclick = () => { [S.w, S.h] = [S.h, S.w]; $('#w').value = S.w; $('#h').value = S.h; syncSizePreset(); syncBatch(true); updateCostHint(); save(); };
   $$('#batchSeg button').forEach(b => b.onclick = () => { S.n = +b.dataset.n; $$('#batchSeg button').forEach(x => x.classList.toggle('on', x === b)); updateCostHint(); save(); });
   const bindRange = key => { $('#' + key).oninput = () => { S[key] = +$('#' + key).value; $('#' + key + 'V').textContent = S[key]; updateCostHint(); save(); }; };
   ['steps', 'scale', 'rescale', 'strength', 'noise', 'enhStr', 'enhNoise', 'varStr', 'varNoise', 'ucStrength'].forEach(bindRange);
@@ -3811,7 +3903,10 @@ function init() {
   window.applyCharFold = applyCharFold;
   $('#btnCharFold').onclick = () => { S.charsOpen = S.charsOpen === false; save(); applyCharFold(); };
   applyCharFold();
-  $('#btnAddChar').onclick = () => { const mx = capsOf(S.model).maxChars || 0; if (!mx) { toast(MODELS[modelOf(S.model)].name + ' 은 캐릭터 프롬프트를 받지 않습니다', 'err'); return; } if (S.chars.length >= mx) { toast('이 모델은 캐릭터를 최대 ' + mx + '명까지 받습니다', 'err'); return; } S.chars.push({ prompt: '', uc: '', x: null, y: null }); save(); renderChars(); };
+  $('#btnAddChar').onclick = () => { const mx = capsOf(S.model).maxChars || 0; if (!mx) { toast(MODELS[modelOf(S.model)].name + ' 은 캐릭터 프롬프트를 받지 않습니다', 'err'); return; } if (S.chars.length >= mx) { toast('이 모델은 캐릭터를 최대 ' + mx + '명까지 받습니다', 'err'); return; } S.chars.push({ prompt: '', uc: '', x: null, y: null });
+    // 접혀 있으면 펴 준다 — 숨은 목록에 추가되면 화면엔 아무 변화가 없어 '안 눌린다' 로 보인다
+    if (S.charsOpen === false) S.charsOpen = true;
+    save(); renderChars(); };
 
   $$('.reftab').forEach(b => b.onclick = () => switchRefTab(b.dataset.t));
   const drop = $('#i2iDrop'); bindDrop(drop, f => setI2I(f)); drop.onclick = () => pickFiles(false, f => setI2I(f));
@@ -3823,6 +3918,17 @@ function init() {
   const genClick = () => { if ($('#contGen').checked) { if (R.auto.on) stopAuto(); else startAuto(); } else doGenerate().catch(() => {}); };
   $('#btnCancel').onclick = () => { if (R.abort) { R.abort.abort(); toast('생성을 취소했습니다'); } if (R.auto.on) stopAuto(); if (typeof SR !== 'undefined' && SR.on) SR.stop = true; };
   $('#btnGen').onclick = genClick;
+  /* 키를 누르고 있을 때 생기는 자동 반복(e.repeat)은 '한 번 더 누름' 이 아니다.
+     NAI 도 d5612fd 빌드에서 같은 것을 막았다(생성 버튼 onKeyDown · Ctrl+Enter 에 !e.repeat).
+     안 막으면: 생성 중 Ctrl+Enter 를 누르고 있으면 '이미 생성 중' 알림이 초당 30개씩 쌓이고,
+     생성이 끝나는 순간 아직 누르고 있으면 한 장이 더 나간다(Anlas 가 드는 설정이면 돈이 나간다).
+     연속 생성 모드에선 0.5초만 길게 눌러도 켜졌다가 곧바로 꺼졌다.
+     버튼에 포커스가 있을 때 Enter 를 누르고 있어도 같은 일이 생긴다 — 앱의 모든 버튼에 한 번에 건다. */
+  document.addEventListener('keydown', e => {
+    if (!e.repeat || e.key !== 'Enter') return;
+    const t = e.target;
+    if (e.ctrlKey || e.metaKey || (t && t.closest && t.closest('button'))) { e.preventDefault(); e.stopImmediatePropagation(); }
+  }, true);
   document.addEventListener('keydown', e => {
     const typing = /input|textarea|select/i.test(document.activeElement.tagName);
     if (e.ctrlKey && e.key === 'Enter') {   // 씬 모드에선 현재 씬 생성
