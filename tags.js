@@ -75,13 +75,17 @@ function prepRow(r) {
 }
 /* 단어 시작 2글자 → 행 번호 목록.
    이게 없으면 키 입력마다 전체(20만 행)를 훑어 90~230ms 씩 멈춘다. 인덱스로 1~8ms. */
+/* 색인 만들기는 도중에 쉬어 가므로(yieldToUI) 두 번이 겹쳐 돌 수 있다(kr → extra → 한글표현).
+   늦게 시작한 쪽이 최신 행을 보고 있으니, 먼저 시작한 옛 작업이 나중에 끝나도 결과를 덮지 못하게 한다. */
+let _idxGen = 0;
 async function buildTagIndex() {
   const rows = TAGDB.rows; if (!rows) return;
+  const gen = ++_idxGen;
   const t0 = performance.now();
   const idx = new Map();
   for (let i = 0; i < rows.length; i++) {
     // 22만 행이면 1초 가까이 멈춘다 → 4,096행마다 화면에 양보
-    if ((i & 4095) === 4095) await yieldToUI();
+    if ((i & 4095) === 4095) { await yieldToUI(); if (gen !== _idxGen) return; }   // 더 새 작업이 시작됐다 — 이건 버린다
     const s = rows[i][6]; if (!s) continue;
     let prev = -1;
     for (let j = 0; j <= s.length; j++) {

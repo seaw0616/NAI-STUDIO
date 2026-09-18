@@ -1527,20 +1527,29 @@ function ovFromMeta(meta) {
 }
 async function toolEnhance() { const it = curItem(); if (!it) return; const w = snap64(it.w * S.enhScale), h = snap64(it.h * S.enhScale); await doGenerate({ ...ovFromMeta(it.meta), image: it.blob, strength: S.enhStr, noise: S.enhNoise, w, h }, `인핸스 ${S.enhScale}×`).catch(() => {}); }
 async function toolVary() { const it = curItem(); if (!it) return; await doGenerate({ ...ovFromMeta(it.meta), image: it.blob, strength: S.varStr, noise: S.varNoise, w: snap64(it.w), h: snap64(it.h) }, '변형').catch(() => {}); }
-function toolUpscale() {   // 배율 선택 후 실행 (NAI 웹과 동일하게 2×/4×)
+/* ── 업스케일 (NAI 현재 방식) ────────────────────────────────────────────
+   NAI 가 업스케일을 바꿨다. 예전: api.novelai.net/ai/upscale {image,width,height,scale:2|4}
+   지금: image.novelai.net/ai/upscale {image, model:'nai-diffusion-5-curated', declared_blur_sigma:0}
+   — V5 모델로 다시 그리는 방식이고 **2배 고정**이다(번들 44868: gb·Kx·aS=2, class tK).
+   옛 주소는 없어져 404 "Cannot POST /ai/upscale" 를 준다(2026-09-18 확인). 12.8 까지 우리 업스케일은
+   그 옛 주소로 보내고 있어서 누르면 늘 실패했다.
+   요금(번들 tY): 넓이 104만 화소 이하 1 · 174만 이하 2 · 244만 이하 3 · 그 위 4. 입력은 104만 화소 이하만 받는다.
+   Opus 는 그 크기면 무료로 표시한다(NAI 버튼과 같은 조건 t1). */
+const UPSCALE_MODEL = 'nai-diffusion-5-curated';
+const UPSCALE_X = 2;
+function upscaleCost(w, h, isOpus) {
+  const px = w * h;
+  if (!px || px > 1048576) return null;          // NAI 도 이 크기를 넘으면 버튼을 막는다
+  if (isOpus) return 0;
+  return px <= 1048576 ? 1 : px <= 1747627 ? 2 : px <= 2446678 ? 3 : 4;
+}
+function upscaleCostLabel(w, h) {
+  const c = upscaleCost(w, h, R.tier === 3);
+  return c == null ? '1024×1024 이하만 가능' : (c === 0 ? 'Opus 무료' : '◈ ' + c);
+}
+function toolUpscale() {   // 2배 고정이라 고를 것이 없다 — 바로 실행 (NAI 웹도 한 번 누르면 바로 돈다)
   const it = curItem(); if (!it) return;
-  if (R.gen) { toast('이미 작업 중'); return; }
-  if (it.w * it.h > 1024 * 1024 + 1) { toast('업스케일은 1024×1024 이하 이미지만 가능합니다 (NAI 제한)', 'err'); return; }
-  openModal('업스케일', body => {
-    body.innerHTML = `<div class="hint">원본 ${it.w}×${it.h}</div><div class="tool-grid" id="usRow"></div>`;
-    const row = body.querySelector('#usRow');
-    for (const sc of [2, 4]) {
-      const b = document.createElement('button'); b.className = 'btn primary';
-      b.innerHTML = `<b>${sc}×</b><span>${it.w * sc} × ${it.h * sc}</span>`;
-      b.onclick = () => { closeModal(); runUpscale(it, sc); };
-      row.appendChild(b);
-    }
-  });
+  runUpscale(it);
 }
 /* 진행·완료 표시. 메인 화면의 #genStatus 는 스마트 툴 탭에서는 숨겨져 있어
    툴을 돌려도 화면상 아무 일도 안 일어난 것처럼 보였다 → 스마트 툴 쪽에도 같이 쓴다. */
@@ -1548,19 +1557,21 @@ function setGenStatus(t) {
   const a = $('#genStatus'); if (a) a.textContent = t;
   const b = $('#stCost'); if (b && S.mode === 'tools') b.textContent = t;
 }
-async function runUpscale(it, scale) {
-  // 배율을 고르는 동안 생성이 시작됐을 수 있다 → 실행 시점에 다시 검사 (runDirector 와 동일)
+async function runUpscale(it) {
+  // 실행 시점에 다시 검사 — 누르는 사이 생성이 시작됐을 수 있다 (runDirector 와 동일)
   if (R.gen) { toast('이미 작업 중'); return; }
   if (!it || !it.blob) { toast('업스케일할 이미지가 없습니다', 'err'); return; }
-  // 크기 제한은 여기서 봐야 한다. toolUpscale() 안에만 있어서 스마트 툴 경로는 그냥 통과했고,
-  // 큰 이미지를 보내면 Anlas 만 쓰고 서버에서 거절당했다.
-  if (it.w * it.h > 1024 * 1024 + 1) { toast(`업스케일은 1024×1024 이하만 가능합니다 (지금 ${it.w}×${it.h})`, 'err'); return; }
-  R.gen = true; setGenStatus(`업스케일 ${scale}× 중… (Anlas 소모)`); $('#btnGen').disabled = true;
+  // 크기 제한은 실행 지점에서 본다 — 큰 이미지를 보내면 서버가 거절한다
+  if (it.w * it.h > 1048576) { toast(`업스케일은 1024×1024(약 104만 화소) 이하만 가능합니다 (지금 ${it.w}×${it.h})`, 'err'); return; }
+  const tw = it.w * UPSCALE_X, th = it.h * UPSCALE_X;
+  R.gen = true; setGenStatus(`업스케일 ${UPSCALE_X}× 중… ${it.w}×${it.h} → ${tw}×${th} (${upscaleCostLabel(it.w, it.h)})`); $('#btnGen').disabled = true;
   try {
-    // NAI 프론트엔드 기준 업스케일은 api.novelai.net (BackendUrl) 에 남아 있음
-    const res = await apiFetch('/api/ai/upscale', { method: 'POST', headers: authHeaders(true), body: JSON.stringify({ image: await blobToB64(it.blob), width: it.w, height: it.h, scale }) });
+    const res = await apiFetch('/img/ai/upscale', { method: 'POST', headers: authHeaders(true),
+      body: JSON.stringify({ image: await blobToB64(it.blob), model: UPSCALE_MODEL, declared_blur_sigma: 0 }) });
     if (!res.ok) throw await apiError(res);
-    for (const b of await respImages(res)) { const item = await addToHistory(b, it.meta || { parameters: {} }, `업스케일 ${scale}×`); if (S.autoSaveOn) autoSave(item); }
+    const imgs = await respImages(res);
+    if (!imgs.length) throw new Error('업스케일 결과에 이미지가 없습니다');
+    for (const b of imgs) { const item = await addToHistory(b, it.meta || { parameters: {} }, `업스케일 ${UPSCALE_X}×`); if (S.autoSaveOn) autoSave(item); }
     setGenStatus('업스케일 완료'); refreshAnlas().catch(() => {});
   } catch (e) { setGenStatus('오류: ' + e.message); toast(e.message, 'err'); }
   finally { R.gen = false; $('#btnGen').disabled = false; }
@@ -1577,10 +1588,12 @@ const DIRECTOR = [
 const EMOTIONS = ['neutral', 'happy', 'sad', 'angry', 'scared', 'surprised', 'tired', 'excited',
   'nervous', 'thinking', 'confused', 'shy', 'disgusted', 'smug', 'bored', 'laughing', 'irritated',
   'aroused', 'embarrassed', 'worried', 'love', 'determined', 'hurt', 'playful'];
-function dtCostLabel(it) {
-  const c = typeof directorToolCost === 'function' ? directorToolCost(it.w, it.h, R.tier === 3, R.opusUsage, key) : null;
-  // 한도를 못 읽었으면 '무료' 라고 단정하지 않는다 — 실제로는 Anlas 가 나갈 수 있다
-  return c == null ? '' : (c === 0 ? (R.opusUsage == null ? 'Opus 무료(한도 확인 불가)' : 'Opus 무료') : '◈ ' + c + ' 소모');
+/* tool 은 반드시 인자로 받는다. 12.8 에서 부르는 쪽 루프 변수(key)를 이 함수 안에서 그냥 썼다가
+   ReferenceError 가 나서, 디렉터 툴 창에서 어떤 툴을 눌러도 실행 버튼이 안 떴다(배경 제거·채색 전부 먹통). */
+function dtCostLabel(it, tool) {
+  const c = typeof directorToolCost === 'function' ? directorToolCost(it.w, it.h, R.tier === 3, R.opusUsage, tool) : null;
+  // 툴은 V5 사용량 한도와 무관하다(NAI 가 V3 기준으로 매김) — 한도를 못 읽었어도 무료는 무료다
+  return c == null ? '' : (c === 0 ? 'Opus 무료' : '◈ ' + c + ' 소모');
 }
 function openDirector() {
   const it = curItem(); if (!it) { toast('먼저 이미지를 선택하세요', 'err'); return; }
@@ -1596,7 +1609,7 @@ function openDirector() {
         opts.innerHTML = `${key === 'emotion' ? `<label class="fld">감정<select id="dtEmo">${EMOTIONS.map(e => `<option>${e}</option>`).join('')}</select></label>` : ''}
           ${needPrompt ? `<label class="fld">추가 프롬프트 (선택)<input type="text" id="dtPrompt" placeholder="예: blue hair, sunset"></label>
           <label class="rng">강도 (defry 0=강함 … 5=약함) <output id="dtDefryV">0</output><input type="range" id="dtDefry" min="0" max="5" step="1" value="0"></label>` : ''}
-          <div class="row"><button class="btn primary" id="dtRun">실행</button><span class="hint">${dtCostLabel(it)}</span></div>`;
+          <div class="row"><button class="btn primary" id="dtRun">실행</button><span class="hint">${dtCostLabel(it, key)}</span></div>`;
         const dr = opts.querySelector('#dtDefry'); if (dr) dr.oninput = () => opts.querySelector('#dtDefryV').textContent = dr.value;
         opts.querySelector('#dtRun').onclick = async () => {
           const req = { req_type: key, width: it.w, height: it.h, image: await blobToB64(it.blob) };
@@ -1700,6 +1713,10 @@ function cleanMetaPrompt(p, modelId, rawPrompt) {
   const chars = metaChars(p);
   const useCoords = metaUseCoords(p);
   let prompt = String(rawPrompt || '');
+  /* ⓪ Furry 모드가 맨 앞에 붙인 'fur dataset, ' — NAI 도 불러올 때 이것부터 떼고 모드를 켠다(없으면 끈다).
+     안 떼면 Furry 가 켜진 채로 다시 뽑을 때 두 번 붙는다. */
+  const fz = typeof stripFurry === 'function' ? stripFurry(prompt, modelId) : { prompt, furry: null };
+  prompt = fz.prompt;
   /* ① V5 가 자동으로 붙인 'teXt: …' 꼬리 — 앱이 생성할 때 다시 붙이므로 떼어낸다 (novelai.net 도 그렇게 한다) */
   /* 'V5 글자 그리기 자동 처리' 를 꺼 뒀다면 생성할 때 다시 붙여 주지 않는다 —
      그때 떼면 그 프롬프트로 다시 뽑을 때 글자가 통째로 사라진다. */
@@ -1728,7 +1745,7 @@ function cleanMetaPrompt(p, modelId, rawPrompt) {
   }
   let hit = null;
   for (const c of cands) { const r = stripQualityTag(prompt, c.q, caps); if (r !== null) { prompt = r; hit = c; break; } }
-  return { prompt, chars, useCoords, quality: !!(hit && hit.id), transparent: !!(hit && hit.t), qid: hit ? hit.id : 0, keep: !!(hit && hit.keep), stripped: prompt !== String(rawPrompt || '') };
+  return { prompt, chars, useCoords, quality: !!(hit && hit.id), transparent: !!(hit && hit.t), qid: hit ? hit.id : 0, keep: !!(hit && hit.keep), furry: fz.furry, stripped: prompt !== String(rawPrompt || '') };
 }
 /* 네거티브에서 UC 프리셋 문구를 찾아 떼어낸다 → { uc: 나머지, presetIdx }. 서버 힌트(tag_hint_uc_preset)가 있으면 그것부터. */
 function cleanMetaUc(p, modelId, uc) {
@@ -1780,6 +1797,7 @@ function applyMeta(meta) {
   const { chars, useCoords } = cm; let prompt = cm.prompt;
   S.quality = cm.quality;                 // 못 뗐으면 프롬프트에 이미 들어 있는 것 — 토글은 끈다 (두 벌 방지)
   S.transparent = cm.transparent;
+  if (cm.furry != null) S.furryMode = cm.furry;   // NAI 와 같다: 접두어가 있으면 켜고 없으면 끈다 (V4 이상에서만)
   /* 이미지에 쓰인 프리셋(standard/light)에 맞춰 준다. 다만 사용자가 **직접 고쳐 둔 문구**는 지우지 않는다 —
      예전엔 이미지를 한 장 불러올 때마다 그 모델의 퀄리티 태그 편집본이 조용히 기본값으로 돌아갔다.
      (그 이미지가 실제로 편집본으로 만들어졌으면 cm.keep 이 서고, 이 분기 자체를 타지 않는다) */
@@ -1894,8 +1912,11 @@ async function readImageMeta(src) {
     out.rawPrompt = out.prompt; out.rawUc = out.uc;
     /* 자동으로 붙은 "nsfw, " 는 프리셋 문구 앞에 오므로 먼저 떼야 프리셋이 맞는다 (applyMeta 와 같은 순서) */
     const cm = cleanMetaPrompt(p, modelId, out.prompt), cu = cleanMetaUc(p, modelId, String(out.uc || '').replace(/^nsfw(,\s*|$)/i, ''));
-    out.prompt = cm.prompt; out.uc = cu.uc; out.chars = cm.chars;
-    out.stripped = cm.stripped || out.uc !== out.rawUc;
+    /* 'fur dataset, ' 은 여기선 되붙인다. 이 화면의 '프롬프트에 넣기' 는 Furry 모드를 켜 주지 않으므로
+       떼 버리면 원본과 다른 그림이 나온다. 붙이는 쪽(addFurry)이 이미 붙은 것은 건너뛰니 두 번 붙지 않는다. */
+    out.prompt = cm.furry ? (cm.prompt ? 'fur dataset, ' + cm.prompt : 'fur dataset') : cm.prompt;
+    out.uc = cu.uc; out.chars = cm.chars;
+    out.stripped = out.prompt !== out.rawPrompt || out.uc !== out.rawUc;
   };
   if (src && src.meta) {                       // 히스토리 항목
     out.item = src;
@@ -2871,7 +2892,7 @@ const ST_TOOLS = [
     run: (it, o) => runDirector({ req_type: 'colorize', width: it.w, height: it.h, image: it.b64, prompt: o.prompt, defry: o.defry }, '채색', it) },
   { k: 'emotion', ic: '🙂', n: '표정 변경', d: '감정을 골라 표정을 바꿉니다', emo: true, prompt: '추가 프롬프트 (선택)', defry: true,
     run: (it, o) => runDirector({ req_type: 'emotion', width: it.w, height: it.h, image: it.b64, prompt: o.emo + ';;' + (o.prompt || ''), defry: o.defry }, '표정 변경', it) },
-  { k: 'upscale', ic: '⤢', n: '업스케일', d: '2× / 4× 확대 (1024² 이하만)', scale: true, run: (it, o) => runUpscale(it.item, o.scale) },
+  { k: 'upscale', ic: '⤢', n: '업스케일', d: '2배 확대 · V5 로 다시 그림 (1024² 이하만)', run: it => runUpscale(it.item) },
   { k: 'i2i', ic: '🖼', n: '이미지 투 이미지', d: '이 이미지를 바탕으로 다시 생성', run: it => { setI2I(it.blob); setMode('main'); toast('메인 탭의 i2i 로 넣었습니다'); } },
   { k: 'inpaint', ic: '🖌', n: '인페인팅', d: '칠한 부분만 다시 그리기', run: async it => { setI2I(it.blob); setMode('main'); await openMaskEditor(); } },
   { k: 'mosaic', ic: '▦', n: '모자이크 / 검열', d: '부위를 골라 모자이크·블러 처리', run: it => openMosaicTool(it.blob) },
@@ -2880,19 +2901,25 @@ const ST_TOOLS = [
 function renderSmartTools() {
   const list = $('#stList'); if (!list) return;
   const has = !!ST.blob;
-  const cost = has && typeof directorToolCost === 'function' ? directorToolCost(ST.w, ST.h, R.tier === 3, R.opusUsage, ST.tool) : null;
-  const ce = $('#stCost'); if (ce) ce.textContent = has && cost != null
-    ? (cost === 0 ? (R.opusUsage == null ? 'Opus 무료(한도 확인 불가)' : 'Opus 무료') : '디렉터 툴 ◈' + cost) : '';
+  /* 요금은 툴마다 다르다 — 배경 제거만 3배+5 이고 Opus 무료도 못 받는다.
+     예전엔 위에 한 줄(일반 툴 기준 'Opus 무료')만 띄워서, 바로 아래 배경 제거 카드를 누르면
+     표시와 달리 65 Anlas 가 나갔다(ST.tool 은 어디서도 정해지지 않는 값이었다). → 카드마다 붙인다. */
+  const DT = new Set(DIRECTOR.map(d => d[0]));
+  const costOf = k => (has && ST.w && typeof directorToolCost === 'function') ? directorToolCost(ST.w, ST.h, R.tier === 3, R.opusUsage, k) : null;
+  const fmt = c => c == null ? '' : (c === 0 ? 'Opus 무료' : '◈ ' + c);
+  const ce = $('#stCost');
+  if (ce) { const g = costOf('lineart'), b = costOf('bg-removal');
+    ce.textContent = g == null ? '' : `디렉터 툴 ${fmt(g)} · 배경 제거 ${fmt(b)}`; }
   list.innerHTML = '';
   for (const t of ST_TOOLS) {
     const c = document.createElement('div'); c.className = 'st-card' + (has ? '' : ' off');
-    c.innerHTML = `<div class="st-t"><span class="st-i">${t.ic}</span><b>${t.n}</b></div><div class="hint">${t.d}</div><div class="st-opt"></div>
+    const tc = DT.has(t.k) ? fmt(costOf(t.k)) : (t.k === 'upscale' && has && ST.w ? upscaleCostLabel(ST.w, ST.h) : '');
+    c.innerHTML = `<div class="st-t"><span class="st-i">${t.ic}</span><b>${t.n}</b></div><div class="hint">${t.d}${tc ? ` · <b>${tc}</b>` : ''}</div><div class="st-opt"></div>
       <button class="btn sm primary st-go"${has ? '' : ' disabled'}>실행</button>`;
     const opt = c.querySelector('.st-opt');
     if (t.emo) opt.innerHTML += `<label class="fld">표정<select class="st-emo">${EMOTIONS.map(e => `<option>${e}</option>`).join('')}</select></label>`;
     if (t.prompt) opt.innerHTML += `<input type="text" class="st-p" placeholder="${t.prompt}">`;
     if (t.defry) opt.innerHTML += `<label class="rng">원본 유지도 <output class="st-dv">0</output><input type="range" class="st-d" min="0" max="5" step="1" value="0"></label>`;
-    if (t.scale) opt.innerHTML += `<div class="row"><label class="ck"><input type="radio" name="stsc" value="2" checked> 2×</label><label class="ck"><input type="radio" name="stsc" value="4"> 4×</label></div>`;
     const dr = c.querySelector('.st-d'); if (dr) dr.oninput = () => c.querySelector('.st-dv').textContent = dr.value;
     c.querySelector('.st-go').onclick = async () => {
       if (!ST.blob) return;
@@ -2900,7 +2927,6 @@ function renderSmartTools() {
         prompt: (c.querySelector('.st-p') || {}).value || '',
         defry: dr ? +dr.value : 0,
         emo: (c.querySelector('.st-emo') || {}).value || 'neutral',
-        scale: +((c.querySelector('input[name=stsc]:checked') || {}).value || 2),
       };
       const it = { blob: ST.blob, w: ST.w, h: ST.h, b64: await blobToB64(ST.blob), item: { blob: ST.blob, w: ST.w, h: ST.h, meta: ST.meta || { parameters: {} } } };
       try { await t.run(it, o); } catch (e) { toast(e.message, 'err'); }

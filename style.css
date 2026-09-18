@@ -733,18 +733,22 @@ input.sc-name-in:hover, input.sc-name-in:focus { border-bottom-color: var(--acc)
 
 /* 썸네일 위 삭제 버튼 — 지우려고 굳이 열어 볼 필요가 없게 */
 .hitem { position: relative; }
-.hitem .hdel { position: absolute; top: 2px; right: 2px; opacity: 0; transition: opacity .12s;
+/* 왼쪽 위 — 오른쪽 위는 즐겨찾기 ★(.fav) 자리라 겹쳤다 */
+.hitem .hdel { position: absolute; top: 2px; left: 2px; opacity: 0; transition: opacity .12s;
   border: 0; border-radius: 4px; cursor: pointer; font-size: 11px; line-height: 1;
   padding: 2px 4px; background: rgba(0,0,0,.62); color: #fff; }
 .hitem:hover .hdel, .hitem .hdel:focus-visible { opacity: 1; }
 .hitem .hdel:hover { background: #c0392b; }
 
-/* 크게 보기 */
-.fullview { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,.88);
+/* 크게 보기.
+   ⚠ 클래스 이름을 '.fullview' 로 했다가 12.8 에서 크게 사고가 났다 — 씬 모드·스마트 툴·라이브러리
+   <section> 이 이미 .fullview 를 쓰고 있어서, 그 탭을 열면 화면 전체가 검은 고정 레이어가 되고
+   위쪽 탭 줄까지 덮여 메인으로 돌아갈 수 없었다. 새 클래스는 반드시 grep 으로 쓰이는 곳부터 확인할 것. */
+.img-zoom { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,.88);
   display: flex; align-items: center; justify-content: center; overflow: hidden; cursor: zoom-out; }
-.fullview img { transform-origin: center center; image-rendering: auto; user-select: none; -webkit-user-drag: none; }
-.fullview img.fit { max-width: 100vw; max-height: 100vh; object-fit: contain; }
-.fullview .fv-tip { position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%);
+.img-zoom img { transform-origin: center center; image-rendering: auto; user-select: none; -webkit-user-drag: none; cursor: grab; }
+.img-zoom img.fit { max-width: 100vw; max-height: 100vh; object-fit: contain; }
+.img-zoom .fv-tip { position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%);
   font-size: 11px; color: #ddd; background: rgba(0,0,0,.5); padding: 4px 10px; border-radius: 10px; pointer-events: none; }
 
 /* 바이브가 최대 16개까지 늘어 목록이 길어진다 — 스스로 스크롤되게 */

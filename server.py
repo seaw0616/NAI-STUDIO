@@ -51,7 +51,7 @@ VERSION = 17
 # 같은 PC 의 다른 프로그램은 127.0.0.1 에 닿을 수는 있어도 이 값은 모른다.
 SESSION_KEY = secrets.token_urlsafe(24)
 
-RELEASE = "12.8"   # 배포 버전. GitHub 릴리스 태그 "v12.8" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
+RELEASE = "12.9"   # 배포 버전. GitHub 릴리스 태그 "v12.9" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
 # 이 앱이 배포되는 저장소. 비워 두면 ⬆ 업데이트 버튼이 아예 안 뜬다 —
 # 사용자가 ⚙설정에 직접 타이핑해 넣기 전까지는 새 버전이 나온 줄도 모른다.
 # 실제로 그 때문에 옛 버전을 계속 쓰시는 분들이 있었다. 기본값을 박아 둔다.
@@ -754,11 +754,98 @@ KNOWN_MODELS = {
     "nai-diffusion", "nai-diffusion-2", "nai-diffusion-xl", "nai-diffusion-inpainting",
     "nai-diffusion-furry", "nai-diffusion-furry2",
 }
-_nai_watch = {"t": 0.0, "new": [], "err": ""}
+_nai_watch = {"t": 0.0, "new": [], "drift": [], "build": "", "err": ""}
+
+# ─────────────── NAI 사양 감시 (모델 이름만으로는 부족했다) ───────────────
+# 2026-09-18: NAI 가 업스케일을 api.novelai.net → image.novelai.net 으로 옮기고 요청 형식까지 바꿨는데
+# (옛 주소는 404), 모델 이름은 그대로라 위 감시가 아무것도 못 잡았다. 우리 업스케일은 그동안 늘 실패했다.
+# 그래서 **앱이 기대는 것** 을 그대로 적어 두고, NAI 번들이 이와 달라지면 🩺 점검에 올린다.
+# 기준값은 번들 d5612fd-production(2026-09-18)에서 뽑았다. NAI 에 맞춰 앱을 고치면 여기도 같이 고칠 것.
+EXPECT_ENDPOINTS = {            # NAI 번들의 get 이름 → (서버, 경로). 앱은 전부 /img/ (= ImageBackendUrl) 로 부른다
+    "GenerateImage": ("ImageBackendUrl", "/ai/generate-image"),
+    "GenerateImageStream": ("ImageBackendUrl", "/ai/generate-image-stream"),
+    "EncodeVibe": ("ImageBackendUrl", "/ai/encode-vibe"),
+    "ImageTool": ("ImageBackendUrl", "/ai/augment-image"),
+    "UpscaleImage": ("ImageBackendUrl", "/ai/upscale"),
+    "TagSearch": ("ImageBackendUrl", "/ai/generate-image/suggest-tags"),
+    "Subscriptions": ("ImageBackendUrl", "/user/subscription"),
+}
+CAPS_KEYS = ["vibetransfer", "characterReferences", "noiseSchedule", "cfgDelay", "cfgRescale", "transparency",
+             "maxCharacters", "e2eUpscale", "opusUsageLimit", "hasFurryMode", "freeformCharacterPosition",
+             "text", "autoText", "encodedVibes", "characterPrompts"]
+# 모델별 능력(위 순서). app.js 의 CAPS 표가 이것과 맞아야 한다.
+EXPECT_CAPS = {
+    "nai-diffusion-5-full":            "0 0 0 0 1 1 32 0 1 1 1 1 1 0 1",
+    "nai-diffusion-5-curated":         "0 0 0 0 1 1 32 0 1 1 1 1 1 0 1",
+    "nai-diffusion-4-5-full":          "1 1 1 1 1 0 6 0 0 1 0 1 0 1 1",
+    "nai-diffusion-4-5-curated":       "1 1 1 1 1 0 6 0 0 1 0 1 0 1 1",
+    "nai-diffusion-4-full":            "1 0 1 1 1 0 6 0 0 1 0 1 0 1 1",
+    "nai-diffusion-4-curated-preview": "1 0 1 1 1 0 6 0 0 1 0 1 0 1 1",
+    "nai-diffusion-3":                 "1 0 1 1 1 0 0 0 0 0 0 0 0 0 0",
+    "nai-diffusion-furry-3":           "1 0 1 1 1 0 0 0 0 0 0 0 0 0 0",
+}
+EXPECT_TOOLS = {"bg-removal", "colorize", "declutter", "declutter-keep-bubbles", "emotion", "lineart",
+                "pixel-snap", "sketch", "upscale"}
+EXPECT_SAMPLERS = {"ddim_v3", "k_dpm_2", "k_dpm_2_ancestral", "k_dpm_adaptive", "k_dpm_fast", "k_dpmpp_2m",
+                   "k_dpmpp_2m_sde", "k_dpmpp_2s_ancestral", "k_dpmpp_3m_sde", "k_dpmpp_sde",
+                   "k_euler_ancestral", "k_lms", "nai_smea", "nai_smea_dyn"}
+EXPECT_SCHEDULES = {"exponential", "karras", "native", "polyexponential"}
+
+
+def nai_spec_drift(js):
+    """번들 텍스트에서 앱이 기대는 사양을 뽑아 기준과 다른 것을 사람이 읽을 문장으로 돌려준다.
+    뽑지 못한 항목은 '못 찾음' 으로 적는다 — 조용히 넘어가면 번들 구조가 바뀐 것도 모른다."""
+    out = []
+    # 1) 주소
+    got = {k: (b, p) for k, b, p in re.findall(r'get (\w+)\(\)\{return this\.(\w+)\+"(/[^"]+)"\}', js)}
+    for name, want in EXPECT_ENDPOINTS.items():
+        have = got.get(name)
+        if not have:
+            out.append("주소 %s 를 번들에서 못 찾음" % name)
+        elif have != want:
+            host = {"ImageBackendUrl": "image", "BackendUrl": "api", "TextBackendUrl": "text"}
+            out.append("주소 %s: %s%s → %s%s" % (name, host.get(want[0], want[0]), want[1],
+                                               host.get(have[0], have[0]), have[1]))
+    # 2) 모델 능력표
+    i = js.find("controlnet:!0,vibetransfer:!1,scaleMax:25")
+    body = js[js.rfind("function", 0, i): i + 14000] if i >= 0 else ""
+    caps = {}
+    for m in re.finditer(r'((?:case"[^"]+":)+)return(\{[^}]*\})', body):
+        c = dict(re.findall(r"(\w+):(!0|!1|[\d.]+|1/0)", m.group(2)))
+        for lab in re.findall(r'case"([^"]+)":', m.group(1)):
+            caps[lab] = c
+    if not caps:
+        out.append("모델 능력표를 번들에서 못 찾음")
+    for model, want in EXPECT_CAPS.items():
+        c = caps.get(model)
+        if caps and not c:
+            out.append("모델 능력표에 %s 없음" % model)
+            continue
+        if not c:
+            continue
+        for key, w in zip(CAPS_KEYS, want.split()):
+            v = c.get(key)
+            v = "1" if v == "!0" else "0" if v == "!1" else (v or "?")
+            if v != w:
+                out.append("%s %s: %s → %s" % (model.replace("nai-diffusion-", "V"), key, w, v))
+    # 3) 열거형 (디렉터 툴 · 샘플러 · 노이즈 스케줄)
+    for label, anchor, want in (("디렉터 툴", r'e\.bgRemoval="bg-removal"(?:,e\.\w+="[^"]+")*', EXPECT_TOOLS),
+                                ("샘플러", r'e\.kEulerAncestral="k_euler_ancestral"(?:,e\.\w+="[^"]+")*', EXPECT_SAMPLERS),
+                                ("노이즈 스케줄", r'(?:e\.\w+="[^"]+",)*e\.polyexponential="polyexponential"', EXPECT_SCHEDULES)):
+        m = re.search(anchor, js)
+        if not m:
+            out.append("%s 목록을 번들에서 못 찾음" % label)
+            continue
+        have = set(re.findall(r'="([^"]+)"', m.group(0)))
+        if have - want:
+            out.append("새 %s: %s" % (label, ", ".join(sorted(have - want))))
+        if want - have:
+            out.append("없어진 %s: %s" % (label, ", ".join(sorted(want - have))))
+    return out
 
 
 def nai_model_watch(max_age=86400):
-    """하루에 한 번 novelai.net 을 보고 앱이 모르는 모델 id 를 찾는다.
+    """하루에 한 번 novelai.net 을 보고 앱이 모르는 모델 id 와 사양 변화를 찾는다.
 
     받는 건 공개된 웹앱 스크립트뿐이고, 로그인도 토큰도 쓰지 않는다.
     실패하면 조용히 넘어간다 — 이것 때문에 점검이 시끄러워지면 안 된다."""
@@ -770,6 +857,8 @@ def nai_model_watch(max_age=86400):
         req = urllib.request.Request("https://novelai.net/image", headers={"User-Agent": UA})
         with urllib.request.urlopen(req, timeout=20) as r:
             html = r.read(400000).decode("utf-8", "replace")
+        b = re.search(r'"buildId":"([^"]+)"', html)
+        _nai_watch["build"] = b.group(1) if b else ""
         m = re.search(r"/_next/static/chunks/pages/_app-[\w]+\.js", html)
         if not m:
             raise RuntimeError("번들 주소를 찾지 못했습니다")
@@ -779,6 +868,10 @@ def nai_model_watch(max_age=86400):
         found = set(re.findall(r"nai-diffusion[a-z0-9.\-]*", js))
         fresh = sorted(x for x in found if x not in KNOWN_MODELS)
         _nai_watch["new"] = fresh
+        try:
+            _nai_watch["drift"] = nai_spec_drift(js)
+        except Exception as e:
+            _nai_watch["drift"] = ["사양 비교 중 오류: %s" % str(e)[:80]]
         _nai_watch["err"] = ""
     except Exception as e:
         _nai_watch["err"] = str(e)[:140]
@@ -1204,6 +1297,16 @@ def self_check(deep=False):
                                    "warn"))
             else:
                 checks.append(_chk("NAI 새 모델", True, "없음", "info"))
+            # 모델은 그대로여도 주소·능력·도구가 바뀌면 앱이 조용히 고장 난다 (업스케일 404 가 그랬다)
+            drift = _nai_watch.get("drift") or []
+            bld = _nai_watch.get("build") or "?"
+            if drift:
+                checks.append(_chk("NAI 사양 변화", False,
+                                   "NAI(%s)가 앱이 기대는 것과 달라졌습니다: %s%s — 업데이트를 확인해 보세요"
+                                   % (bld, " · ".join(drift[:4]), " 외 %d건" % (len(drift) - 4) if len(drift) > 4 else ""),
+                                   "warn"))
+            elif _nai_watch.get("t"):
+                checks.append(_chk("NAI 사양 변화", True, "없음 (NAI %s)" % bld, "info"))
         except Exception:
             pass
     # 8) 바깥 연결 (깊은 점검일 때만 — 평소엔 네트워크를 건드리지 않는다)
@@ -2767,24 +2870,33 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(502, {"message": "빈 응답"})
                     return True
                 # 세 구간으로 가른다. 형식을 안 지키면 전체를 태그로 본다(예전 동작 유지).
-                def _sec(label, s):
-                    i = s.find(label)
-                    if i < 0:
-                        return ""
-                    rest = s[i + len(label):]
-                    # 다음 대괄호 구간이 나오면 거기서 끊는다
-                    m = re.search(r"\n?\s*\[[^\]]{2,40}\]", rest)
-                    return (rest[:m.start()] if m else rest).strip()
+                # 세 이름표만 찾아 그 사이를 자른다. 모델은 형식을 조금씩 바꿔 쓴다 —
+                # **[Positive Prompt]** (굵게) · Positive Prompt: (대괄호 없음) · ### [Negative Prompt] …
+                # 예전엔 "다음 [ 가 나오면 끊기" 라서, 굵게 쓰면 태그 앞뒤에 ** 가 붙고,
+                # 분석문 안에 [..] 가 있으면 거기서 잘리고, 대괄호가 없으면 분석문까지 태그로 들어갔다.
+                # 줄 맨 앞에 있을 때만 이름표로 본다 — 분석문 안에서 "Positive Prompt 에…" 라고 말해도 잘리지 않게.
+                LABEL = re.compile(
+                    r"^[ \t#*>\-]*\[?\s*(단부루\s*작가\s*&\s*태그\s*분석|positive\s*prompt|negative\s*prompt)\s*\]?[ \t]*\**[ \t]*[:：]?",
+                    re.I | re.M)
+                secs = {}
+                marks = list(LABEL.finditer(txt))
+                for k, mk in enumerate(marks):
+                    end = marks[k + 1].start() if k + 1 < len(marks) else len(txt)
+                    key = mk.group(1).lower().replace(" ", "")
+                    key = "pos" if key.startswith("positive") else "neg" if key.startswith("negative") else "note"
+                    secs.setdefault(key, txt[mk.end():end])
 
-                note = _sec("[단부루 작가 & 태그 분석]", txt)
-                pos = _sec("[Positive Prompt]", txt)
-                neg = _sec("[Negative Prompt]", txt)
-                if not pos:
-                    pos = " ".join(txt.split()).strip()
-                    note = note or ""
-                    neg = neg or ""
-                clean = lambda s: " ".join(s.split()).strip().strip(",").strip()
-                self._json(200, {"tags": clean(pos), "negative": clean(neg), "note": note.strip()})
+                def clean(s):
+                    s = re.sub(r"```\w*", " ", s or "")               # 코드 울타리
+                    s = " ".join(s.split()).strip().strip("*`").strip()
+                    return s.strip(",").strip()
+
+                pos, neg, note = secs.get("pos", ""), secs.get("neg", ""), secs.get("note", "")
+                if not clean(pos):
+                    # 형식을 아예 안 지켰다 — 예전처럼 전체를 태그로 본다
+                    pos, neg, note = txt, "", ""
+                note = (note or "").strip().strip("*`").strip()
+                self._json(200, {"tags": clean(pos), "negative": clean(neg), "note": note})
             except urllib.error.HTTPError as e:
                 detail = ""
                 try:
@@ -3168,11 +3280,30 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"message": "not found"})
 
     def do_POST(self):
-        if not self._guard():
-            return
-        if self._local() or self._proxy():
-            return
-        self._json(404, {"message": "not found"})
+        """읽지 않은 요청 본문은 끝에 반드시 비운다.
+        HTTP/1.1 로 연결을 재사용하므로, 본문을 안 읽고 답하면(🩺 점검의 POST {} · 403 · 404 · 잘못된 요청 등)
+        남은 바이트가 **같은 연결의 다음 요청 앞에 붙는다**. 실제로 점검 직후 요청이
+        501 "Unsupported method ('{}GET')" 로 깨졌다. 경로마다 고치지 않고 여기 한 곳에서 막는다."""
+        n = 0
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self.close_connection = True
+        raw = self.rfile
+        br = _BodyReader(raw, n) if n > 0 else None
+        if br:
+            self.rfile = br
+        try:
+            if not self._guard():
+                return
+            if self._local() or self._proxy():
+                return
+            self._json(404, {"message": "not found"})
+        finally:
+            if br:
+                self.rfile = raw
+                if not br.drain():
+                    self.close_connection = True
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -3180,6 +3311,39 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Max-Age", "86400")
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+
+class _BodyReader:
+    """요청 본문을 Content-Length 만큼만 내주고, 얼마나 남았는지 센다 (Handler.do_POST 참고)."""
+
+    def __init__(self, raw, length):
+        self.raw, self.left = raw, max(0, length)
+
+    def read(self, n=-1):
+        if self.left <= 0:
+            return b""
+        if n is None or n < 0 or n > self.left:
+            n = self.left
+        b = self.raw.read(n)
+        self.left -= len(b)
+        return b
+
+    def drain(self, cap=64 * 1024 * 1024):
+        """남은 본문을 버린다. 너무 크면 읽지 않고 False — 그땐 연결을 닫는다."""
+        if self.left <= 0:
+            return True
+        if self.left > cap:
+            return False
+        try:
+            while self.left > 0:
+                if not self.read(min(self.left, 65536)):
+                    return False
+        except Exception:
+            return False
+        return True
+
+    def __getattr__(self, name):          # readline 등 그 밖의 것은 원래 스트림에 넘긴다
+        return getattr(self.raw, name)
 
 
 class Server(ThreadingHTTPServer):
