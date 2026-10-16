@@ -17,6 +17,7 @@ APP_FILES = [
     ('tags.js', '.'),
     ('tools.js', '.'),
     ('scenes.js', '.'),
+    ('canvas.js', '.'),
     ('style.css', '.'),
     ('assets/hls.min.js', 'assets'),
     ('assets/t5_vocab.json.gz', 'assets'),

@@ -1517,12 +1517,18 @@ function initYouTube() {
 
 /* ─────────────── 이미지 툴 ─────────────── */
 function baseModelOf(m) { return m ? m.replace(/-inpainting$/, '') : S.model; }
+/* 그림 기록 → 그 그림을 만든 조건 (변형이 쓴다 — NAI generateVariations 는 그림 자신의 모델·설정·프롬프트로 다시 그린다).
+   글은 무작위 값 이어 쓰기·인핸스 덧붙이기 전의 원래 글(meta.pre)이 있으면 그것을 쓴다(NAI 가 그림에 남기는 글과 같다).
+   설정 칸은 baseParams 로 넘겨 buildPayload 가 덮는다. 바이브·정밀 레퍼런스는 NAI 처럼 지금 화면 것을 쓴다(noVibe 없음). */
 function ovFromMeta(meta) {
-  const p = (meta && meta.parameters) || {};
-  const chars = (p.characterPrompts || []).map(c => ({ prompt: c.prompt, uc: c.uc, x: p.use_coords ? c.center.x : null, y: p.use_coords ? c.center.y : null }));
-  const ov = { noQuality: true, chars, model: MODELS[baseModelOf(meta && meta.model)] ? baseModelOf(meta.model) : S.model, n: 1, noVibe: true, style: null };
-  if (meta && meta.input != null) ov.prompt = meta.input;
-  if (p.negative_prompt != null) ov.uc = p.negative_prompt;
+  const p = (meta && meta.parameters) || {}, pre = (meta && meta.pre) || {};
+  const chars = (p.characterPrompts || []).map((c, i) => {
+    const o = (pre.chars && pre.chars[i]) || {};
+    return { prompt: o.prompt != null ? o.prompt : c.prompt, uc: o.uc != null ? o.uc : c.uc, x: p.use_coords ? c.center.x : null, y: p.use_coords ? c.center.y : null };
+  });
+  const ov = { noQuality: true, chars, model: MODELS[baseModelOf(meta && meta.model)] ? baseModelOf(meta.model) : S.model, n: 1, style: null, baseParams: p, useCoords: !!p.use_coords };
+  if (pre.input != null) ov.prompt = pre.input; else if (meta && meta.input != null) ov.prompt = meta.input;
+  if (pre.uc != null) ov.uc = pre.uc; else if (p.negative_prompt != null) ov.uc = p.negative_prompt;
   return ov;
 }
 /* 인핸스 배율 목록 — NAI 인핸스 창(빌드 78a367e)과 같다:
@@ -1536,31 +1542,96 @@ function enhanceOptions(it, model) {
   return opts;
 }
 const enhLabel = v => (v === 'max' ? 'Max' : v + '×');
-/* NAI generateEnhance 그대로: Max 면 같은 크기 + upscaled_enhance, 아니면 floor(가로×배율)·floor(세로×배율)(뒤에서 64 배수로),
-   시드는 새로 뽑고 장수 1, V4.5·V5 는 Max 가 아니면 프롬프트에 «, -2::upscaled, blurry::,» 를 text: 앞(없으면 끝)에 넣는다(applyEnhancePromptAdd).
-   예전엔 배율 1·1.5 만 있었고, 시드는 설정값(고정이면 같은 시드)이었고, 프롬프트 덧붙이기가 없었다. */
+/* ── 인핸스 창 (NAI BG, 빌드 78a367e) ──
+   ✨ 단추를 누르면 그림 아래에 뜨고, 떠 있는 동안 생성 단추가 «✨ 인핸스!»(그 요금)로 바뀐다(NAI EnhanceVisible).
+   · 배율: 그 그림에서 쓸 수 있는 것만 작은 것부터(1×·1.5×·2×·Max). 그림 넓이마다 마지막으로 고른 배율을 기억한다
+     (S.enhSizeCache — NAI 「image-enhance-size-cache」). 기억이 없으면 목록의 첫째(NAI 처음 값).
+   · 세기: Magnitude 1~5(NAI EffectMagnitudes .2/0 · .4/0 · .5/0 · .6/0 · .7/.1). «고급 보기»면 세기·노이즈를 직접(S.enhAdvanced — NAI 「enhancedSettings」).
+     Magnitude 눈금은 NAI 처럼 켤 때마다 2 에서 시작하고, 쓰는 세기·노이즈는 저장된 값(S.enhStr·S.enhNoise)이다 — 누님 10-17 «저장되는 것도 좋다». */
+const EFFECT_MAG = [{ s: 0.2, n: 0 }, { s: 0.4, n: 0 }, { s: 0.5, n: 0 }, { s: 0.6, n: 0 }, { s: 0.7, n: 0.1 }];
+function enhPick(it) {   // NAI: 기억한 배율이 'max' 면 Max 가 있을 때만, 숫자면 그대로, 없으면 목록의 첫째
+  const opts = enhanceOptions(it, S.model), c = (S.enhSizeCache || {})[it.w * it.h];
+  if (c === 'max' && opts.includes('max')) return 'max';
+  if (c != null) { const v = parseFloat(c); if (!isNaN(v)) return v; }
+  return opts[0];
+}
+/* NAI maxEnhanceTargetSize — «Max» 의 요금을 셀 때 쓰는 크기 (서버가 키워 돌려주는 크기) */
+function maxEnhanceTargetSize(w, h) {
+  const t = 2, r = 8 * t, n = Math.floor(w / r) * r * t, i = Math.floor(h / r) * r * t, o = Math.min(1, Math.sqrt(3145728 / (n * i)));
+  let l = 32 * Math.round(n * o / 32), s = 32 * Math.round(i * o / 32);
+  if (l * s > 3145728) { l = 32 * Math.floor(n * o / 32); s = 32 * Math.floor(i * o / 32); }
+  return { width: Math.max(32, l), height: Math.max(32, s) };
+}
+/* 생성 단추 요금 — 인핸스 창이 떠 있으면 인핸스 요청 크기·세기로 (NAI enhancePrice) */
+function enhCostParams() {
+  const it = curItem(); if (!R.enhOpen || !it) return null;
+  const sc = enhPick(it); if (sc == null) return null;
+  const sz = sc === 'max' ? maxEnhanceTargetSize(it.w, it.h) : { width: Math.floor(it.w * sc), height: Math.floor(it.h * sc) };
+  return { width: sz.width, height: sz.height, batch: 1, strength: S.enhStr };
+}
+function enhPanelToggle(force) {
+  R.enhOpen = force != null ? !!force : !R.enhOpen;
+  if (R.enhOpen && !curItem()) { R.enhOpen = false; toast('인핸스할 그림이 없습니다', 'err'); }
+  enhPanelRender(); if (typeof setAutoUI === 'function') setAutoUI(!!R.auto.on); refreshCost();
+}
+function enhPanelRender() {
+  const box = $('#enhPanel'); if (!box) return;
+  const it = curItem();
+  $('#tEnhance') && $('#tEnhance').classList.toggle('on', !!R.enhOpen);
+  if (!R.enhOpen || !it) { box.hidden = true; return; }
+  const opts = enhanceOptions(it, S.model), sel = enhPick(it), adv = !!S.enhAdvanced, mag = R.enhMag || 2;
+  const radio = [...opts].reverse().map(v => `<button class="btn xs${v === sel ? ' primary' : ''}" data-sc="${v}" title="${v === 'max' ? '같은 크기로 보내고 서버가 키웁니다 (V5)' : v + '배로 키워 다시 그립니다'}">${v === 'max' ? 'Max ✨' : v + 'x'}</button>`).join('');
+  box.innerHTML = `<div class="enh-h"><b>✨ 인핸스</b><span class="hint">${it.w}×${it.h}</span><button class="ic" id="enhX" title="닫기">✕</button></div>
+    <div class="enh-b"><div class="enh-c"><span class="hint">배율</span><div class="row">${radio || '<span class="hint">쓸 수 있는 배율 없음</span>'}</div></div>
+    <div class="enh-c" style="flex:1">${adv
+      ? `<label class="rng">세기 <output>${S.enhStr}</output><input type="range" id="enhPStr" min="0.01" max="0.99" step="0.01" value="${S.enhStr}"></label><label class="rng">노이즈 <output>${S.enhNoise}</output><input type="range" id="enhPNoise" min="0" max="0.99" step="0.01" value="${S.enhNoise}"></label>`
+      : `<label class="rng">Magnitude <output>${mag}</output><input type="range" id="enhPMag" min="1" max="5" step="1" value="${mag}"></label>`}
+      <button class="btn xs" id="enhAdv" style="align-self:flex-start">${adv ? '고급 숨기기' : '고급 보기'}</button></div></div>
+    <div class="hint">생성 단추가 «✨ 인핸스!» 로 바뀌었습니다 — 눌러서 시작합니다</div>`;
+  box.hidden = false;
+  box.querySelector('#enhX').onclick = () => enhPanelToggle(false);
+  box.querySelectorAll('[data-sc]').forEach(b => b.onclick = () => {
+    const v = b.dataset.sc === 'max' ? 'max' : parseFloat(b.dataset.sc);
+    S.enhSizeCache = Object.assign({}, S.enhSizeCache, { [it.w * it.h]: v }); save(); enhPanelRender(); refreshCost();
+  });
+  const sync = () => { if (typeof syncUI === 'function') syncUI(); refreshCost(); };
+  if (adv) {
+    box.querySelector('#enhPStr').oninput = e => { S.enhStr = +e.target.value; e.target.previousElementSibling.textContent = S.enhStr; save(); sync(); };
+    box.querySelector('#enhPNoise').oninput = e => { S.enhNoise = +e.target.value; e.target.previousElementSibling.textContent = S.enhNoise; save(); sync(); };
+  } else box.querySelector('#enhPMag').oninput = e => {
+    R.enhMag = +e.target.value; const m = EFFECT_MAG[R.enhMag - 1]; S.enhStr = m.s; S.enhNoise = m.n; e.target.previousElementSibling.textContent = R.enhMag; save(); sync();
+  };
+  box.querySelector('#enhAdv').onclick = () => { S.enhAdvanced = !S.enhAdvanced; save(); enhPanelRender(); };
+}
+/* NAI generateEnhance 그대로 (빌드 78a367e):
+   · 무엇으로 그리나 = **지금 화면**의 모델·설정·프롬프트·네거티브·캐릭터·바이브·정밀 레퍼런스 (그림에 적힌 설정이 아니다)
+   · Max 면 같은 크기 + upscaled_enhance, 아니면 floor(가로×배율)·floor(세로×배율)(뒤에서 64 배수로)
+   · 시드는 새로 뽑고 장수 1, V4.5·V5 는 Max 가 아니면 프롬프트 덧붙이기(buildPayload 의 enhanceAdd)
+   · 프롬프트의 무작위 묶음(«||가|나||»)은 그 그림(인핸스·인페인트로 나온 그림이면 그 원본)에 적힌 실제 값으로 바꿔 넣고,
+     결과 그림에 그 원본 값을 기억시킨다(NAI promptRandomizerOriginImage)
+   12.11 까지는 그림에 적힌 설정·모델로, 바이브 없이, 배율 1·1.5 만, 설정 시드로 그렸다. */
 async function toolEnhance() {
   const it = curItem(); if (!it) return;
-  const ov = ovFromMeta(it.meta);
+  const ov = { model: S.model };
   const opts = enhanceOptions(it, ov.model);
   if (!opts.length) { toast(`이 그림 크기(${it.w}×${it.h})로는 쓸 수 있는 인핸스 배율이 없습니다 (NAI 도 고를 수 없게 막습니다)`, 'err'); return; }
-  const want = S.enhScale === 'max' ? 'max' : S.enhScale === 'auto' ? opts[0] : +S.enhScale;
-  const sc = opts.includes(want) ? want : opts[0];
-  if (S.enhScale !== 'auto' && sc !== want) toast(`이 그림에서는 ${enhLabel(want)} 배율을 쓸 수 없어 ${enhLabel(sc)} 로 합니다 (NAI 와 같은 배율 목록)`);
+  const sc = enhPick(it);
   const max = sc === 'max';
   const w = max ? it.w : Math.floor(it.w * sc), h = max ? it.h : Math.floor(it.h * sc);
-  let prompt = ov.prompt;
-  if (!max && capsOf(ov.model).enhAdd && prompt != null && !prompt.includes('upscaled, blurry')) {
-    const add = ', -2::upscaled, blurry::,', mm = prompt.match(/(?:^|\s|[,.:[\]{}、。])text:(?!:)/i);
-    prompt = mm ? prompt.slice(0, mm.index) + add + prompt.slice(mm.index) : prompt + add;
-  }
-  await doGenerate({ ...ov, prompt, image: it.blob, strength: S.enhStr, noise: S.enhNoise, w, h, seed: randSeed(), upscaledEnhance: max }, `인핸스 ${enhLabel(sc)}`).catch(() => {});
+  const randFrom = await randInfoOf((it.vars && it.vars[0] && it.vars[0].blob) || it.blob, it.meta);
+  await doGenerate({ image: it.blob, strength: S.enhStr, noise: S.enhNoise, w, h, n: 1, seed: randSeed(), upscaledEnhance: max, enhanceAdd: !max, randFrom, randKeep: true }, `인핸스 ${enhLabel(sc)}`).catch(() => {});
 }
-/* 변형 — NAI generateVariations: 장수 min(3, 이 크기 상한) · 새 시드 · 원본 크기. (세기·노이즈 기본 0.8·0.1 은 NAI 고정값과 같다) */
+/* 변형 — NAI generateVariations (빌드 78a367e):
+   · 그림 자신의 모델(절약 모드 포함)·설정·프롬프트·네거티브·캐릭터로 다시 그린다 (ovFromMeta)
+   · 바이브·정밀 레퍼런스는 지금 화면에 붙은 것을 같이 보낸다
+   · 무작위 묶음은 이 그림 자신의 실제 값으로 (NAI 는 변형 때 원본 표시를 따라가지 않는다)
+   · 장수 min(3, 이 크기 상한) · 새 시드 · 그림 크기 · 세기·노이즈 0.8·0.1(NAI 고정값과 같은 처음 값)
+   12.12 까지는 설정 칸을 지금 화면에서 가져오고 바이브·레퍼런스를 뺐다. */
 async function toolVary() {
   const it = curItem(); if (!it) return;
   const w = snap64(it.w), h = snap64(it.h);
-  await doGenerate({ ...ovFromMeta(it.meta), image: it.blob, strength: S.varStr, noise: S.varNoise, w, h, n: Math.min(3, batchMax(w, h)), seed: randSeed() }, '변형').catch(() => {});
+  const randFrom = await randInfoOf((it.vars && it.vars[0] && it.vars[0].blob) || it.blob, null);
+  await doGenerate({ ...ovFromMeta(it.meta), randFrom, image: it.blob, strength: S.varStr, noise: S.varNoise, w, h, n: Math.min(3, batchMax(w, h)), seed: randSeed() }, '변형').catch(() => {});
 }
 /* ── 업스케일 (NAI 현재 방식) ────────────────────────────────────────────
    NAI 가 업스케일을 바꿨다. 예전: api.novelai.net/ai/upscale {image,width,height,scale:2|4}
@@ -1611,7 +1682,10 @@ async function runUpscale(it) {
   } catch (e) { setGenStatus('오류: ' + e.message); toast(e.message, 'err'); }
   finally { R.gen = false; $('#btnGen').disabled = false; }
 }
-async function toolInpaint() { const it = curItem(); if (!it) return; setI2I(it.blob); await openMaskEditor(); }
+/* NAI actions.inpaint: 이 그림을 바탕 그림으로 넣고(앞서 칠한 마스크는 그대로) 그림판 마스크 모드를 연다 */
+async function toolInpaint() { const it = curItem(); if (!it) return; await cvInpaintItem(it.blob, it.meta); }
+/* NAI actions.edit: 이 그림을 그림판에서 고쳐 바탕 그림으로 넣는다 */
+async function toolEdit() { const it = curItem(); if (!it) return; await cvEditImage(it.blob, it.meta); }
 const DIRECTOR = [
   ['bg-removal', '🪄 배경 제거', '인물만 남기고 배경 투명'], ['lineart', '✒ 선화 추출', '이미지를 선화로'], ['sketch', '✏ 스케치', '연필 스케치 스타일'],
   ['colorize', '🎨 채색', '선화/흑백을 채색 (프롬프트·강도)'], ['emotion', '🙂 감정 변경', '표정 변경 (감정 선택)'], ['declutter', '🧽 정리', '텍스트·잡동사니 제거'],
@@ -2155,7 +2229,7 @@ async function openImageMeta(src, opts) {
       body.querySelector('#imFav').onclick = () => { toggleFav(h); closeModal(); if (window.renderLibrary) renderLibrary(); };
       body.querySelector('#imSave').onclick = () => saveItem(h, S.stripOnSave);
       body.querySelector('#imMain').onclick = () => { closeModal(); setMode('main'); showImage(R.hist.indexOf(h)); };
-      body.querySelector('#imI2i').onclick = () => { setI2I(h.blob); closeModal(); setMode('main'); toast('i2i 소스로 설정됨'); };
+      body.querySelector('#imI2i').onclick = () => { setI2I(h.blob, h.meta, true); closeModal(); setMode('main'); toast('i2i 소스로 설정됨'); };
       body.querySelector('#imDel').onclick = () => { deleteItem(h); closeModal(); if (window.renderLibrary) renderLibrary(); };
     }
     if (nav) {
@@ -2219,7 +2293,7 @@ async function runRepro(file) {
      말없이 버리면 다시 만들어야 하고, 유료 인코딩은 돈이 또 든다 → 먼저 알린다. */
   const attached = [];
   if (R.i2iBlob) attached.push('불러온 이미지(i2i)');
-  if (R.maskCanvas) attached.push('칠해 둔 마스크');
+  if (hasMask()) attached.push('칠해 둔 마스크');
   /* 바이브는 모델마다 따로다 — 떼는 것은 이 그림의 모델 목록이다(아래 importFromPng 가 모델을 그 그림 것으로 바꾼다) */
   const srcText = (chunks.find(c => c.key === 'Source') || {}).text || '';
   const reproVibes = (R.vibesBy[vibeKey(modelFromSource(srcText))] || []).length;
@@ -2227,7 +2301,7 @@ async function runRepro(file) {
   if ((R.prefs || []).length) attached.push(`레퍼런스 ${R.prefs.length}개`);
   if (attached.length && !confirm(`재현 검증은 원본과 같은 조건으로 만들어야 해서 지금 붙어 있는 것을 뗍니다.\n\n· ${attached.join('\n· ')}\n\n계속할까요? (바이브는 라이브러리에 저장해 두셨다면 다시 넣을 수 있습니다)`)) return;
   await importFromPng(file);      // 설정·시드 복원 (모달 닫힘)
-  R.i2iBlob = null; R.maskCanvas = null; updateI2IUI(); R.vibes = []; renderVibes(); R.prefs = []; renderPrefs();
+  clearI2I(); R.vibes = []; renderVibes(); R.prefs = []; renderPrefs();
   /* 앱이 "평소대로" 보냈을 payload — 생성하지 않고 계산만 한다.
      아래 표에서 원본과 이걸 비교해야 어디서 갈라지는지가 보인다.
      (예전엔 방금 만든 결과의 메타와 비교해서, 늘 같다고 나오거나 무의미한 차이만 떴다) */
@@ -2921,8 +2995,10 @@ function initTools() {
   $('#btnNaiImport').onclick = openNaiImport;
   $('#btnBackup').onclick = openBackup;
   { const hb = $('#btnHealth'); if (hb) hb.onclick = openHealth; }
-  $('#tEnhance').onclick = toolEnhance; $('#tUpscale').onclick = toolUpscale; $('#tVary').onclick = toolVary;
-  $('#tInpaint').onclick = toolInpaint; $('#tDirector').onclick = openDirector;
+  $('#tEnhance').onclick = () => enhPanelToggle(); $('#tUpscale').onclick = toolUpscale; $('#tVary').onclick = toolVary;   // ✨ = NAI 처럼 인핸스 창 열고 닫기
+  $('#tInpaint').onclick = () => toolInpaint().catch(e => { logErr('그림판 열기 실패: ' + e.message); toast('그림판을 열지 못했습니다: ' + e.message, 'err'); });
+  $('#tEdit').onclick = () => toolEdit().catch(e => { logErr('그림판 열기 실패: ' + e.message); toast('그림판을 열지 못했습니다: ' + e.message, 'err'); });
+  $('#tDirector').onclick = openDirector;
   initYouTube();
 }
 
@@ -2961,8 +3037,9 @@ const ST_TOOLS = [
   { k: 'emotion', ic: '🙂', n: '표정 변경', d: '감정을 골라 표정을 바꿉니다', emo: true, prompt: '추가 프롬프트 (선택)', defry: true,
     run: (it, o) => runDirector({ req_type: 'emotion', width: it.w, height: it.h, image: it.b64, prompt: o.emo + ';;' + (o.prompt || ''), defry: o.defry }, '표정 변경', it) },
   { k: 'upscale', ic: '⤢', n: '업스케일', d: '2배 확대 · V5 로 다시 그림 (1024² 이하만)', run: it => runUpscale(it.item) },
-  { k: 'i2i', ic: '🖼', n: '이미지 투 이미지', d: '이 이미지를 바탕으로 다시 생성', run: it => { setI2I(it.blob); setMode('main'); toast('메인 탭의 i2i 로 넣었습니다'); } },
-  { k: 'inpaint', ic: '🖌', n: '인페인팅', d: '칠한 부분만 다시 그리기', run: async it => { setI2I(it.blob); setMode('main'); await openMaskEditor(); } },
+  { k: 'i2i', ic: '🖼', n: '이미지 투 이미지', d: '이 이미지를 바탕으로 다시 생성', run: it => { setI2I(it.blob, it.meta, true); setMode('main'); toast('메인 탭의 i2i 로 넣었습니다'); } },
+  { k: 'edit', ic: '✏', n: '편집', d: '그림판에서 색칠·지우기·그림 넣기·캔버스 늘리기 뒤 바탕 그림으로', run: async it => { setMode('main'); await cvEditImage(it.blob, it.meta); } },
+  { k: 'inpaint', ic: '🖌', n: '인페인팅', d: '칠한 부분만 다시 그리기 (그림판 마스크 모드)', run: async it => { setMode('main'); await cvInpaintItem(it.blob, it.meta); } },
   { k: 'mosaic', ic: '▦', n: '모자이크 / 검열', d: '부위를 골라 모자이크·블러 처리', run: it => openMosaicTool(it.blob) },
   { k: 'meta', ic: '🧹', n: '메타데이터 제거', d: 'EXIF·숨은 정보를 지워 저장', run: () => openExifTool() },
 ];
