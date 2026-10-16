@@ -675,6 +675,7 @@ function openTagSearch(initial) {
       }
     };
     const run = () => {
+      if (!list.isConnected) return;   // 이 창이 닫힌 뒤 늦게 온 호출(입력 지연 타이머 등)은 그린 곳이 없다
       let rows;
       if (grp && TAGDB.groups && TAGDB.groups[grp]) {
         // 그룹 안에서만 (검색어가 있으면 그 안에서 다시 거름)
@@ -721,8 +722,11 @@ function openTagSearch(initial) {
     if (!TAGDB.rows) {
       loadTagDb();
       body.querySelector('#tsN').textContent = '사전 읽는 중…';
-      // 다 읽히면 한 번 더 그린다. 창이 이미 닫혔으면 false 를 돌려 목록에서 빠진다.
-      (TAGDB.waiters = TAGDB.waiters || []).push(() => body.isConnected && (run(), true));
+      /* 다 읽히면 한 번 더 그린다. 창이 이미 닫혔으면 false 를 돌려 목록에서 빠진다.
+         '창이 열려 있나' 는 이 창의 목록 칸(list)으로 본다 — 창 틀(body)은 모든 창이 같이 써서
+         닫힌 뒤에도 늘 붙어 있다. 예전엔 body 로 봐서, 사전을 읽는 동안 창을 닫고 다른 창을 열면
+         사라진 칸에 글을 쓰려다 오류가 났다(12.10 단추 전부 누르기 시험에서 찾음). */
+      (TAGDB.waiters = TAGDB.waiters || []).push(() => list.isConnected && (run(), true));
     }
   }, true);
 }

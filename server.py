@@ -51,7 +51,7 @@ VERSION = 17
 # 같은 PC 의 다른 프로그램은 127.0.0.1 에 닿을 수는 있어도 이 값은 모른다.
 SESSION_KEY = secrets.token_urlsafe(24)
 
-RELEASE = "12.9"   # 배포 버전. GitHub 릴리스 태그 "v12.9" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
+RELEASE = "12.10"   # 배포 버전. GitHub 릴리스 태그 "v12.10" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
 # 이 앱이 배포되는 저장소. 비워 두면 ⬆ 업데이트 버튼이 아예 안 뜬다 —
 # 사용자가 ⚙설정에 직접 타이핑해 넣기 전까지는 새 버전이 나온 줄도 모른다.
 # 실제로 그 때문에 옛 버전을 계속 쓰시는 분들이 있었다. 기본값을 박아 둔다.
@@ -744,6 +744,8 @@ def _dan_get(path_q, ttl=600):
 KNOWN_MODELS = {
     "nai-diffusion-5-full", "nai-diffusion-5-curated",
     "nai-diffusion-5-full-inpainting", "nai-diffusion-5-curated-inpainting",
+    # V5 Full 생성 모드 「절약」(Medium Effort) — 2026-10 빌드 45680b6
+    "nai-diffusion-5-full-medium", "nai-diffusion-5-full-medium-inpainting",
     "nai-diffusion-4-5-full", "nai-diffusion-4-5-curated",
     "nai-diffusion-4-5-full-inpainting", "nai-diffusion-4-5-curated-inpainting",
     "nai-diffusion-4-full", "nai-diffusion-4-curated-preview",
@@ -776,6 +778,7 @@ CAPS_KEYS = ["vibetransfer", "characterReferences", "noiseSchedule", "cfgDelay",
 # 모델별 능력(위 순서). app.js 의 CAPS 표가 이것과 맞아야 한다.
 EXPECT_CAPS = {
     "nai-diffusion-5-full":            "0 0 0 0 1 1 32 0 1 1 1 1 1 0 1",
+    "nai-diffusion-5-full-medium":     "0 0 0 0 0 1 32 0 1 1 1 1 1 0 1",   # V5 Full 에서 cfgRescale 만 끈다
     "nai-diffusion-5-curated":         "0 0 0 0 1 1 32 0 1 1 1 1 1 0 1",
     "nai-diffusion-4-5-full":          "1 1 1 1 1 0 6 0 0 1 0 1 0 1 1",
     "nai-diffusion-4-5-curated":       "1 1 1 1 1 0 6 0 0 1 0 1 0 1 1",
@@ -784,9 +787,18 @@ EXPECT_CAPS = {
     "nai-diffusion-3":                 "1 0 1 1 1 0 0 0 0 0 0 0 0 0 0",
     "nai-diffusion-furry-3":           "1 0 1 1 1 0 0 0 0 0 0 0 0 0 0",
 }
+# 「절약」 모드가 고정하는 값 — app.js MODELS['nai-diffusion-5-full-medium'].fixed 와 같아야 한다
+EXPECT_FIXED = {"nai-diffusion-5-full-medium": {"steps": "14", "sampler": "k_euler_ancestral", "ucPresetId": "heavy"}}
+# 디렉터 툴(augment-image) 묶음. 2026-10 빌드부터 NAI 는 이 묶음을 따로 둔다(new Set([...])).
+# 업스케일은 이 묶음이 아니라 따로 부르는 주소(UpscaleImage)라 위 EXPECT_ENDPOINTS 가 지켜본다.
 EXPECT_TOOLS = {"bg-removal", "colorize", "declutter", "declutter-keep-bubbles", "emotion", "lineart",
-                "pixel-snap", "sketch", "upscale"}
-EXPECT_SAMPLERS = {"ddim_v3", "k_dpm_2", "k_dpm_2_ancestral", "k_dpm_adaptive", "k_dpm_fast", "k_dpmpp_2m",
+                "pixel-snap", "sketch"}
+# 요금식 (checkStableDiffusionPrice) — app.js anlasEstimate 가 같은 상수를 쓴다. 바뀌면 예상 비용이 틀린다.
+EXPECT_PRICE = [(r"2951823174884865e-21\*\w+\+5753298233447344e-22\*\w+\*\w+\*\w+", "요금식 상수(넓이·스텝)"),
+                (r"return 1/1\.06521739", "「절약」 요금 배율 1/1.06521739")]
+# plms·ddim·k_euler 는 10-10 빌드(b0f9d00)에도 이 열거형 맨 앞에 있었다. 12.9 까지의 검사식이 k_euler_ancestral 부터 읽어 못 봤다.
+EXPECT_SAMPLERS = {"plms", "ddim", "k_euler",
+                   "ddim_v3", "k_dpm_2", "k_dpm_2_ancestral", "k_dpm_adaptive", "k_dpm_fast", "k_dpmpp_2m",
                    "k_dpmpp_2m_sde", "k_dpmpp_2s_ancestral", "k_dpmpp_3m_sde", "k_dpmpp_sde",
                    "k_euler_ancestral", "k_lms", "nai_smea", "nai_smea_dyn"}
 EXPECT_SCHEDULES = {"exponential", "karras", "native", "polyexponential"}
@@ -808,14 +820,36 @@ def nai_spec_drift(js):
                                                host.get(have[0], have[0]), have[1]))
     # 2) 모델 능력표
     i = js.find("controlnet:!0,vibetransfer:!1,scaleMax:25")
-    body = js[js.rfind("function", 0, i): i + 14000] if i >= 0 else ""
-    caps = {}
-    for m in re.finditer(r'((?:case"[^"]+":)+)return(\{[^}]*\})', body):
-        c = dict(re.findall(r"(\w+):(!0|!1|[\d.]+|1/0)", m.group(2)))
+    # 능력표 함수 끝(다음 function)까지만 본다 — 뒤에 오는 다른 함수의 case 를 능력표로 읽지 않게
+    end = js.find("function", i) if i >= 0 else -1
+    body = js[js.rfind("function", 0, i): (end if end > i else i + 30000)] if i >= 0 else ""
+    caps, spread, fixed = {}, {}, {}
+    for m in re.finditer(r'((?:case"[^"]+":)+)return(\{[^}]*\}?)', body):
+        obj = m.group(2)
+        c = dict(re.findall(r"(\w+):(!0|!1|[\d.]+|1/0)", obj))
+        sp = re.search(r'\.\.\.\w+\("([^"]+)"\)', obj)        # 2026-10: 「절약」은 {...V5Full 능력, cfgRescale:!1} 꼴
+        fx = re.search(r'fixedSettings:\{([^}]*)', obj)
         for lab in re.findall(r'case"([^"]+)":', m.group(1)):
             caps[lab] = c
+            if sp:
+                spread[lab] = sp.group(1)
+            if fx:
+                fixed[lab] = {k: v.strip('"') for k, v in re.findall(r'(\w+):("[^"]*"|[\w.]+)', fx.group(1))}
+    for lab, base in spread.items():                         # 물려받은 능력 위에 바뀐 것만 덮는다
+        if base in caps:
+            merged = dict(caps[base])
+            merged.update({k: v for k, v in caps[lab].items() if k not in ("steps",)})
+            caps[lab] = merged
     if not caps:
         out.append("모델 능력표를 번들에서 못 찾음")
+    for model, want in EXPECT_FIXED.items():
+        have = fixed.get(model)
+        if caps and not have:
+            out.append("%s 고정값(fixedSettings)을 번들에서 못 찾음" % model.replace("nai-diffusion-", "V"))
+        elif have:
+            for k, w in want.items():
+                if have.get(k) != w:
+                    out.append("%s 고정값 %s: %s → %s" % (model.replace("nai-diffusion-", "V"), k, w, have.get(k, "없음")))
     for model, want in EXPECT_CAPS.items():
         c = caps.get(model)
         if caps and not c:
@@ -829,18 +863,38 @@ def nai_spec_drift(js):
             if v != w:
                 out.append("%s %s: %s → %s" % (model.replace("nai-diffusion-", "V"), key, w, v))
     # 3) 열거형 (디렉터 툴 · 샘플러 · 노이즈 스케줄)
-    for label, anchor, want in (("디렉터 툴", r'e\.bgRemoval="bg-removal"(?:,e\.\w+="[^"]+")*', EXPECT_TOOLS),
-                                ("샘플러", r'e\.kEulerAncestral="k_euler_ancestral"(?:,e\.\w+="[^"]+")*', EXPECT_SAMPLERS),
-                                ("노이즈 스케줄", r'(?:e\.\w+="[^"]+",)*e\.polyexponential="polyexponential"', EXPECT_SCHEDULES)):
-        m = re.search(anchor, js)
-        if not m:
+    #    변수 이름(e. · ee. · et. …)은 빌드마다 바뀐다 — 이름에 기대지 않고 '값 하나가 든 목록 전체' 를 찾는다.
+    #    (12.9 감시기는 'e.' 에 기대서 10월 빌드에서 목록을 못 찾았다)
+    def enum_values(member):
+        for m in re.finditer(r'(?:\(\w+=\{\}\)|\w+)\.\w+="[^"]+"(?:,\w+\.\w+="[^"]+")*', js):
+            vals = re.findall(r'="([^"]+)"', m.group(0))
+            if member in vals:
+                return set(vals)
+        return None
+
+    def tool_set():
+        # 2026-10 빌드: 디렉터 툴만 모은 new Set([...]). 없으면(옛 빌드) 열거형에서 bg-removal 부터 뒤를 쓴다
+        for m in re.finditer(r'new Set\(\[("[^"\]]+"(?:,"[^"\]]+")*)\]\)', js):
+            vals = re.findall(r'"([^"]+)"', m.group(1))
+            if "bg-removal" in vals and "pixel-snap" in vals and "text2image" not in vals:
+                return set(vals)
+        m = re.search(r'\w+\.bgRemoval="bg-removal"(?:,\w+\.\w+="[^"]+")*', js)
+        return (set(re.findall(r'="([^"]+)"', m.group(0))) - {"upscale"}) if m else None
+
+    for label, have, want in (("디렉터 툴", tool_set(), EXPECT_TOOLS),
+                              ("샘플러", enum_values("k_euler_ancestral"), EXPECT_SAMPLERS),
+                              ("노이즈 스케줄", enum_values("polyexponential"), EXPECT_SCHEDULES)):
+        if not have:
             out.append("%s 목록을 번들에서 못 찾음" % label)
             continue
-        have = set(re.findall(r'="([^"]+)"', m.group(0)))
         if have - want:
             out.append("새 %s: %s" % (label, ", ".join(sorted(have - want))))
         if want - have:
             out.append("없어진 %s: %s" % (label, ", ".join(sorted(want - have))))
+    # 4) 요금식 — 상수가 바뀌면 앱의 예상 비용(◈)이 틀린다
+    for rx, label in EXPECT_PRICE:
+        if not re.search(rx, js):
+            out.append("%s 를 번들에서 못 찾음 (요금식이 바뀌었을 수 있음)" % label)
     return out
 
 
@@ -848,7 +902,12 @@ def nai_model_watch(max_age=86400):
     """하루에 한 번 novelai.net 을 보고 앱이 모르는 모델 id 와 사양 변화를 찾는다.
 
     받는 건 공개된 웹앱 스크립트뿐이고, 로그인도 토큰도 쓰지 않는다.
-    실패하면 조용히 넘어간다 — 이것 때문에 점검이 시끄러워지면 안 된다."""
+    실패하면 그 까닭을 _nai_watch["err"] 에 남겨 🩺 점검에 경고로 띄운다.
+    (12.9 는 실패를 조용히 넘겨, 10월에 NAI 가 사이트 구조를 바꾼 뒤로 감시가 멈춘 것을 아무도 몰랐다)
+
+    2026-10 부터 NAI 는 Next.js 새 빌드 방식이다: pages/_app-*.js 한 개가 없어지고 청크 수십 개로 쪼개졌다.
+    그래서 페이지가 처음에 부르는 청크를 차례로 받다가, 사양 비교에 필요한 표식을 다 찾으면 멈춘다
+    (10월 빌드 기준 78개 중 2개에 다 들어 있다. 전부 받아도 10MB 남짓)."""
     now = time.time()
     if now - _nai_watch["t"] < max_age:
         return _nai_watch["new"]
@@ -856,15 +915,42 @@ def nai_model_watch(max_age=86400):
     try:
         req = urllib.request.Request("https://novelai.net/image", headers={"User-Agent": UA})
         with urllib.request.urlopen(req, timeout=20) as r:
-            html = r.read(400000).decode("utf-8", "replace")
+            html = r.read(2 * 1024 * 1024).decode("utf-8", "replace")
         b = re.search(r'"buildId":"([^"]+)"', html)
-        _nai_watch["build"] = b.group(1) if b else ""
-        m = re.search(r"/_next/static/chunks/pages/_app-[\w]+\.js", html)
-        if not m:
-            raise RuntimeError("번들 주소를 찾지 못했습니다")
-        req = urllib.request.Request("https://novelai.net" + m.group(0), headers={"User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=40) as r:
-            js = r.read(12 * 1024 * 1024).decode("utf-8", "replace")
+        d = re.search(r'data-dpl-id="([^"]+)"', html)
+        _nai_watch["build"] = (d.group(1) if d else "") or (b.group(1) if b else "")
+        paths = []
+        for p in re.findall(r'(/_next/static/[^"\'?\s]+\.js)', html):
+            if p not in paths:
+                paths.append(p)
+        if not paths:
+            raise RuntimeError("NAI 페이지에서 스크립트 주소를 하나도 찾지 못했습니다 (사이트 구조가 또 바뀐 것 같습니다)")
+        need = [r'get GenerateImage\(\)\{return this\.', r'controlnet:!0,vibetransfer:!1,scaleMax:25',
+                r'"k_euler_ancestral"', r'"polyexponential"', r'"bg-removal"', r'2951823174884865e-21']
+        texts, got, fails = [], set(), 0
+
+        def one(p):
+            try:
+                rq = urllib.request.Request("https://novelai.net" + p, headers={"User-Agent": UA})
+                with urllib.request.urlopen(rq, timeout=40) as rr:
+                    return rr.read(16 * 1024 * 1024).decode("utf-8", "replace")
+            except Exception:
+                return None
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(6) as ex:
+            for k in range(0, len(paths), 6):
+                for t in ex.map(one, paths[k:k + 6]):
+                    if t is None:
+                        fails += 1
+                        continue
+                    texts.append(t)
+                    got |= {n for n in need if re.search(n, t)}
+                if len(got) == len(need):
+                    break
+        js = "\n".join(texts)
+        if len(got) < len(need):
+            raise RuntimeError("NAI 스크립트 %d개를 받았지만 사양 표식 %d개 중 %d개만 찾았습니다%s"
+                               % (len(texts), len(need), len(got), " (받기 실패 %d개)" % fails if fails else ""))
         found = set(re.findall(r"nai-diffusion[a-z0-9.\-]*", js))
         fresh = sorted(x for x in found if x not in KNOWN_MODELS)
         _nai_watch["new"] = fresh
@@ -1291,11 +1377,15 @@ def self_check(deep=False):
     if deep:
         try:
             fresh = nai_model_watch()
+            # 감시 자체가 실패했으면 '없음' 이 아니라 '못 봤음' 이다 — 12.9 는 이걸 안 띄워 감시가 멈춘 줄 몰랐다
+            if _nai_watch.get("err"):
+                checks.append(_chk("NAI 업데이트 감시", False,
+                                   "NAI 사이트를 읽지 못해 새 모델·사양 변화를 확인하지 못했습니다: %s" % _nai_watch["err"], "warn"))
             if fresh:
                 checks.append(_chk("NAI 새 모델", False,
                                    "앱이 모르는 모델이 보입니다: %s — 업데이트를 확인해 보세요" % ", ".join(fresh[:4]),
                                    "warn"))
-            else:
+            elif not _nai_watch.get("err"):
                 checks.append(_chk("NAI 새 모델", True, "없음", "info"))
             # 모델은 그대로여도 주소·능력·도구가 바뀌면 앱이 조용히 고장 난다 (업스케일 404 가 그랬다)
             drift = _nai_watch.get("drift") or []
@@ -1305,10 +1395,10 @@ def self_check(deep=False):
                                    "NAI(%s)가 앱이 기대는 것과 달라졌습니다: %s%s — 업데이트를 확인해 보세요"
                                    % (bld, " · ".join(drift[:4]), " 외 %d건" % (len(drift) - 4) if len(drift) > 4 else ""),
                                    "warn"))
-            elif _nai_watch.get("t"):
+            elif _nai_watch.get("t") and not _nai_watch.get("err"):
                 checks.append(_chk("NAI 사양 변화", True, "없음 (NAI %s)" % bld, "info"))
-        except Exception:
-            pass
+        except Exception as e:
+            checks.append(_chk("NAI 업데이트 감시", False, "점검 중 오류: %s" % str(e)[:120], "warn"))
     # 8) 바깥 연결 (깊은 점검일 때만 — 평소엔 네트워크를 건드리지 않는다)
     if deep:
         for label, host in (("NAI 이미지 서버", "image.novelai.net"), ("깃헙", "api.github.com")):

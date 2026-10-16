@@ -1544,7 +1544,7 @@ function upscaleCost(w, h, isOpus) {
   return px <= 1048576 ? 1 : px <= 1747627 ? 2 : px <= 2446678 ? 3 : 4;
 }
 function upscaleCostLabel(w, h) {
-  const c = upscaleCost(w, h, R.tier === 3);
+  const c = upscaleCost(w, h, !!R.isOpus);   // Opus 판정은 app.js refreshAnlas 한 곳에서만 (tier>=3 && 구독 활성)
   return c == null ? '1024×1024 이하만 가능' : (c === 0 ? 'Opus 무료' : '◈ ' + c);
 }
 function toolUpscale() {   // 2배 고정이라 고를 것이 없다 — 바로 실행 (NAI 웹도 한 번 누르면 바로 돈다)
@@ -1591,7 +1591,7 @@ const EMOTIONS = ['neutral', 'happy', 'sad', 'angry', 'scared', 'surprised', 'ti
 /* tool 은 반드시 인자로 받는다. 12.8 에서 부르는 쪽 루프 변수(key)를 이 함수 안에서 그냥 썼다가
    ReferenceError 가 나서, 디렉터 툴 창에서 어떤 툴을 눌러도 실행 버튼이 안 떴다(배경 제거·채색 전부 먹통). */
 function dtCostLabel(it, tool) {
-  const c = typeof directorToolCost === 'function' ? directorToolCost(it.w, it.h, R.tier === 3, R.opusUsage, tool) : null;
+  const c = typeof directorToolCost === 'function' ? directorToolCost(it.w, it.h, !!R.isOpus, R.opusUsage, tool) : null;
   // 툴은 V5 사용량 한도와 무관하다(NAI 가 V3 기준으로 매김) — 한도를 못 읽었어도 무료는 무료다
   return c == null ? '' : (c === 0 ? 'Opus 무료' : '◈ ' + c + ' 소모');
 }
@@ -1876,8 +1876,11 @@ function modelFromSource(src) {
     45: /\b(4BDE2A90|1229B44F|B9F340FD|F3D95188)\b/i,
     40: /\b(37442FCA|4F49EC75|CA4B7203|79F47848|F6302A9D)\b/i,
   };
+  // V5 Full 「절약」(Medium) — NAI 번들 출처 판별과 같은 표식 (2026-10 빌드: 93F4BD30 · 70AB5786)
+  const MEDIUM_HASH = /\b(93F4BD30|70AB5786)\b/i;
   // V5 를 먼저 본다 — "V4.5" 검사보다 앞서야 한다 (둘 다 걸리는 문자열이 오는 경우가 있다)
-  if (/\bV?5\b/i.test(src) && !/4\.5/.test(src)) return FULL_HASH[5].test(src) ? 'nai-diffusion-5-full' : 'nai-diffusion-5-curated';
+  if (/\bV?5\b/i.test(src) && !/4\.5/.test(src)) return MEDIUM_HASH.test(src) ? 'nai-diffusion-5-full-medium'
+    : FULL_HASH[5].test(src) ? 'nai-diffusion-5-full' : 'nai-diffusion-5-curated';
   if (/4\.5/.test(src)) return FULL_HASH[45].test(src) ? 'nai-diffusion-4-5-full' : 'nai-diffusion-4-5-curated';
   if (/Diffusion V4/i.test(src)) return FULL_HASH[40].test(src) ? 'nai-diffusion-4-full' : 'nai-diffusion-4-curated-preview';
   if (/furry/i.test(src)) return 'nai-diffusion-furry-3';
@@ -2874,7 +2877,11 @@ function stSet(blob, meta) {
   ST.url = blob ? URL.createObjectURL(blob) : null;
   const img = $('#stImg'), em = $('#stEmpty');
   if (!img) return;
-  if (!blob) { img.hidden = true; em.hidden = false; $('#stMeta').textContent = ''; renderSmartTools(); return; }
+  /* 그림이 들어 있을 때만 '빼기 · 다른 그림 · 현재 그림으로' 줄을 보인다.
+     예전엔 「이미지 열기」·「현재 이미지 가져오기」가 빈 화면 안에만 있어서, 그림을 한 번 넣으면
+     그 단추까지 같이 사라져 뺄 방법이 없었다(2026-10). */
+  const bar = $('#stBar'); if (bar) bar.hidden = !blob;
+  if (!blob) { img.hidden = true; img.removeAttribute('src'); em.hidden = false; $('#stMeta').textContent = ''; renderSmartTools(); return; }
   img.src = ST.url; img.hidden = false; em.hidden = true;
   $('#stMeta').textContent = '크기 확인 중…'; renderSmartTools();   // 크기를 모르는 동안은 툴을 잠근다
   const probe = new Image();
@@ -2905,7 +2912,7 @@ function renderSmartTools() {
      예전엔 위에 한 줄(일반 툴 기준 'Opus 무료')만 띄워서, 바로 아래 배경 제거 카드를 누르면
      표시와 달리 65 Anlas 가 나갔다(ST.tool 은 어디서도 정해지지 않는 값이었다). → 카드마다 붙인다. */
   const DT = new Set(DIRECTOR.map(d => d[0]));
-  const costOf = k => (has && ST.w && typeof directorToolCost === 'function') ? directorToolCost(ST.w, ST.h, R.tier === 3, R.opusUsage, k) : null;
+  const costOf = k => (has && ST.w && typeof directorToolCost === 'function') ? directorToolCost(ST.w, ST.h, !!R.isOpus, R.opusUsage, k) : null;
   const fmt = c => c == null ? '' : (c === 0 ? 'Opus 무료' : '◈ ' + c);
   const ce = $('#stCost');
   if (ce) { const g = costOf('lineart'), b = costOf('bg-removal');
@@ -2939,7 +2946,12 @@ function initSmartTools() {
   const f = $('#stFile');
   $('#stOpen').onclick = () => f.click();
   f.onchange = () => { if (f.files[0]) stSet(f.files[0]); f.value = ''; };
-  $('#stFromCur').onclick = () => { const it = curItem(); if (!it) { toast('히스토리에 이미지가 없습니다', 'err'); return; } stSet(it.blob, it.meta); };
+  const fromCur = () => { const it = curItem(); if (!it) { toast('히스토리에 이미지가 없습니다', 'err'); return; } stSet(it.blob, it.meta); };
+  $('#stFromCur').onclick = fromCur;
+  // 그림이 들어 있을 때 보이는 줄 (stSet 참고)
+  if ($('#stClear')) $('#stClear').onclick = () => { stSet(null); toast('스마트 툴에서 그림을 뺐습니다'); };
+  if ($('#stOpen2')) $('#stOpen2').onclick = () => f.click();
+  if ($('#stFromCur2')) $('#stFromCur2').onclick = fromCur;
   drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
   drop.addEventListener('dragleave', () => drop.classList.remove('over'));
   drop.addEventListener('drop', e => {
@@ -3338,11 +3350,14 @@ function seedMushLog() {
   step();
 }
 async function imageStats(blob) {
-  const img = await blobToImage(blob);
+  /* 그림 풀기는 createImageBitmap 이 화면 일과 따로 한다(예전엔 <img> 로 풀어 뽑을 때마다 화면 일을 막았다).
+     줄이기는 예전과 같은 drawImage 로 한다 — 줄이는 방식이 바뀌면 선명도 값이 달라져, 쌓아 둔 '평소' 기록과 비교가 어긋난다. */
+  const img = (typeof createImageBitmap === 'function') ? await createImageBitmap(blob) : await blobToImage(blob);
   const N = 256;                                   // 256px 로 줄여서 계산 (속도)
   const c = document.createElement('canvas'); c.width = N; c.height = N;
   const x = c.getContext('2d', { willReadFrequently: true });
   x.drawImage(img, 0, 0, N, N);
+  if (img.close) img.close();
   const d = x.getImageData(0, 0, N, N).data;
   const g = new Float32Array(N * N);
   let sum = 0;
