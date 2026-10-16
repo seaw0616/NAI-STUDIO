@@ -352,6 +352,12 @@ select.style-sel.sm { width: auto; max-width: 180px; padding: 3px 24px 3px 8px; 
 .vempty-ico { font-size: 44px; color: var(--acc); opacity: .5; }
 /* 세로/가로 어떤 비율이든 뷰어 영역 안에 딱 맞게 (넘쳐서 잘리지 않도록) */
 #viewerImg { position: absolute; inset: 8px; width: calc(100% - 16px); height: calc(100% - 16px); object-fit: contain; display: block; }
+/* 투명 부분 보이기 (NAI «Transparency Background») — 큰 그림은 그림이 그려진 자리에만(#viewerBg, fitViewerBg), 나머지 그림은 그림 뒤에 */
+#viewerBg { position: absolute; background: var(--tbg, transparent); pointer-events: none; }
+.hgrid .hitem img, .img-zoom img, .st-drop img { background: var(--tbg, transparent); }
+/* 결과 변형 단추 — NAI 처럼 그림 아래 가운데 */
+.varbar { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 4; display: flex; gap: 6px; padding: 5px; border-radius: 10px;
+  background: color-mix(in srgb, var(--bg1) 85%, transparent); border: 1px solid var(--line); }
 .vnav { position: absolute; top: 50%; transform: translateY(-50%); width: 36px; height: 60px; border: none; background: #0007; color: #fff; font-size: 26px; border-radius: 10px; opacity: 0; transition: .2s; }
 .vnav.l { left: 8px; } .vnav.r { right: 8px; }
 #previewImg { position: absolute; inset: 8px; width: calc(100% - 16px); height: calc(100% - 16px); object-fit: contain; z-index: 2; filter: saturate(.96); }

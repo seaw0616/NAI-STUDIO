@@ -1525,8 +1525,43 @@ function ovFromMeta(meta) {
   if (p.negative_prompt != null) ov.uc = p.negative_prompt;
   return ov;
 }
-async function toolEnhance() { const it = curItem(); if (!it) return; const w = snap64(it.w * S.enhScale), h = snap64(it.h * S.enhScale); await doGenerate({ ...ovFromMeta(it.meta), image: it.blob, strength: S.enhStr, noise: S.enhNoise, w, h }, `인핸스 ${S.enhScale}×`).catch(() => {}); }
-async function toolVary() { const it = curItem(); if (!it) return; await doGenerate({ ...ovFromMeta(it.meta), image: it.blob, strength: S.varStr, noise: S.varNoise, w: snap64(it.w), h: snap64(it.h) }, '변형').catch(() => {}); }
+/* 인핸스 배율 목록 — NAI 인핸스 창(빌드 78a367e)과 같다:
+   832×1216·1216×832 는 [1.5, 1], 그 밖은 [2, 1.5, 1] 가운데 넓이×배율² ≤ 3145728 이고 가로·세로×배율이 64 의 배수인 것.
+   V5(maxEnhance)는 넓이가 2516582.4 미만이면 맨 앞에 «Max»(같은 크기 + upscaled_enhance). NAI 는 처음에 목록의 첫째를 고른다. */
+function enhanceOptions(it, model) {
+  const w = it.w | 0, h = it.h | 0;
+  let opts = ((w === 832 && h === 1216) || (w === 1216 && h === 832)) ? [1.5, 1]
+    : [2, 1.5, 1].filter(e => w * e * h * e <= SD_MAX_AREA && (w * e) % 64 === 0 && (h * e) % 64 === 0);
+  if (capsOf(model).maxEnhance && w * h > 0 && w * h < MAX_ENHANCE_AREA) opts = ['max', ...opts];
+  return opts;
+}
+const enhLabel = v => (v === 'max' ? 'Max' : v + '×');
+/* NAI generateEnhance 그대로: Max 면 같은 크기 + upscaled_enhance, 아니면 floor(가로×배율)·floor(세로×배율)(뒤에서 64 배수로),
+   시드는 새로 뽑고 장수 1, V4.5·V5 는 Max 가 아니면 프롬프트에 «, -2::upscaled, blurry::,» 를 text: 앞(없으면 끝)에 넣는다(applyEnhancePromptAdd).
+   예전엔 배율 1·1.5 만 있었고, 시드는 설정값(고정이면 같은 시드)이었고, 프롬프트 덧붙이기가 없었다. */
+async function toolEnhance() {
+  const it = curItem(); if (!it) return;
+  const ov = ovFromMeta(it.meta);
+  const opts = enhanceOptions(it, ov.model);
+  if (!opts.length) { toast(`이 그림 크기(${it.w}×${it.h})로는 쓸 수 있는 인핸스 배율이 없습니다 (NAI 도 고를 수 없게 막습니다)`, 'err'); return; }
+  const want = S.enhScale === 'max' ? 'max' : S.enhScale === 'auto' ? opts[0] : +S.enhScale;
+  const sc = opts.includes(want) ? want : opts[0];
+  if (S.enhScale !== 'auto' && sc !== want) toast(`이 그림에서는 ${enhLabel(want)} 배율을 쓸 수 없어 ${enhLabel(sc)} 로 합니다 (NAI 와 같은 배율 목록)`);
+  const max = sc === 'max';
+  const w = max ? it.w : Math.floor(it.w * sc), h = max ? it.h : Math.floor(it.h * sc);
+  let prompt = ov.prompt;
+  if (!max && capsOf(ov.model).enhAdd && prompt != null && !prompt.includes('upscaled, blurry')) {
+    const add = ', -2::upscaled, blurry::,', mm = prompt.match(/(?:^|\s|[,.:[\]{}、。])text:(?!:)/i);
+    prompt = mm ? prompt.slice(0, mm.index) + add + prompt.slice(mm.index) : prompt + add;
+  }
+  await doGenerate({ ...ov, prompt, image: it.blob, strength: S.enhStr, noise: S.enhNoise, w, h, seed: randSeed(), upscaledEnhance: max }, `인핸스 ${enhLabel(sc)}`).catch(() => {});
+}
+/* 변형 — NAI generateVariations: 장수 min(3, 이 크기 상한) · 새 시드 · 원본 크기. (세기·노이즈 기본 0.8·0.1 은 NAI 고정값과 같다) */
+async function toolVary() {
+  const it = curItem(); if (!it) return;
+  const w = snap64(it.w), h = snap64(it.h);
+  await doGenerate({ ...ovFromMeta(it.meta), image: it.blob, strength: S.varStr, noise: S.varNoise, w, h, n: Math.min(3, batchMax(w, h)), seed: randSeed() }, '변형').catch(() => {});
+}
 /* ── 업스케일 (NAI 현재 방식) ────────────────────────────────────────────
    NAI 가 업스케일을 바꿨다. 예전: api.novelai.net/ai/upscale {image,width,height,scale:2|4}
    지금: image.novelai.net/ai/upscale {image, model:'nai-diffusion-5-curated', declared_blur_sigma:0}
@@ -1588,6 +1623,8 @@ const DIRECTOR = [
 const EMOTIONS = ['neutral', 'happy', 'sad', 'angry', 'scared', 'surprised', 'tired', 'excited',
   'nervous', 'thinking', 'confused', 'shy', 'disgusted', 'smug', 'bored', 'laughing', 'irritated',
   'aroused', 'embarrassed', 'worried', 'love', 'determined', 'hurt', 'playful'];
+/* 감정 세기 0~5 의 이름 — NAI imageTools.emotionStrengths (빌드 78a367e) 를 우리말로 (괄호는 NAI 원문) */
+const EMO_STRENGTH = ['보통 (Normal)', '조금 약하게 (Slightly Weak)', '약하게 (Weak)', '더 약하게 (Even Weaker)', '아주 약하게 (Very Weak)', '가장 약하게 (Weakest)'];
 /* tool 은 반드시 인자로 받는다. 12.8 에서 부르는 쪽 루프 변수(key)를 이 함수 안에서 그냥 썼다가
    ReferenceError 가 나서, 디렉터 툴 창에서 어떤 툴을 눌러도 실행 버튼이 안 떴다(배경 제거·채색 전부 먹통). */
 function dtCostLabel(it, tool) {
@@ -1608,9 +1645,9 @@ function openDirector() {
         const needPrompt = key === 'colorize' || key === 'emotion';
         opts.innerHTML = `${key === 'emotion' ? `<label class="fld">감정<select id="dtEmo">${EMOTIONS.map(e => `<option>${e}</option>`).join('')}</select></label>` : ''}
           ${needPrompt ? `<label class="fld">추가 프롬프트 (선택)<input type="text" id="dtPrompt" placeholder="예: blue hair, sunset"></label>
-          <label class="rng">강도 (defry 0=강함 … 5=약함) <output id="dtDefryV">0</output><input type="range" id="dtDefry" min="0" max="5" step="1" value="0"></label>` : ''}
+          <label class="rng">${key === 'emotion' ? '감정 세기 (Emotion Strength)' : 'Defry (0 = 강함 … 5 = 약함)'} <output id="dtDefryV">${key === 'emotion' ? EMO_STRENGTH[0] : '0'}</output><input type="range" id="dtDefry" min="0" max="5" step="1" value="0"></label>` : ''}
           <div class="row"><button class="btn primary" id="dtRun">실행</button><span class="hint">${dtCostLabel(it, key)}</span></div>`;
-        const dr = opts.querySelector('#dtDefry'); if (dr) dr.oninput = () => opts.querySelector('#dtDefryV').textContent = dr.value;
+        const dr = opts.querySelector('#dtDefry'); if (dr) dr.oninput = () => opts.querySelector('#dtDefryV').textContent = key === 'emotion' ? EMO_STRENGTH[+dr.value] : dr.value;
         opts.querySelector('#dtRun').onclick = async () => {
           const req = { req_type: key, width: it.w, height: it.h, image: await blobToB64(it.blob) };
           if (needPrompt) { req.defry = +opts.querySelector('#dtDefry').value; const pr = opts.querySelector('#dtPrompt').value.trim(); req.prompt = key === 'emotion' ? `${opts.querySelector('#dtEmo').value};;${pr}` : pr; }
@@ -1666,17 +1703,23 @@ async function runDirector(req, label, srcItem) {
        다른 이미지를 올려두면 엉뚱한 이미지의 프롬프트·씬·파일명이 붙었다. */
     const it = srcItem || curItem();
     let last = null;
-    /* 배경 제거는 세 장이 온다. 번들 원문 {"bg-removal":["masked","generated","blend"]} 대로
-       ZIP 안 순서가 곧 마스크·생성·혼합이다. 예전엔 셋 다 같은 라벨이라 어느 게 무엇인지 알 수 없었다. */
-    const SUB = { 'bg-removal': ['마스크(Masked)', '생성(Generated)', '혼합(Blend)'] };
-    const subs = SUB[req.req_type];
+    /* 배경 제거는 세 장이 온다. NAI 번들(빌드 78a367e) toolVariationNames {"bg-removal":["masked","generated","blend"]} 대로
+       ZIP 안 순서가 곧 마스크·생성·혼합이다. NAI 는 이 세 장을 «그림 한 장의 세 변형»으로 넣고, 지금 고른 변형 번호
+       (새로 뽑은 뒤면 0 = Masked)로 보여 주며 아래 단추로 바꿔 본다. 12.11 까지는 세 장을 따로 넣고 마지막(Blend)을
+       화면·스마트 툴에 올려서, 인물 가장자리가 섞인 Blend 가 먼저 보였다. */
+    const VAR_TAGS = { 'bg-removal': ['masked', 'generated', 'blend'] };
+    const tags = VAR_TAGS[req.req_type];
     const imgs = await respImages(res);
-    for (let i = 0; i < imgs.length; i++) {
-      const nm = (subs && subs[i]) ? `${label} · ${subs[i]}` : label;
-      const item = await addToHistory(imgs[i], (it && it.meta) || { parameters: {} }, nm);
-      last = item; if (S.autoSaveOn) autoSave(item);
+    if (tags && imgs.length > 1) {
+      const vars = imgs.map((b, i) => ({ blob: b, tag: tags[i] || String(i) }));
+      last = await addToHistory(vars[0].blob, (it && it.meta) || { parameters: {} }, label, { vars });
+      if (S.autoSaveOn) autoSave(last);
+    } else {
+      for (let i = 0; i < imgs.length; i++) {
+        const item = await addToHistory(imgs[i], (it && it.meta) || { parameters: {} }, label);
+        last = item; if (S.autoSaveOn) autoSave(item);
+      }
     }
-    if (subs && imgs.length > 1) toast(`${imgs.length}장이 들어왔습니다 — ${subs.slice(0, imgs.length).join(' · ')}`);
     // 스마트 툴 탭에서 돌렸으면 결과를 그 화면에 바로 올려준다 (연달아 툴을 걸 수 있게).
     // 예전엔 히스토리에만 들어가서, 방금 만든 결과가 아니라 원본에 다음 툴이 걸렸다.
     if (last && S.mode === 'tools' && typeof stSet === 'function') stSet(last.blob, last.meta);
@@ -2311,8 +2354,10 @@ function openHealth() {
       }
     };
 
+    /* 이 창의 칸들은 기다리는 사이에 창이 닫히거나 바뀌면 없어진다 — 없으면 쓰지 않는다 (12.12 단추 전부 누르기 시험에서 두 번 찾음) */
+    const setTxt = (sel, t) => { const e = $$$(sel); if (e) e.textContent = t; };
     const drawChecks = () => {
-      const el = $$$('#hcList'); el.innerHTML = '';
+      const el = $$$('#hcList'); if (!el) return; el.innerHTML = '';
       /* 소스가 바뀐 채로 돌고 있으면 다시 켜는 게 유일한 해결이다 — 버튼을 눈에 띄게. */
       const stale = ((snap && snap.checks) || []).some(c => !c.ok && c.name === '앱 파일');
       const rb = $$$('#hcRestart'), why = $$$('#hcRestartWhy');
@@ -2324,36 +2369,39 @@ function openHealth() {
         d.innerHTML = `<span class="nm">${esc(c.name)}</span><span class="${cls}">${c.ok ? '정상' : (c.level === 'err' ? '문제' : '확인')}</span><span class="dt">${esc(c.detail || '')}</span>`;
         el.appendChild(d);
       }
-      $$$('#hcWhen').textContent = snap && snap.t ? '마지막 점검 ' + new Date(snap.t).toLocaleTimeString() : '';
+      setTxt('#hcWhen', snap && snap.t ? '마지막 점검 ' + new Date(snap.t).toLocaleTimeString() : '');
     };
     const drawErrs = () => {
-      const el = $$$('#hcErrs'); el.innerHTML = '';
-      $$$('#hcN').textContent = errs.length ? `— ${errs.length}건` : '— 없음 (좋은 신호입니다)';
+      const el = $$$('#hcErrs'); if (!el) return; el.innerHTML = '';
+      setTxt('#hcN', errs.length ? `— ${errs.length}건` : '— 없음 (좋은 신호입니다)');
       for (const e of errs.slice().reverse()) {
         const d = document.createElement('div'); d.className = 'e';
         d.innerHTML = `<span class="when">${new Date(e.t || 0).toLocaleString()}</span>[${esc(e.kind || '?')}] ${esc(e.msg || '')}${e.where ? ' <span class="when">@' + esc(e.where) + '</span>' : ''}`;
         el.appendChild(d);
       }
     };
+    /* 불러오는 사이에 창을 닫으면(또는 다른 창으로 바뀌면) 칸이 없다 — 그때는 그리지 않고 끝낸다.
+       예전엔 닫힌 창의 칸에 글을 쓰다 오류가 났다(12.12 단추 전부 누르기 시험에서 찾음). */
     const load = async () => {
       try {
         snap = await (await apiFetch('/selfcheck')).json();
         errs = ((await (await apiFetch('/errors?limit=200')).json()) || {}).items || [];
+        if (!$$$('#hcHint')) return;
         $$$('#hcHint').textContent = '';
         drawChecks(); drawErrs();
-      } catch (e) { $$$('#hcHint').textContent = '불러오지 못했습니다: ' + e.message; }
+      } catch (e) { const h = $$$('#hcHint'); if (h) h.textContent = '불러오지 못했습니다: ' + e.message; }
     };
     load();
 
     $$$('#hcNow').onclick = async () => {
-      $$$('#hcWhen').textContent = '점검 중…';
+      setTxt('#hcWhen', '점검 중…');
       try { snap = await (await apiFetch('/selfcheck', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json(); drawChecks(); }
-      catch (e) { $$$('#hcWhen').textContent = '실패: ' + e.message; }
+      catch (e) { setTxt('#hcWhen', '실패: ' + e.message); }
     };
     $$$('#hcClear').onclick = async () => {
       if (!confirm('오류 기록을 모두 지울까요?')) return;
       try { await apiFetch('/errors?clear=1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); errs = []; drawErrs(); }
-      catch (e) { $$$('#hcSt').textContent = '실패: ' + e.message; }
+      catch (e) { setTxt('#hcSt', '실패: ' + e.message); }
     };
 
     const buildReport = () => {
@@ -2513,9 +2561,14 @@ function openBackup() {
           for (const h of items) {
             const fn = 'history/' + (h.name || ('img_' + (i + 1) + '.png'));
             files.push({ name: fn, blob: h.blob });
+            /* 결과 변형(배경 제거의 Masked·Generated·Blend)이 있으면 변형마다 파일을 따로 담는다 — 안 담으면 복원 때 한 장만 남는다 */
+            let vars = null;
+            if (Array.isArray(h.vars) && h.vars.length) {
+              vars = h.vars.map((v, k) => { const vf = fn.replace(/\.png$/i, '') + '_' + (v.tag || k) + '.png'; files.push({ name: vf, blob: v.blob }); return { file: vf, tag: v.tag || String(k) }; });
+            }
             /* judge 를 함께 담는다. 채점은 한 장에 Gemini 호출 1회 = 요금 1회다.
                여기서 빠뜨리면 복원한 사람은 돈을 다시 내고 채점해야 한다. */
-            idx.push({ file: fn, meta: h.meta, seed: h.seed, model: h.model, w: h.w, h: h.h, fav: !!h.fav, t: h.t, label: h.label, sceneId: h.sceneId || null, name: h.name, judge: h.judge || null });
+            idx.push({ file: fn, meta: h.meta, seed: h.seed, model: h.model, w: h.w, h: h.h, fav: !!h.fav, t: h.t, label: h.label, sceneId: h.sceneId || null, name: h.name, judge: h.judge || null, vars });
             i++; if (i % 20 === 0) st.textContent = `이미지 담는 중… ${i}/${items.length}`;
           }
           files.push({ name: 'history/index.json', u8: new TextEncoder().encode(JSON.stringify(idx)) });
@@ -2640,8 +2693,13 @@ function openBackup() {
             const rec = { blob, meta: it.meta || {}, seed: it.seed, model: it.model, w: it.w, h: it.h, fav: !!it.fav, t: it.t || Date.now(), name: it.name || it.file.split('/').pop(), label: it.label || '', sceneId: it.sceneId || null };
             // 옛 백업엔 judge 가 없다 — 있을 때만 붙인다 (없는 채로 두면 그냥 미채점 이미지다)
             if (it.judge && typeof it.judge === 'object') rec.judge = it.judge;
+            // 결과 변형(12.12 부터 담음) — 파일이 다 있을 때만 되살린다
+            if (Array.isArray(it.vars) && it.vars.length && it.vars.every(v => histFiles[v.file])) {
+              rec.vars = it.vars.map(v => ({ blob: new Blob([histFiles[v.file]], { type: 'image/png' }), tag: v.tag }));
+              rec.blob = rec.vars[0].blob;
+            }
             try { rec.id = await histPut({ ...rec }); } catch (e) { failed++; }
-            rec.url = URL.createObjectURL(blob); R.hist.push(rec); n++;
+            rec.url = URL.createObjectURL(rec.blob); R.hist.push(rec); n++;
             if (n % 20 === 0) rst.textContent = `이미지 복원 중… ${n}/${histIdx.length}`;
           }
           R.hist.sort((a, b) => a.t - b.t); renderHist(); if (R.hist.length) showImage(R.hist.length - 1);

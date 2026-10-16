@@ -93,15 +93,33 @@ const MODELS = {
 const CAPS = {
   /* opusLimit: NAI 번들의 모델 능력 opusUsageLimit 그대로. **V5 만 true** —
      V4.5 는 사용량 제한 자체가 없어 Opus 면 언제나 무료다. */
+  /* 12.12 에서 더한 칸 — NAI 능력표(빌드 78a367e, .qa/nai_caps_78a367e.json) 그대로:
+       dynThr     = dynamicThresholding (디크리스퍼). V3 만 받는다 — 나머지는 NAI 가 false 로 보낸다.
+       enhAdd     = enhancePromptAdd (인핸스 때 «-2::upscaled, blurry::» 넣기). V4.5·V5.
+       maxEnhance = 인핸스 배율 «Max». V5 만.
+       autoSmea   = SMEA 자동. V3 만(기본 켜짐).
+       legacyUcOk = v4_0legacyUC (레거시 프롬프트 컨디셔닝 칸). V4 만. */
   50: { vibe: false, charRef: false, noiseSchedule: false, cfgDelay: false, cfgRescale: true,
-        transparency: true, maxChars: 32, freePos: true, autoText: true, text: true, tokens: 1471, tokensCurated: 703, opusLimit: true },
+        transparency: true, maxChars: 32, freePos: true, autoText: true, text: true, tokens: 1471, tokensCurated: 703, opusLimit: true,
+        dynThr: false, enhAdd: true, maxEnhance: true },
   45: { vibe: true, charRef: true, noiseSchedule: true, cfgDelay: true, cfgRescale: true,
-        transparency: false, maxChars: 6, freePos: false, text: true, tokens: 512 },
+        transparency: false, maxChars: 6, freePos: false, text: true, tokens: 512,
+        dynThr: false, enhAdd: true },
   40: { vibe: true, charRef: false, noiseSchedule: true, cfgDelay: true, cfgRescale: true,
-        transparency: false, maxChars: 6, freePos: false, text: true, tokens: 512 },
+        transparency: false, maxChars: 6, freePos: false, text: true, tokens: 512,
+        dynThr: false, legacyUcOk: true },
   30: { vibe: true, charRef: false, noiseSchedule: true, cfgDelay: true, cfgRescale: true,
-        transparency: false, maxChars: 0, freePos: false, tokens: 225 },
+        transparency: false, maxChars: 0, freePos: false, tokens: 225,
+        dynThr: true, autoSmea: true },
 };
+/* NAI 의 요청 한도와 기준 넓이 (빌드 78a367e 모듈 550043):
+   STABLE_DIFFUSION_MAX_SIZE 3145728 · validateParameters(스텝 50 이하·넓이 3145728 이하) ·
+   getAutoSmeaSize(V3) 2166785 · MAX_ENHANCE_AREA_CUTOFF 2516582.4 · checkKnownError(스텝 3·9·27·36·37 + ddim·plms·ddim_v3) */
+const SD_MAX_AREA = 3145728;
+const AUTO_SMEA_AREA = 2166785;
+const MAX_ENHANCE_AREA = 2516582.4;
+const KNOWN_ERR_STEPS = new Set([3, 9, 27, 36, 37]);
+const KNOWN_ERR_SAMPLERS = new Set(['ddim', 'plms', 'ddim_v3']);
 /* 인페인트 모델 ID -> 원본 모델 ID. 인페인트 ID 는 MODELS 의 키가 아니라서
    그걸로 능력치를 물으면 아무것도 못 찾고 V4.5 로 떨어졌다 —
    그 바람에 V5 인페인트에서 바이브·캐릭터 레퍼런스가 그대로 통과했다. */
@@ -153,9 +171,17 @@ function stripFurry(p, m) {   // → { prompt, furry }  (furry: null = 이 모�
 /* 바이브 상한. NAI 문서: "You can apply up to 16 vibes when generating an image."
    많이 붙일수록 생성이 느려지고, 5개째부터는 장당 2 Anlas 씩 더 나간다(V4 이상). */
 const VIBE_MAX = 16;
-/* 한 번에 뽑을 수 있는 장수. NAI 문서: 작은 해상도는 6장까지, 보통·큰 해상도는 4장까지.
+/* 한 번에 뽑을 수 있는 장수 — NAI maxSamplesForSize 표 그대로 (빌드 78a367e):
+   넓이 ≤360448 → 8장 · ≤409600 → 6장 · ≤3145728 → 4장.
+   예전엔 «640×640 이하 6장, 나머지 4장»이라 512×512 같은 작은 크기에서 NAI 보다 2장 적었다.
    상한을 넘겨 보내면 서버가 400 을 준다 — 화면에서 막고 payload 에서도 한 번 더 자른다. */
-const batchMax = (w, h) => ((w || S.w) * (h || S.h) <= 640 * 640 ? 6 : 4);
+const SAMPLE_TABLE = [[3145728, 4], [1572864, 4], [1310720, 4], [524288, 4], [409600, 6], [360448, 8], [262144, 8], [245760, 8]];
+const batchMax = (w, h) => {
+  const r = (w || S.w) * (h || S.h);
+  let n = 0;
+  for (const [a, k] of SAMPLE_TABLE) { if (r <= a) n = k; else break; }
+  return Math.max(1, n);   // 넓이가 한도를 넘으면 NAI 는 0 — 생성 자체는 validate 단계가 막는다
+};
 /* 프롬프트 토큰 한도. V4/4.5 는 512 였지만 V5 는 Curated 703 · Full 1471 로 늘었다. */
 const tokenLimit = m => capsOf(m || S.model).tokens;
 /* 이 샘플러들에는 noise_schedule 을 보내지 않는다 — novelai.net 이 요청에서 지운다.
@@ -229,7 +255,11 @@ const DEFAULTS = {
     { id: 'style', name: '구도 · 스타일 · 기타', hint: '예: upper body, from side, soft lighting, sketch' },
   ],
   strength: 0.7, noise: 0, vibeNormalize: true,
-  enhStr: 0.5, enhNoise: 0.1, enhScale: 1, varStr: 0.8, varNoise: 0.1,
+  /* 인핸스 처음 값은 NAI 인핸스 창과 같게(세기 셋째 단계 0.5·노이즈 0, 배율은 그 그림에서 쓸 수 있는 첫째).
+     12.11 까지는 노이즈 0.1·배율 1× 였다 — 이미 저장된 값은 건드리지 않는다. */
+  enhStr: 0.5, enhNoise: 0, enhScale: 'auto', varStr: 0.8, varNoise: 0.1,
+  /* NAI 설정 «투명 그림의 알파 방식»(imageStraightAlpha, 기본 Straight) · «투명 부분 보이기»(Transparency Background) · V3 SMEA 자동(기본 켬) */
+  alphaMode: 'straight', transpBg: 'checker', autoSmea: true,
   autoCount: 20, autoDelay: 3, autoSaveOn: false, stripOnSave: false,
   chunks: [], deleted: {}, ytQueue: [], ytPos: null, ytSize: 'normal', ytOpen: false, ytVol: 60, ytUsePop: false, ytPopMode: 'tab',
   theme: 'violet', lastDark: 'violet', lastLight: 'light', ov: {}, tagUnderscore: false,
@@ -1081,13 +1111,32 @@ async function blobToB64Max(blob, maxSide) {
   const b = await new Promise(res => c.toBlob(res, 'image/png'));
   return blobToB64(b || blob);
 }
-async function blobToB64Resized(blob, w, h) { // cover-crop
+/* i2i·인페인트 기준 그림. fill 을 주면 투명한 곳을 그 색으로 채운다(없으면 투명 그대로).
+   NAI fillImageBackground(빌드 78a367e)와 같은 손질 두 가지:
+     ① 숨은 메타데이터(stealth_pngcomp)가 든 그림이면 알파 254→255 · 1→0 으로 점을 지운다 (16,777,216 화소 이하일 때)
+     ② V5 가 아닌 모델은 투명한 곳을 흰색으로 채운다
+   크기가 다를 때 NAI 는 늘여 맞추고 우리는 가운데를 기준으로 잘라 맞춘다(마스크도 같은 방식이라 그대로 둔다 — 대조표 A13). */
+async function blobToB64Resized(blob, w, h, fill) { // cover-crop
   const img = await blobToImage(blob);
+  let src = img;
+  if (img.width * img.height <= 0x1000000) {
+    try {
+      const c0 = document.createElement('canvas'); c0.width = img.width; c0.height = img.height;
+      const x0 = c0.getContext('2d', { willReadFrequently: true }); x0.drawImage(img, 0, 0);
+      const d0 = x0.getImageData(0, 0, img.width, img.height);
+      if (stealthDetect(d0) === 'stealth_pngcomp') {
+        const a = d0.data;
+        for (let i = 3; i < a.length; i += 4) { if (a[i] === 254) a[i] = 255; else if (a[i] === 1) a[i] = 0; }
+        x0.putImageData(d0, 0, 0); src = c0;
+      }
+    } catch (e) { logErr('기준 그림 숨은 메타데이터 확인 실패(그대로 보냅니다): ' + e.message); }
+  }
   const c = document.createElement('canvas'); c.width = w; c.height = h;
   const x = c.getContext('2d');
   const r = Math.max(w / img.width, h / img.height);
   const dw = img.width * r, dh = img.height * r;
-  x.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
+  x.drawImage(src, (w - dw) / 2, (h - dh) / 2, dw, dh);
+  if (fill) { x.globalCompositeOperation = 'destination-over'; x.fillStyle = fill; x.fillRect(0, 0, w, h); x.globalCompositeOperation = 'source-over'; }
   return c.toDataURL('image/png').split(',')[1];
 }
 async function blobToB64Letterbox(blob) { // Precise Reference용: 허용 캔버스에 레터박스(검정 여백)
@@ -1323,7 +1372,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.11';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.12';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -1992,7 +2041,10 @@ function buildPayload(ov) {
     chars = chars.slice(0, caps.maxChars);
   }
   const useCoords = !S.aiChoice && chars.some(c => c.x != null);
-  const w = ov.w || S.w, h = ov.h || S.h;
+  /* NAI snapDimensionsToModel: 가로·세로를 모델 최소 단위(모든 모델 64)의 가장 가까운 배수로 맞춘다
+     (closestMultipleNum: 내림·올림 가운데 가까운 쪽, 같으면 올림). 직접 적은 크기·인핸스 배율에서 어긋날 수 있다. */
+  const near64 = v => { const lo = Math.floor(v / 64) * 64, hi = Math.ceil(v / 64) * 64, n = v - lo < hi - v ? lo : hi; return n <= 0 ? 64 : n; };
+  const w = near64(ov.w || S.w), h = near64(ov.h || S.h);
   const p = {
     // NAI 웹이 V4 이상에 보내는 값. 앱은 3 을 보내고 있었다.
     params_version: 4, width: w, height: h,
@@ -2014,6 +2066,11 @@ function buildPayload(ov) {
     })),
     negative_prompt: uc,
   };
+  /* 디크리스퍼는 능력표 dynamicThresholding 이 있는 모델(V3)만 받는다. NAI 요청 클래스는 나머지 모델에서
+     dynamic_thresholding 을 false 로 바꿔 보낸다 — 예전엔 V3 에서 켜 둔 값이 V4.5·V5 요청에도 그대로 실렸다. */
+  if (!caps.dynThr) p.dynamic_thresholding = false;
+  // 인핸스 «Max»(V5) — NAI generateEnhance 가 같은 크기로 보내며 붙이는 표시
+  if (ov.upscaledEnhance) p.upscaled_enhance = true;
   /* NAI 는 능력표 autoText 가 켜진 모델(V5)에서만, v4_prompt 를 만들기 직전에 이걸 돌린다.
      S.autoText 를 false 로 두면 끌 수 있다(설정). */
   /* ov.prompt 가 있어도 막지 않는다. 씬 모드는 '스타일+씬+메인' 을 이어 붙인 **원본** 을 넘기는데,
@@ -2032,18 +2089,35 @@ function buildPayload(ov) {
     /* legacy_uc 는 NAI 웹이 **항상** 보낸다 (기본 false).
        예전 주석은 "보내지 않는다" 였는데 번들을 뜯어보니 사실이 아니었다 —
        v4_negative_prompt.legacy_uc = legacy_uc 로 무조건 실린다. */
-    p.v4_negative_prompt.legacy_uc = !!S.legacyUc;
-    if (S.legacyUc) p.legacy_uc = true;
+    /* 레거시 프롬프트 컨디셔닝 칸은 NAI 능력표 v4_0legacyUC 가 있는 V4 에서만 보인다(legacy-uc 칸 조건).
+       다른 모델에서는 기본값 false 그대로 나간다 — 예전엔 V4 에서 켜 둔 값이 V4.5·V5 에도 실렸다. */
+    const lu = !!S.legacyUc && !!caps.legacyUcOk;
+    p.v4_negative_prompt.legacy_uc = lu;
+    if (lu) p.legacy_uc = true;
     /* V5 가 안 받는 것들. 보내면 거절당하거나 조용히 무시된다 —
        novelai.net 도 요청을 만들 때 능력치를 보고 같은 키들을 지운다. */
     if (!caps.noiseSchedule) delete p.noise_schedule;
     if (!caps.cfgRescale) delete p.cfg_rescale;   // 절약 모드는 CFG Rescale 이 없다 (NAI: cfgRescale||delete cfg_rescale)
     if (!caps.cfgDelay) delete p.skip_cfg_above_sigma;
-    if (caps.transparency && S.transparent) { p.straight_alpha = true; p.tag_hint_transparent_background = true; }
+    /* NAI 는 V5(transparency)면 투명 배경을 켜지 않아도 늘 straight_alpha 를 사용자 설정
+       «투명 그림의 알파 방식»(기본 Straight = true)으로 보낸다. 투명 배경 힌트는 켰을 때만. */
+    if (caps.transparency) {
+      p.straight_alpha = S.alphaMode !== 'premultiplied';
+      if (S.transparent) p.tag_hint_transparent_background = true;
+    }
   } else {
     p.params_version = 1;
-    p.sm = !!S.smea && S.sampler !== 'ddim_v3'; p.sm_dyn = !!S.smea && !!S.smeaDyn && S.sampler !== 'ddim_v3';
-    p.uncond_scale = S.ucStrength;
+    /* SMEA 자동(NAI applyAutoSmea, V3 기본 켬): 넓이가 2166785 이상이면 SMEA 를 켜고, 아니면 SMEA·DYN 을 끈다.
+       그 뒤 NAI 정리 사슬처럼 DYN 만 켜진 것은 끄고, SMEA 를 안 받는 샘플러(ddim_v3)면 둘 다 끈다. */
+    let sm = !!S.smea, dyn = !!S.smea && !!S.smeaDyn;
+    if (caps.autoSmea && S.autoSmea !== false) {
+      if (w * h >= AUTO_SMEA_AREA) sm = true; else { sm = false; dyn = false; }
+    }
+    if (dyn && !sm) dyn = false;
+    if (S.sampler === 'ddim_v3') { sm = false; dyn = false; }
+    p.sm = sm; p.sm_dyn = dyn;
+    // NAI: uncond_scale 0 은 0.00001 로 보낸다 (0 이면 서버가 다르게 다룬다)
+    p.uncond_scale = S.ucStrength === 0 ? 1e-5 : S.ucStrength;
     /* deliberate_euler_ancestral_bug·prefer_brownian 은 여기서 지우지 않는다 —
        NAI 의 정리 사슬에서 그 두 값은 **모델을 가리지 않고** 샘플러만 보고 붙는다.
        V3 에서만 빼면 novelai.net 과 다른 요청이 되어 같은 시드에도 그림이 갈린다. */
@@ -2081,7 +2155,8 @@ async function attachImages(body, ov) {
   const caps = capsOf(baseModel);
   const srcBlob = ov.image || (ov.noRef ? null : R.i2iBlob);
   if (srcBlob) {
-    p.image = await blobToB64Resized(srcBlob, p.width, p.height);
+    /* NAI fillImageBackground: 숨은 메타데이터 점(stealth)을 지우고, 투명한 곳을 V5 는 투명 그대로·나머지 모델은 흰색으로 채워 보낸다. */
+    p.image = await blobToB64Resized(srcBlob, p.width, p.height, caps.transparency ? null : '#ffffff');
     const strength = ov.strength != null ? ov.strength : S.strength;
     p.noise = ov.noise != null ? ov.noise : S.noise;
     if (!ov.image && R.maskCanvas) {
@@ -2093,6 +2168,8 @@ async function attachImages(body, ov) {
       //  · inpaintImg2ImgStrength 는 t2i 포함 모든 요청에 늘 들어간다(실캡처 12/12, 기본 1).
       body.action = 'infill'; body.model = info.inpaint;
       p.mask = maskToB64(p.width, p.height);
+      // NAI applyImg2ImgAdjustments: 그림이 있으면(인페인트 포함) extra_noise_seed 가 비어 있을 때 seed-1 을 넣는다
+      if (p.extra_noise_seed == null) p.extra_noise_seed = Math.max(0, p.seed - 1);
       if (info.ver >= 40) {
         if (strength !== 1) {
           p.inpaintImg2ImgStrength = strength;
@@ -2138,7 +2215,8 @@ async function attachImages(body, ov) {
     p.director_reference_images = prefs.map(v => v.b64);
     p.director_reference_descriptions = prefs.map(v => ({ caption: { base_caption: v.type, char_captions: [] }, legacy_uc: false }));
     p.director_reference_strength_values = prefs.map(v => v.strength);
-    p.director_reference_secondary_strength_values = prefs.map(v => Math.round((1 - v.fidelity) * 100) / 100);
+    // NAI applyCharacterReferenceFields: 1 - fidelity 그대로 (예전엔 소수 둘째 자리에서 반올림해 값이 조금 달랐다)
+    p.director_reference_secondary_strength_values = prefs.map(v => 1 - v.fidelity);
     p.director_reference_information_extracted = prefs.map(() => 1);
     if (vibes.length) toast('Precise Reference와 바이브 트랜스퍼는 동시에 쓸 수 없어 바이브는 제외했습니다');
     return body;
@@ -2157,7 +2235,18 @@ async function attachImages(body, ov) {
           : '지금 모델용 인코딩이 있는 바이브가 없습니다 — 생성을 멈췄습니다 (원본이 없는 라이브러리 바이브는 다시 인코딩할 수 없습니다. 🎨 목록에서 빼면 그대로 생성됩니다)');
       }
       if (ready.length < vlist.filter(v => v.enc || v.b64).length) toast('현재 모델용 인코딩이 없는 바이브는 제외했습니다');
-      if (ready.length) { p.reference_image_multiple = ready.map(v => v.enc); p.reference_strength_multiple = ready.map(v => v.strength); p.normalize_reference_strength_multiple = S.vibeNormalize; }
+      if (ready.length) {
+        p.reference_image_multiple = ready.map(v => v.enc);
+        /* NAI normalizeReferenceStrengths: 세기 맞추기가 켜져 있고 2개 이상이며 절댓값 합이 1 을 넘으면
+           각 세기를 합으로 나눠서 보낸다. 예전엔 나누지 않은 값을 보내 서버 쪽 처리에만 맡겼다. */
+        let st = ready.map(v => v.strength);
+        if (S.vibeNormalize && st.length > 1) {
+          const sum = st.reduce((a, b) => a + Math.abs(b), 0);
+          if (sum !== 0 && sum > 1) st = st.map(x => x / sum);
+        }
+        p.reference_strength_multiple = st;
+        p.normalize_reference_strength_multiple = S.vibeNormalize;
+      }
     } else {
       /* V3 는 그림을 그대로 보낸다. NAI 는 비율을 지켜 448×448 안에 넣고 빈 곳을 검게 채운 PNG 로 보낸다
          (번들 fillImageBackground(그림, "black", 448, 448, PNG, 부드럽게, 레터박스)). 원본을 그대로 보내면
@@ -2312,7 +2401,15 @@ function directorToolCost(w, h, isOpus, opusLeft, tool) {
 }
 
 /* ─────────────── 생성 ─────────────── */
+/* 문자열을 짧은 수로 줄인다 (FNV-1a) — 같은 설정 막기에서 몇 MB 짜리 요청을 통째로 들고 있지 않으려고 */
+function hashStr(s) { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36) + ':' + s.length; }
+/* 무작위 표기(<a|b>·<조각>·__와일드__·슬래시 와일드)가 있으면 같은 설정이어도 결과가 달라질 수 있다 — NAI 의 promptsContainRandomness 와 같은 뜻 */
+function promptHasRandom() {
+  const all = [S.prompt, S.uc, ...(S.chars || []).map(c => (c.prompt || '') + ' ' + (c.uc || ''))].join(' ');
+  return /[<|]|__/.test(all) || (S.slashWild && /\//.test(all));
+}
 async function doGenerate(ov, label) {
+  const mainBtn = ov === undefined;   // 생성 단추(인자 없이 부름) — NAI 의 «같은 설정 막기»는 여기에만 건다
   ov = ov || {}; label = label || '생성';   // 메인 생성 버튼은 인자 없이 부른다 — 여기서 정규화
   // 가드는 try 밖이라 아래 catch 가 못 잡는다 → 여기서 직접 알린다 (인핸스·변형이 조용히 죽던 문제)
   if (R.gen) { toast('이미 다른 생성이 진행 중입니다', 'err'); throw new Error('이미 다른 생성이 진행 중입니다'); }
@@ -2322,8 +2419,25 @@ async function doGenerate(ov, label) {
   const btn = $('#btnGen'); btn.disabled = !cont; btn.classList.add('busy');
   $('#genStatus').textContent = label + ' 중…';
   const t0 = Date.now();
+  let genKey = null;
   try {
     const body = await attachImages(buildPayload(ov), ov);
+    /* NAI 가 요청을 보내기 전에 막는 것 (useGenerateImage · validateParameters · checkKnownError, 빌드 78a367e).
+       막히면 요청을 보내지 않으므로 Anlas 도 나가지 않는다. */
+    { const pp = body.parameters, area = pp.width * pp.height;
+      if (area > SD_MAX_AREA) throw new Error(`그림 크기가 너무 큽니다 — 가로×세로가 ${SD_MAX_AREA.toLocaleString()} 화소를 넘을 수 없습니다 (NAI 와 같은 한도)`);
+      if (pp.steps > 50) throw new Error('스텝은 50 까지입니다 — NAI 도 넘으면 요청을 막습니다');
+      if (KNOWN_ERR_STEPS.has(pp.steps) && KNOWN_ERR_SAMPLERS.has(pp.sampler))
+        throw new Error(`이 샘플러(${pp.sampler})와 스텝(${pp.steps}) 조합은 오류가 나는 것으로 알려져 있습니다 — 둘 중 하나를 바꿔 주세요 (NAI 와 같은 안내)`);
+      if (mainBtn && !promptHasRandom()) {
+        genKey = hashStr(JSON.stringify(body));
+        if (genKey === R._lastGenKey) {
+          toast('지난번과 똑같은 설정이라 생성하지 않았습니다 — 시드를 바꾸거나 비워 주세요 (NAI 와 같은 안내)');
+          $('#genStatus').textContent = '같은 설정이라 생성하지 않았습니다';
+          return null;
+        }
+      }
+    }
     R.abort = new AbortController();
     let blobs;
     if (S.stream !== false && !ov.noStream) {
@@ -2356,6 +2470,8 @@ async function doGenerate(ov, label) {
       blobs = await generatePlain(body);
     }
     if (!blobs.length) throw new Error('응답에 이미지가 없습니다');
+    if (genKey) R._lastGenKey = genKey;   // NAI 처럼 성공한 요청만 «지난번»으로 기억한다
+    R.varSel = 0;                         // NAI: 새로 뽑으면 결과 변형 번호를 0 으로 돌린다
     let item = null; const meta = metaOf(body, ov);
     for (let k = 0; k < blobs.length; k++) {
       // 배치(장수 2~4)는 장마다 meta 를 복제하고 시드를 보정 — 같은 객체 공유·같은 파일명으로 덮어쓰기 방지
@@ -2531,7 +2647,10 @@ function maybeAutoJudge(it) {
     if (typeof paintNaiStatus === 'function') paintNaiStatus();
   }).catch(e => { logErr('자동 채점 실패: ' + e.message); });
 }
-async function addToHistory(blob, meta, label) {
+/* opt.vars: 결과 변형 [{blob, tag}] (배경 제거의 masked·generated·blend). 있으면 blob 은 지금 고른 변형이다. */
+async function addToHistory(blob, meta, label, opt) {
+  const vars = opt && Array.isArray(opt.vars) && opt.vars.length ? opt.vars : null;
+  if (vars) blob = vars[Math.min(R.varSel || 0, vars.length - 1)].blob;
   /* meta 없이 불리는 경로가 실제로 있다 — 스마트 툴은 원본의 meta 를 그대로 넘기는데
      원본에 meta 가 없으면 undefined 가 그대로 온다.
      예전에는 바로 다음 줄에서 터졌다("Cannot read properties of undefined (reading 'parameters')").
@@ -2541,7 +2660,8 @@ async function addToHistory(blob, meta, label) {
   const [w, h] = await blobSize(blob).catch(() => [p.width, p.height]);
   const item = { blob, meta, seed: p.seed, model: meta.model, w, h, fav: false, t: Date.now(), label: label || '', sceneId: meta.sceneId || null,
     name: `${meta.sceneName ? safeName(meta.sceneName) + '_' : 'nai_'}${ts()}_${p.seed != null ? p.seed : 'x'}_${uid()}.png` };
-  try { item.id = await histPut({ blob, meta, seed: item.seed, model: item.model, w, h, fav: false, t: item.t, name: item.name, label: item.label, sceneId: item.sceneId }); }
+  if (vars) item.vars = vars;
+  try { item.id = await histPut({ blob, meta, seed: item.seed, model: item.model, w, h, fav: false, t: item.t, name: item.name, label: item.label, sceneId: item.sceneId, ...(vars ? { vars } : {}) }); }
   catch (e) { item.unsaved = true; logErr('히스토리 저장 실패: ' + e.message); toast('이미지를 브라우저 저장소에 못 넣었습니다 (공간 부족?) — 새로고침하면 사라집니다', 'err'); }
   item.url = URL.createObjectURL(blob);
   R.hist.push(item);
@@ -2684,7 +2804,9 @@ async function makeThumbUrl(it) {
   const w0 = it.w || THUMB_PX, h0 = it.h || THUMB_PX;
   const r = Math.min(1, THUMB_PX / Math.max(1, Math.min(w0, h0)));
   const w = Math.max(1, Math.round(w0 * r)), h = Math.max(1, Math.round(h0 * r));
-  const bmp = await createImageBitmap(it.blob, { resizeWidth: w, resizeHeight: h, resizeQuality: 'medium' });
+  // 결과 변형이 있으면 NAI 처럼 첫째 변형(Masked)으로 작은 그림을 만든다 (NAI createThumbnailBuffer(e[0]))
+  const src = (it.vars && it.vars[0] && it.vars[0].blob) || it.blob;
+  const bmp = await createImageBitmap(src, { resizeWidth: w, resizeHeight: h, resizeQuality: 'medium' });
   const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
   cv.getContext('2d').drawImage(bmp, 0, 0); bmp.close && bmp.close();
   const b = await new Promise(res => cv.toBlob(res, 'image/webp', 0.85));
@@ -2812,10 +2934,61 @@ function histMarkCur(i) {
   if (prev && prev !== now) prev.classList.remove('cur');
   if (now && now.isConnected) now.classList.add('cur');
 }
+/* 결과 변형 (배경 제거의 Masked·Generated·Blend) — NAI 와 같게 그림 한 장 안에 변형을 두고 지금 고른 변형 번호(R.varSel)로 보여 준다.
+   NAI(빌드 78a367e): 새로 그림을 뽑으면 번호를 0 으로 돌리고, 디렉터 툴 결과는 고른 번호를 그대로 쓴다(Math.min 으로 맞춤).
+   미리보기 그림은 늘 첫째 변형(Masked). 12.11 까지는 세 장을 따로 넣고 마지막(Blend)을 띄웠다. */
+const VAR_NAMES = { masked: '마스크 · Masked', generated: '생성 · Generated', blend: '혼합 · Blend' };
+function itemVarIdx(it) { return it && Array.isArray(it.vars) && it.vars.length ? Math.min(R.varSel || 0, it.vars.length - 1) : -1; }
+function syncItemVar(it) {   // it.blob·it.url 을 지금 고른 변형으로 맞춘다 (저장·i2i·스마트 툴이 모두 이 blob 을 쓴다)
+  const k = itemVarIdx(it); if (k < 0) return;
+  const v = it.vars[k];
+  if (it.blob === v.blob && it.url) return;
+  if (it.url && it.url !== it.thumbUrl) { try { URL.revokeObjectURL(it.url); } catch (e) { logErr('변형 주소 정리 실패: ' + e.message); } }
+  it.blob = v.blob; it.url = URL.createObjectURL(v.blob);
+}
+function renderVarBar(it) {
+  const bar = $('#varBar'); if (!bar) return;
+  const k = itemVarIdx(it);
+  bar.innerHTML = '';
+  if (k < 0) { bar.hidden = true; return; }
+  bar.hidden = false;
+  it.vars.forEach((v, n) => {
+    const b = document.createElement('button'); b.className = 'btn xs' + (n === k ? ' primary' : '');
+    b.textContent = VAR_NAMES[v.tag] || v.tag || String(n + 1);
+    b.title = '같은 결과의 다른 변형을 봅니다 (NAI 의 변형 단추와 같습니다 — 고른 변형은 다음 배경 제거 결과에도 그대로 쓰입니다)';
+    b.onclick = () => { R.varSel = n; showImage(R.cur); };
+    bar.appendChild(b);
+  });
+}
+/* 투명 부분 보이기 — NAI 설정 «Transparency Background»(localStorage imagegen-transparency-bg, 처음 값 checker).
+   테마 체크무늬 = 테마 색 둘(bg2 를 80% 섞은 색·bg1), 밝은 #cccccc·#ffffff, 어두운 #494949·#2a2a2a, 없음, 단색, 직접 고른 색. */
+const TBG_COLORS = { black: '#000000', white: '#ffffff', gray: '#808080', red: '#ff0000', green: '#00ff00', blue: '#0000ff' };
+function transpBgCss(v) {
+  v = v || 'checker';
+  const ck = (a, b) => `repeating-conic-gradient(${a} 0 25%, ${b} 0 50%) 0 0 / 16px 16px`;
+  if (v === 'checker') return ck('color-mix(in srgb, var(--bg2) 80%, var(--bg1))', 'var(--bg1)');
+  if (v === 'checkerLight') return ck('#cccccc', '#ffffff');
+  if (v === 'checkerDark') return ck('#494949', '#2a2a2a');
+  if (v === 'none') return 'transparent';
+  if (/^#[\da-f]{6}([\da-f]{2})?$/i.test(v)) return v;
+  return TBG_COLORS[v] || 'transparent';
+}
+function applyTranspBg() { document.documentElement.style.setProperty('--tbg', transpBgCss(S.transpBg)); fitViewerBg(); }
+/* 가운데 큰 그림은 칸을 꽉 채우고 object-fit: contain 으로 줄여 보이므로, 무늬는 그림이 실제로 그려진 자리에만 깐다 */
+function fitViewerBg() {
+  const img = $('#viewerImg'), bg = $('#viewerBg'); if (!img || !bg) return;
+  if (img.hidden || !img.naturalWidth) { bg.hidden = true; return; }
+  const bw = img.clientWidth, bh = img.clientHeight, s = Math.min(bw / img.naturalWidth, bh / img.naturalHeight);
+  const dw = img.naturalWidth * s, dh = img.naturalHeight * s;
+  bg.style.left = (img.offsetLeft + (bw - dw) / 2) + 'px'; bg.style.top = (img.offsetTop + (bh - dh) / 2) + 'px';
+  bg.style.width = dw + 'px'; bg.style.height = dh + 'px'; bg.hidden = false;
+}
 function showImage(i) {
   if (i < 0 || i >= R.hist.length) return;
   R.cur = i; const it = R.hist[i];
+  syncItemVar(it);
   $('#viewerImg').src = it.url; $('#viewerImg').hidden = false; $('#viewerEmpty').hidden = true;
+  renderVarBar(it);
   const p = (it.meta && it.meta.parameters) || {};
   $('#viewerMeta').innerHTML = '';
   const bits = [`${i + 1}/${R.hist.length}`, `${it.w}×${it.h}`, `seed ${it.seed}`, MODELS[it.model] ? MODELS[it.model].name.replace('NAI Diffusion ', '') : it.model, p.steps ? `${p.steps}st · g${p.scale}` : '', it.label];
@@ -2846,6 +3019,7 @@ function stepImage(d) {
 }
 function clearViewer() {
   $('#viewerImg').hidden = true; $('#viewerEmpty').hidden = false; $('#viewerMeta').textContent = ''; $('#tSeedV').textContent = '';
+  renderVarBar(null); fitViewerBg();
   // 툴바도 초기화 — 안 하면 이미지가 없는데 ★즐겨찾기·✔저장됨 표시가 남는다
   const f = $('#tFav'); if (f) { f.textContent = '☆'; f.classList.remove('on'); }
   if (typeof paintSavedUI === 'function') paintSavedUI(null);
@@ -2932,9 +3106,12 @@ async function writeToDir(blob, name, sub) {
   const fh = await dir.getFileHandle(name, { create: true });
   const w = await fh.createWritable(); await w.write(blob); await w.close();
 }
+/* 결과 변형이 있는 그림은 파일 이름 끝에 변형 이름을 붙인다 — NAI 자동 다운로드와 같은 꼴 `이름_masked.png` */
+const varFileName = (name, tag) => (tag ? String(name).replace(/\.png$/i, '') + '_' + tag + '.png' : name);
 async function saveItem(item, strip, silent) {
   let blob = item.blob; if (strip) blob = await stripBlob(blob);
-  const name = (strip ? 'clean_' : '') + item.name;
+  const vk = itemVarIdx(item);
+  const name = (strip ? 'clean_' : '') + varFileName(item.name, vk >= 0 ? item.vars[vk].tag : null);
   if (R.dirHandle) { try { await writeToDir(blob, name, item.meta && item.meta.sceneName); if (!silent) toast((strip ? '메타데이터 제거 후 ' : '') + '저장됨: ' + name); markSaved(item, 'save', silent); return; } catch (e) { toast('폴더 저장 실패, 다운로드로 대체: ' + e.message, 'err'); } }
   if (strip && !silent) toast('메타데이터(청크+숨은 stealth) 제거 후 저장: ' + name);
   // 폴더가 지정돼 있지 않으면 브라우저 다운로드로 넘긴다. 받았는지는 확인할 수 없으므로
@@ -2948,15 +3125,22 @@ async function bulkSave(items, strip) {   // 일괄 저장 — 진행 표시 + �
 }
 async function autoSave(item) {
   try {
-    let blob = item.blob; if (S.stripOnSave) blob = await stripBlob(blob);
     const sub = item.meta && item.meta.sceneName ? item.meta.sceneName : null;
+    /* 결과 변형이 있으면 NAI 자동 다운로드처럼 변형마다 `이름_masked.png` 꼴로 모두 남긴다 */
+    const parts = (Array.isArray(item.vars) && item.vars.length)
+      ? item.vars.map(v => ({ blob: v.blob, name: varFileName(item.name, v.tag) }))
+      : [{ blob: item.blob, name: item.name }];
     // 폴더 쓰기가 실패해도(새로고침 뒤 권한이 'prompt' 로 돌아가는 경우가 흔하다)
     // 그냥 넘어가면 이미지가 디스크에 한 장도 안 남는다. 수동 저장처럼 다운로드로 대체한다.
     let how = 'auto';
-    if (R.dirHandle) {
-      try { await writeToDir(blob, item.name, sub); }
-      catch (e) { toast('폴더 저장 실패 — 다운로드로 대체합니다'); downloadBlob(blob, item.name); how = 'download'; }
-    } else { downloadBlob(blob, item.name); how = 'download'; }
+    for (const pt of parts) {
+      let blob = pt.blob; if (S.stripOnSave) blob = await stripBlob(blob);
+      if (R.dirHandle && how === 'auto') {
+        try { await writeToDir(blob, pt.name, sub); continue; }
+        catch (e) { toast('폴더 저장 실패 — 다운로드로 대체합니다'); how = 'download'; }
+      }
+      downloadBlob(blob, pt.name); how = 'download';
+    }
     markSaved(item, how);
   } catch (e) { toast('자동 저장 실패: ' + e.message, 'err'); }
 }
@@ -3737,6 +3921,13 @@ function openSettings() {
       <label class="ck"><input type="checkbox" id="mAutoText"> V5 글자 그리기 자동 처리 <span class="hint">— 프롬프트에 따옴표로 감싼 글자가 있으면 novelai.net 처럼 <b>teXt:</b> 를 자동으로 붙입니다 (V5 전용). 끄면 붙이지 않습니다.</span></label>
       <label class="ck"><input type="checkbox" id="mStream"> 생성 중 실시간 미리보기 (msgpack 스트림) <span class="hint">— 끄면 다 그려진 뒤 한 번에 받습니다. NAI 가 스트림 형식을 바꿔 그림이 안 나올 때 여기서 끄세요.</span></label>
       <hr>
+      <div class="mtitle">투명 그림 <span class="hint">(NAI 설정과 같은 칸)</span></div>
+      <label class="fld">투명 부분 보이기 <span class="hint">— 배경 제거·투명 배경 그림의 투명한 곳을 무엇으로 보여 줄지 (NAI «Transparency Background», 처음 값 테마 체크무늬)</span>
+        <select id="mTranspBg"><option value="checker">테마 체크무늬</option><option value="checkerLight">밝은 체크무늬</option><option value="checkerDark">어두운 체크무늬</option><option value="none">없음</option><option value="black">검정</option><option value="white">흰색</option><option value="gray">회색</option><option value="red">빨강</option><option value="green">초록</option><option value="blue">파랑</option><option value="custom">직접 고른 색</option></select></label>
+      <input type="color" id="mTranspColor" value="#808080" hidden>
+      <label class="fld">투명 그림의 알파 방식 <span class="hint">— V5 요청에 늘 들어가는 값 (NAI «Alpha Mode for Transparent Images», 처음 값 Straight)</span>
+        <select id="mAlpha"><option value="straight">Straight (NAI 처음 값)</option><option value="premultiplied">Premultiplied</option></select></label>
+      <hr>
       <div class="mtitle">NAI 웹과 동일하게 재현하기</div>
       <div class="hint">NAI 웹에서 만든 PNG를 아래에 드롭하면 프롬프트·시드·스텝·가이던스·UC 프리셋·Variety 등이 <b>전부 그대로</b> 복원됩니다. 그 상태로 생성하면 NAI 웹과 같은 결과가 나와야 정상입니다 (다르면 알려주세요).</div>
       <div class="drop" id="mPngDrop" style="width:100%;min-height:64px">NAI PNG 드롭 → 설정 복원</div>
@@ -3861,6 +4052,16 @@ function openSettings() {
     const stm = body.querySelector('#mStream'); stm.checked = S.stream !== false;
     stm.onchange = () => { S.stream = stm.checked; S.streamOffAuto = false; save(); toast(stm.checked ? '실시간 미리보기 켬' : '실시간 미리보기 끔 — 다 그려진 뒤 한 번에 받습니다'); };
     const sc = body.querySelector('#mShowChunks'); sc.checked = !!S.showChunkBars; sc.onchange = () => { S.showChunkBars = sc.checked; document.body.classList.toggle('show-chunks', sc.checked); save(); };
+    { // 투명 그림 — NAI 설정 두 칸
+      const tb = body.querySelector('#mTranspBg'), tc = body.querySelector('#mTranspColor'), al = body.querySelector('#mAlpha');
+      const isHex = v => /^#[\da-f]{6}([\da-f]{2})?$/i.test(v || '');
+      tb.value = isHex(S.transpBg) ? 'custom' : (S.transpBg || 'checker');
+      tc.hidden = tb.value !== 'custom'; if (isHex(S.transpBg)) tc.value = S.transpBg.slice(0, 7);
+      tb.onchange = () => { tc.hidden = tb.value !== 'custom'; S.transpBg = tb.value === 'custom' ? tc.value : tb.value; save(); applyTranspBg(); };
+      tc.oninput = () => { S.transpBg = tc.value; save(); applyTranspBg(); };
+      al.value = S.alphaMode === 'premultiplied' ? 'premultiplied' : 'straight';
+      al.onchange = () => { S.alphaMode = al.value; save(); toast('알파 방식: ' + (al.value === 'premultiplied' ? 'Premultiplied' : 'Straight') + ' — V5 생성 요청부터 적용됩니다'); };
+    }
     body.querySelector('#mBackup').onclick = () => openBackup();
     body.querySelector('#mExport').onclick = () => downloadBlob(new Blob([JSON.stringify(S, null, 2)], { type: 'application/json' }), 'nai-studio-settings.json');
     body.querySelector('#mImport').onclick = () => pickFiles(false, async f => {
@@ -3931,8 +4132,14 @@ function syncUI() {
   $('#autoCount').value = S.autoCount; $('#autoDelay').value = S.autoDelay;
   $$('#autoModeSeg button').forEach(b => b.classList.toggle('on', b.dataset.m === (S.autoMode || 'random')));
   $('#autoModeHint').textContent = S.autoMode === 'fixed' ? '지금 조합(랜덤·청크 치환 결과)을 고정하고 시드만 바꿔 뽑습니다' : '<a|b|c>·청크가 매번 새로 뽑힙니다';
-  $('#v3Box').hidden = isV4(); $('#v4Box').hidden = !isV4();
+  $('#v3Box').hidden = isV4();
+  // 레거시 프롬프트 컨디셔닝 칸은 NAI 처럼 V4 에서만 보인다 (능력표 v4_0legacyUC)
+  $('#v4Box').hidden = !capsOf(S.model).legacyUcOk;
   $('#smeaDyn').disabled = !S.smea;
+  if ($('#autoSmea')) $('#autoSmea').checked = S.autoSmea !== false;
+  /* 디크리스퍼는 V3 만 받는다(능력표 dynamicThresholding) — 다른 모델에서는 NAI 처럼 꺼서 보내므로 칸을 잠근다 */
+  { const dc = $('#decrisper'), ok = !!capsOf(S.model).dynThr, row = dc && dc.closest('label,.row,.fld');
+    if (dc) { dc.disabled = !ok; if (row) { row.style.opacity = ok ? '' : '.45'; row.title = ok ? '' : '이 모델은 디크리스퍼를 받지 않습니다 — NAI 도 꺼서 보냅니다'; } } }
   $('#modelKind').textContent = MODELS[S.model].kind;
   /* 생성 모드 「보통 / 절약」 — NAI 처럼 V5 Full 을 골랐을 때만 보인다 */
   { const m = MODELS[S.model], base = m.effortOf || S.model, seg = $('#effortSeg');
@@ -4199,6 +4406,11 @@ function init() {
   fill($('#sampler'), SAMPLERS); fill($('#schedule'), SCHEDULES.map(v => [v, v])); fill($('#sizePreset'), SIZES.map((s, i) => [i, s[0]]));
   if (!MODELS[S.model]) S.model = DEFAULTS.model;
   syncUI(); renderChars();
+  // 투명 부분 보이기 — 큰 그림이 바뀌거나 칸 크기가 바뀌면 무늬 자리를 다시 맞춘다
+  applyTranspBg();
+  $('#viewerImg').addEventListener('load', fitViewerBg);
+  if (typeof ResizeObserver === 'function') new ResizeObserver(() => fitViewerBg()).observe($('#vstage'));
+  else window.addEventListener('resize', fitViewerBg);
   // 기존 사용자: 예전 기본 4칸(캐릭터부터)이면 맨 앞에 "퀄리티·작가 태그" 칸을 추가
   if (Array.isArray(S.sections) && S.sections.length && S.sections[0].id === 'char' && !S.sections.some(s => s.id === 'qa')) { S.sections.unshift({ ...DEFAULTS.sections[0] }); save(); }
   { const qa = (S.sections || []).find(s => s.id === 'qa'); if (qa && qa.name === '퀄리티 · 작가 태그') { qa.name = DEFAULTS.sections[0].name; qa.hint = DEFAULTS.sections[0].hint; save(); } }
@@ -4225,7 +4437,7 @@ function init() {
   $$('#batchSeg button').forEach(b => b.onclick = () => { S.n = +b.dataset.n; $$('#batchSeg button').forEach(x => x.classList.toggle('on', x === b)); updateCostHint(); save(); });
   const bindRange = key => { $('#' + key).oninput = () => { S[key] = +$('#' + key).value; $('#' + key + 'V').textContent = S[key]; updateCostHint(); save(); }; };
   ['steps', 'scale', 'rescale', 'strength', 'noise', 'enhStr', 'enhNoise', 'varStr', 'varNoise', 'ucStrength'].forEach(bindRange);
-  $('#enhScale').onchange = () => { S.enhScale = +$('#enhScale').value; save(); };
+  $('#enhScale').onchange = () => { const v = $('#enhScale').value; S.enhScale = (v === 'max' || v === 'auto') ? v : +v; save(); };
   /* 샘플러를 바꾸면 고를 수 있는 노이즈 스케줄도 바뀐다 (NAI 규칙). syncUI 전체는 무거우니 필요한 칸만 다시 맞춘다 */
   $('#sampler').onchange = () => {
     S.sampler = $('#sampler').value; syncSamplerOptions();
@@ -4249,6 +4461,7 @@ function init() {
   ['randomSeed', 'quality', 'variety', 'decrisper', 'legacyUc', 'vibeNormalize', 'autoSaveOn', 'stripOnSave', 'smeaDyn', 'autoNsfw', 'slashWild', 'transparent', 'furryMode', 'chunkFloatOn'].forEach(k => bindCk(k, k, updateCostHint));
   bindCk('emphHl', 'emphHl', () => { if (typeof refreshHighlights === 'function') refreshHighlights(); });
   bindCk('smea', 'smea', () => { $('#smeaDyn').disabled = !S.smea; if (!S.smea) { S.smeaDyn = false; $('#smeaDyn').checked = false; } updateCostHint(); });
+  bindCk('autoSmea', 'autoSmea', updateCostHint);   // V3 SMEA 자동 (NAI «Auto nai_smea», 처음 값 켬)
   $('#aiChoiceBtn').onclick = () => { S.aiChoice = !S.aiChoice; save(); renderChars(); };
   $('#ucPreset').onchange = () => { S.ucPreset = +$('#ucPreset').value; syncAdvanced(); save(); };
   $('#qtagsEdit').oninput = () => { S.ov[S.model] = S.ov[S.model] || {}; S.ov[S.model].q = $('#qtagsEdit').value; save(); };
