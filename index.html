@@ -201,7 +201,7 @@ try {
             <div class="i2i-ctl">
               <label class="rng">Strength <output id="strengthV"></output><input type="range" id="strength" min="0.01" max="0.99" step="0.01"></label>
               <label class="rng">Noise <output id="noiseV"></output><input type="range" id="noise" min="0" max="0.99" step="0.01"></label>
-              <div class="row"><button id="btnMask" class="btn sm">🖌 마스크</button><button id="btnI2iClear" class="btn sm danger">✕</button><span id="maskState" class="hint"></span></div>
+              <div class="row"><button id="btnPaintNew" class="btn sm" title="빈 그림판을 지금 해상도로 열어 직접 그립니다 — 저장하면 바탕 그림이 됩니다 (NAI 바탕 그림 칸의 펜)">✏ 새로 그리기</button><button id="btnEditI2i" class="btn sm" hidden title="바탕 그림을 그림판에서 고칩니다 — 색칠·지우기·그림 넣기·캔버스 늘리기 (NAI 편집)">✏ 편집</button><button id="btnMask" class="btn sm" title="그림판 마스크 모드 — 칠한 곳만 다시 그립니다. 그림에 색을 칠하거나 캔버스를 늘려(아웃페인트) 그릴 수도 있습니다 (NAI 인페인트)">🖌 인페인트</button><button id="btnI2iClear" class="btn sm danger">✕</button><span id="maskState" class="hint"></span></div>
             </div>
           </div>
         </div>
@@ -260,7 +260,7 @@ try {
       <div class="card-body">
         <label class="rng">인핸스 Strength <output id="enhStrV"></output><input type="range" id="enhStr" min="0.01" max="0.99" step="0.01"></label>
         <label class="rng">인핸스 Noise <output id="enhNoiseV"></output><input type="range" id="enhNoise" min="0" max="0.99" step="0.01"></label>
-        <label class="fld" title="NAI 인핸스 창과 같은 배율입니다. 그림 크기에 따라 쓸 수 있는 배율이 다르고(832×1216 은 1.5×·1×), V5 는 Max(같은 크기로 다시 그리기)가 있습니다. 고른 배율을 그 그림에 쓸 수 없으면 NAI 처럼 목록의 첫째를 씁니다.">인핸스 배율<select id="enhScale"><option value="auto">자동 (NAI 처음 값 — 쓸 수 있는 것 중 첫째)</option><option value="max">Max (V5 · 같은 크기)</option><option value="2">2×</option><option value="1.5">1.5×</option><option value="1">1× (같은 크기)</option></select></label>
+        <div class="hint">인핸스 배율은 ✨ 인핸스 창에서 그림마다 고릅니다 (NAI 처럼 그림 넓이마다 마지막으로 고른 배율을 기억합니다).</div>
         <label class="rng">변형 Strength <output id="varStrV"></output><input type="range" id="varStr" min="0.01" max="0.99" step="0.01"></label>
         <label class="rng">변형 Noise <output id="varNoiseV"></output><input type="range" id="varNoise" min="0" max="0.99" step="0.01"></label>
       </div>
@@ -291,13 +291,16 @@ try {
         <button id="btnNext" class="vnav r" title="다음">›</button>
         <!-- 결과 변형 단추 (배경 제거 Masked·Generated·Blend) — NAI 처럼 그림 아래 가운데 -->
         <div id="varBar" class="varbar" hidden></div>
+        <!-- 인핸스 창 (NAI Enhance Image) — ✨ 단추로 열고 닫는다. 떠 있는 동안 생성 단추가 «✨ 인핸스!» -->
+        <div id="enhPanel" class="enhpanel" hidden></div>
       </div>
       <div class="vtools">
         <div class="vgroup">
           <button id="tEnhance" class="tb" title="인핸스 (디테일 보강 · 확대)">✨<span>인핸스</span></button>
           <button id="tUpscale" class="tb" title="업스케일 2× — V5 로 다시 그려 확대 (1024×1024 이하 · Opus 무료, 아니면 ◈1)">🔍<span>업스케일</span></button>
           <button id="tVary" class="tb" title="변형">🎲<span>변형</span></button>
-          <button id="tInpaint" class="tb" title="편집 — 마스크 인페인트">🖌<span>편집</span></button>
+          <button id="tEdit" class="tb" title="편집 — 이 그림을 그림판에서 고쳐 바탕 그림으로 (NAI Edit Image)">✏<span>편집</span></button>
+          <button id="tInpaint" class="tb" title="인페인트 — 이 그림을 바탕 그림으로 넣고 그림판 마스크 모드를 엽니다 (NAI Inpaint Image)">🖌<span>인페인트</span></button>
           <button id="tDirector" class="tb" title="디렉터 툴">🪄<span>디렉터</span></button>
         </div>
         <div class="vgroup">
@@ -432,5 +435,6 @@ try {
 <script src="tags.js"></script>
 <script src="tools.js"></script>
 <script src="scenes.js"></script>
+<script src="canvas.js"></script>
 </body>
 </html>

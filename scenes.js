@@ -459,7 +459,7 @@ function openLightbox(h) {
     body.querySelector('#lbFav').onclick = () => { toggleFav(h); closeModal(); if (window.renderScenes) renderScenes(); if (window.renderLibrary) renderLibrary(); };
     body.querySelector('#lbSave').onclick = () => saveItem(h, S.stripOnSave);
     body.querySelector('#lbMain').onclick = () => { closeModal(); setMode('main'); showImage(R.hist.indexOf(h)); };
-    body.querySelector('#lbI2i').onclick = () => { setI2I(h.blob); closeModal(); setMode('main'); toast('i2i 소스로 설정됨'); };
+    body.querySelector('#lbI2i').onclick = () => { setI2I(h.blob, h.meta, true); closeModal(); setMode('main'); toast('i2i 소스로 설정됨'); };
     body.querySelector('#lbApply').onclick = () => { applyMeta(h.meta); closeModal(); setMode('main'); };
     body.querySelector('#lbDel').onclick = () => { deleteItem(h); closeModal(); if (window.renderScenes) renderScenes(); if (window.renderLibrary) renderLibrary(); };
   }, true);

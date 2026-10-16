@@ -769,3 +769,47 @@ input.sc-name-in:hover, input.sc-name-in:focus { border-bottom-color: var(--acc)
 #opusBar.nosub #opusBarTrack { display: none; }
 /* 스마트 툴: 그림이 들어 있을 때 보이는 빼기·바꾸기 줄 */
 .st-bar { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin-top: 8px; }
+
+/* 인핸스 창 (NAI Enhance Image — 그림 아래 가운데) */
+.enhpanel { position: absolute; left: 50%; bottom: 56px; transform: translateX(-50%); z-index: 6; background: var(--bg1); border: 1px solid var(--line2); border-radius: 10px; box-shadow: var(--shadow); padding: 8px 12px; min-width: 330px; max-width: min(560px, 94%); display: flex; flex-direction: column; gap: 6px; }
+.enhpanel[hidden] { display: none; }
+.enh-h { display: flex; align-items: center; gap: 8px; }
+.enh-h .ic { margin-left: auto; }
+.enh-b { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+.enh-c { display: flex; flex-direction: column; gap: 4px; }
+.enh-c .rng { min-width: 180px; margin: 0; }
+#tEnhance.on { border-color: var(--acc); color: var(--acc); }
+
+/* ── 그림판 (canvas.js — NAI 그림판과 같은 배치: 위 도구 설정 · 가운데 그림 · 오른쪽 레이어 · 아래 도구) ──
+   창(#modalOverlay z-index 100)·알림(200)보다 아래라 크기 바꾸기 창과 알림이 그림판 위에 뜬다 */
+.cved { position: fixed; inset: 0; z-index: 90; background: var(--bg0); display: flex; flex-direction: column; }
+.cved[hidden] { display: none; }
+.cv-top { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--bg1); min-height: 48px; }
+.cv-set { display: flex; align-items: center; gap: 12px; flex: 1; flex-wrap: wrap; min-width: 0; }
+.cv-set .rng { min-width: 170px; margin: 0; }
+.cv-set .hint { font-size: .8rem; }
+.cv-tname { font-weight: 700; white-space: nowrap; }
+.cv-col input[type=color] { width: 34px; height: 28px; padding: 0; border: 1px solid var(--line2); border-radius: 6px; background: none; cursor: pointer; }
+.cv-tips { display: inline-flex; gap: 3px; }
+.cv-act { display: flex; gap: 6px; flex: 0 0 auto; }
+.cv-mid { flex: 1; display: flex; min-height: 0; }
+.cv-view { flex: 1; position: relative; overflow: hidden; cursor: crosshair; touch-action: none; background: var(--bg0); }
+.cv-view canvas { position: absolute; left: 0; top: 0; display: block; }
+.cv-layers { width: 210px; flex: 0 0 210px; border-left: 1px solid var(--line); background: var(--bg1); padding: 8px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.cv-lay { display: flex; align-items: center; gap: 6px; padding: 4px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
+.cv-lay.on { border-color: var(--acc); background: var(--accT); }
+.cv-thumb { flex: 0 0 auto; border-radius: 4px; border: 1px solid var(--line2); }
+.cv-lname { flex: 1; font-size: .82rem; min-width: 0; }
+.cv-lbtn { display: inline-flex; gap: 2px; }
+.cv-bot { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--line); background: var(--bg1); flex-wrap: wrap; }
+.cv-tool { min-width: 40px; font-size: 1.05rem; }
+.cv-sep { width: 1px; align-self: stretch; background: var(--line2); margin: 0 4px; }
+.cv-pop { position: fixed; right: 230px; bottom: 64px; z-index: 95; background: var(--bg2); border: 1px solid var(--line2); border-radius: 10px; padding: 10px 12px; min-width: 260px; max-width: 340px; display: flex; flex-direction: column; gap: 8px; box-shadow: var(--shadow); }
+.cv-pop[hidden] { display: none; }
+.cv-sw { flex-wrap: wrap; gap: 4px; }
+.cv-swatch { width: 22px; height: 22px; border-radius: 6px; border: 2px solid transparent; cursor: pointer; padding: 0; }
+.cv-swatch.on { border-color: var(--txt); }
+.cvr-grid { display: grid; grid-template-columns: 90px 170px 90px; gap: 6px; align-items: center; justify-content: center; margin: 8px 0; }
+.cvr-grid input { width: 90px; text-align: center; }
+.cvr-grid canvas { width: 170px; height: 170px; border: 1px solid var(--line2); border-radius: 4px; }
+@media (max-width: 900px) { .cv-layers { width: 150px; flex-basis: 150px; } .cv-pop { right: 12px; } }
