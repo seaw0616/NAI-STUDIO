@@ -608,11 +608,22 @@ const hasToken = () => !!getToken() || !!R.srvToken;
 
 /* 런타임 */
 const R = {
-  i2iBlob: null, maskCanvas: null, vibes: [], prefs: [],
+  i2iBlob: null, maskCanvas: null, prefs: [],
   hist: [], cur: -1, dirHandle: null, gen: false,
   auto: { on: false, done: 0 }, lastSeed: null,
   api: '', srvOk: false, srvToken: false, lastTA: null, lastErr: '',
 };
+/* 바이브는 NAI 처럼 모델마다 따로 둔다 (NAI ReferenceImages(모델)). R.vibes 는 늘 '지금 모델의 목록' 을 가리킨다.
+   예전엔 목록 하나를 모든 모델이 같이 써서, 모델을 바꾸면 같은 바이브를 그 모델용으로 다시 인코딩했다(장당 2 Anlas).
+   (2026-10-16 누님이 「NAI 처럼 따로」를 고르심) 생성 모드 「절약」은 바탕 모델(V5 Full)과 같은 목록이다. */
+R.vibesBy = {};
+const vibeKey = m => (MODELS[m] && MODELS[m].effortOf) || m;
+Object.defineProperty(R, 'vibes', {
+  get() { const k = vibeKey(S.model); return R.vibesBy[k] || (R.vibesBy[k] = []); },
+  set(v) { R.vibesBy[vibeKey(S.model)] = Array.isArray(v) ? v : []; },
+  enumerable: true, configurable: true,
+});
+const anyVibes = () => Object.values(R.vibesBy).some(l => l && l.length);   // 어느 모델에든 바이브가 있나
 
 /* ─────────────── 유틸 ─────────────── */
 const ERRLOG = [];
@@ -1312,7 +1323,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.10';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.11';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -1365,7 +1376,8 @@ async function probeServer() {
          다만 **생성 중이거나 붙여 둔 것이 있으면 옮기지 않는다** — 주소가 바뀌면 그 화면의
          진행 중 생성(이미 요금이 나갔을 수 있다)·붙인 이미지·마스크가 통째로 사라진다.
          그 경우엔 옮기지 않고 그 서버에 붙어서 계속 쓴다(기능은 전부 정상이다). */
-      const busy = R.gen || (R.auto && R.auto.on) || (typeof SR !== 'undefined' && SR.on) || R.i2iBlob || (R.vibes && R.vibes.length) || (R.prefs && R.prefs.length);
+      // 바이브는 모델마다 따로라, 지금 모델 것만 보면 다른 모델에 넣어 둔 바이브가 주소 이동으로 사라진다
+      const busy = R.gen || (R.auto && R.auto.on) || (typeof SR !== 'undefined' && SR.on) || R.i2iBlob || anyVibes() || (R.prefs && R.prefs.length);
       if (!IS_FILE && PORTS.includes(+location.port) && location.port !== String(p) && !busy) { location.replace(base + '/' + location.search); return j; }
       R.api = base; R.srvOk = true; R.srvInfo = j; R.srvToken = !!j.hasToken; R.srvTokenHint = j.tokenHint || ''; R.oldServer = false; return j;
     }
@@ -2108,7 +2120,9 @@ async function attachImages(body, ov) {
                      : 'V5 는 캐릭터 레퍼런스를 지원하지 않아 제외했습니다', 'err');
   }
   // 라이브러리에서 불러온 바이브는 원본 이미지(b64) 없이 인코딩(enc)만 있을 수 있다 — 그것도 포함해야 한다
-  let vibes = ov.noRef ? [] : R.vibes.filter(v => v.b64 || (info.ver >= 40 && v.enc));
+  // 바이브는 모델마다 따로다 — 인코딩을 기다리는 사이 모델을 바꿔도 이 요청은 처음 모델의 목록으로 끝까지 만든다
+  const vlist = R.vibes;
+  let vibes = ov.noRef ? [] : vlist.filter(v => v.b64 || (info.ver >= 40 && v.enc));
   if (!capsA.vibe && vibes.length) { toast('V5 는 바이브 트랜스퍼를 지원하지 않아 제외했습니다 — 바이브를 쓰시려면 V4.5 를 골라주세요', 'err'); vibes = []; }
   /* NAI 생성 코드는 레퍼런스가 하나라도 붙어 있으면 — 그 모델이 레퍼런스를 안 받아도 — 바이브를 뺀다
      (useGenerateImage: 바이브 조건이 '레퍼런스 목록이 비었을 때'). 화면도 그때 바이브 칸을 숨긴다. */
@@ -2133,7 +2147,7 @@ async function attachImages(body, ov) {
     if (info.ver >= 40) {
       const encFails = await ensureVibes();
       // 원본 없는 라이브러리 바이브는 재인코딩이 불가하므로 현재 모델용 인코딩일 때만 쓴다
-      const ready = R.vibes.filter(v => v.enc && (v.b64 || v.encModel === S.model));
+      const ready = vlist.filter(v => v.enc && (v.b64 || v.encModel === baseModel));
       /* 하나도 못 붙이는데 그대로 보내면, 바이브가 전혀 안 걸린 그림에 Anlas 를 다 쓴다.
          예전엔 토스트만 띄우고 진행해서, 사용자는 "왜 바이브가 안 먹지?" 하며 돈을 계속 썼다.
          → 여기서 멈추고 무엇을 하면 되는지 알린다. */
@@ -2142,7 +2156,7 @@ async function attachImages(body, ov) {
           ? '바이브 인코딩에 실패해 붙일 수 있는 바이브가 없습니다 — 생성을 멈췄습니다 (잠시 뒤 다시 시도하거나 🎨 목록에서 빼세요)'
           : '지금 모델용 인코딩이 있는 바이브가 없습니다 — 생성을 멈췄습니다 (원본이 없는 라이브러리 바이브는 다시 인코딩할 수 없습니다. 🎨 목록에서 빼면 그대로 생성됩니다)');
       }
-      if (ready.length < R.vibes.filter(v => v.enc || v.b64).length) toast('현재 모델용 인코딩이 없는 바이브는 제외했습니다');
+      if (ready.length < vlist.filter(v => v.enc || v.b64).length) toast('현재 모델용 인코딩이 없는 바이브는 제외했습니다');
       if (ready.length) { p.reference_image_multiple = ready.map(v => v.enc); p.reference_strength_multiple = ready.map(v => v.strength); p.normalize_reference_strength_multiple = S.vibeNormalize; }
     } else {
       /* V3 는 그림을 그대로 보낸다. NAI 는 비율을 지켜 448×448 안에 넣고 빈 곳을 검게 채운 PNG 로 보낸다
@@ -3181,6 +3195,7 @@ async function openMaskEditor() {
 }
 function renderVibes() {
   refreshCost();     // 바이브 수가 바뀌면 예상 비용도 달라진다
+  R._vibeKeyShown = vibeKey(S.model);   // 어느 모델의 목록을 그렸는지 — 모델이 바뀌면 syncUI 가 다시 그린다
   const list = $('#vibeList'); list.innerHTML = '';
   R.vibes.forEach((v, i) => {
     const d = document.createElement('div'); d.className = 'vibe-slot';
@@ -3951,6 +3966,8 @@ function syncUI() {
     // 노이즈 스케줄 칸은 syncSamplerOptions 가 모델·샘플러를 같이 보고 잠근다 (여기서 다시 풀면 DDIM 일 때 열린다)
   }
   syncAdvanced(); updateCostHint(); updateRefBadge();
+  // 바이브는 모델마다 따로다 — 모델이 바뀌었으면 바이브 칸을 그 모델의 목록으로 다시 그린다
+  if (R._vibeKeyShown !== vibeKey(S.model) && $('#vibeList')) renderVibes();
   if (typeof renderStyleSelects === 'function') renderStyleSelects();
   // 코드로 value 를 바꾼 textarea 들은 input 이벤트가 안 나므로 하이라이트 미러를 직접 다시 그린다
   if (typeof refreshHighlights === 'function') refreshHighlights();
