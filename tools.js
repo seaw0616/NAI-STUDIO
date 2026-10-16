@@ -2177,7 +2177,10 @@ async function runRepro(file) {
   const attached = [];
   if (R.i2iBlob) attached.push('불러온 이미지(i2i)');
   if (R.maskCanvas) attached.push('칠해 둔 마스크');
-  if ((R.vibes || []).length) attached.push(`바이브 ${R.vibes.length}개`);
+  /* 바이브는 모델마다 따로다 — 떼는 것은 이 그림의 모델 목록이다(아래 importFromPng 가 모델을 그 그림 것으로 바꾼다) */
+  const srcText = (chunks.find(c => c.key === 'Source') || {}).text || '';
+  const reproVibes = (R.vibesBy[vibeKey(modelFromSource(srcText))] || []).length;
+  if (reproVibes) attached.push(`바이브 ${reproVibes}개`);
   if ((R.prefs || []).length) attached.push(`레퍼런스 ${R.prefs.length}개`);
   if (attached.length && !confirm(`재현 검증은 원본과 같은 조건으로 만들어야 해서 지금 붙어 있는 것을 뗍니다.\n\n· ${attached.join('\n· ')}\n\n계속할까요? (바이브는 라이브러리에 저장해 두셨다면 다시 넣을 수 있습니다)`)) return;
   await importFromPng(file);      // 설정·시드 복원 (모달 닫힘)
