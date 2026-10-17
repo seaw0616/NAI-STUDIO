@@ -319,6 +319,15 @@ select.style-sel.sm { width: auto; max-width: 180px; padding: 3px 24px 3px 8px; 
 .vibe-slot .vctl { flex: 1; }
 .vibe-state { font-size: 11px; color: var(--dim); }
 .vibe-state.ok { color: var(--green); } .vibe-state.err { color: var(--red); }
+/* 켜고 끄기 (NAI 바이브·정밀 레퍼런스 enabled) — 끈 칸은 흐리게 */
+.vibe-slot.off .vthumb, .vibe-slot.off .vctl { opacity: .45; }
+.vibe-slot .vside { display: flex; flex-direction: column; gap: 4px; align-self: flex-start; }
+.vibe-slot .vtog.on { color: var(--green); }
+.vibe-slot .vtop { gap: 6px; align-items: center; margin-bottom: 2px; }
+.vibe-slot .vname { flex: 1; min-width: 0; font-size: 12px; padding: 2px 6px; }
+.vibe-slot .vwarn { color: var(--gold); margin: 2px 0; }
+.panel-notes { margin-bottom: 6px; padding: 5px 8px; border-radius: 6px; background: color-mix(in srgb, var(--gold) 12%, transparent); }
+#vibeN.warn, #prefN.warn { color: var(--gold); }
 .pref-type { margin-bottom: 4px; }
 .pref-type button { font-size: 11px; padding: 3px 4px; }
 
@@ -360,7 +369,42 @@ select.style-sel.sm { width: auto; max-width: 180px; padding: 3px 24px 3px 8px; 
   background: color-mix(in srgb, var(--bg1) 85%, transparent); border: 1px solid var(--line); }
 .vnav { position: absolute; top: 50%; transform: translateY(-50%); width: 36px; height: 60px; border: none; background: #0007; color: #fff; font-size: 26px; border-radius: 10px; opacity: 0; transition: .2s; }
 .vnav.l { left: 8px; } .vnav.r { right: 8px; }
-#previewImg { position: absolute; inset: 8px; width: calc(100% - 16px); height: calc(100% - 16px); object-fit: contain; z-index: 2; filter: saturate(.96); }
+#previewImg { position: absolute; inset: 8px; width: calc(100% - 16px); height: calc(100% - 16px); object-fit: contain; z-index: 2; filter: saturate(.96) blur(5px); }
+/* NAI 설정 «Show Streamed Images Unprocessed» 를 켜면 생성 중 그림을 흐리지 않는다 */
+#previewImg.raw { filter: saturate(.96); }
+/* 결과 화면 보기 설정 «작은 그림 키워 보기»를 끄면 그림을 실제 크기보다 키우지 않는다 (NAI imagegen-scaleup) */
+#viewerImg.noscale { object-fit: scale-down; }
+/* 원본과 비교 — 누르고 있는 동안 인페인트 마스크를 30% 로 겹쳐 보인다 (NAI: 흰 칸 마스크, 화소 그대로 키움) */
+#viewerOldMask { position: absolute; pointer-events: none; opacity: .3; image-rendering: pixelated; z-index: 1; }
+#tOld.on { background: var(--acc); color: #fff; }
+#tOld, #tOld * { user-select: none; touch-action: none; }
+.viewpop-wrap { position: relative; display: inline-flex; }
+.viewpop { position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 30; min-width: 230px; padding: 10px; border-radius: 10px; background: var(--bg1); border: 1px solid var(--line); box-shadow: 0 6px 24px #0006; display: flex; flex-direction: column; gap: 8px; }
+.viewpop label { display: flex; gap: 6px; align-items: center; font-size: 12.5px; }
+/* 그림 가져오기 (NAI 가져오기 창 · 화면 전체 끌어다 놓기 덮개) */
+.import-overlay { position: fixed; inset: 0; z-index: 900; pointer-events: none; display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--bg0) 55%, transparent); border: 3px dashed var(--acc); }
+.import-overlay .io-box { padding: 22px 30px; border-radius: 14px; background: var(--bg1); border: 1px solid var(--line); text-align: center; box-shadow: 0 8px 30px #0007; }
+.import-overlay .io-ico { font-size: 40px; color: var(--acc); }
+.imp-prev { flex: 0 0 auto; display: flex; justify-content: center; padding: 10px; border-radius: 8px; background: var(--bg0); border: 1px solid var(--line); margin-bottom: 10px; }
+.imp-prev img { max-width: 100%; max-height: 300px; object-fit: contain; border-radius: 6px; background: var(--tbg, transparent); }
+.imp-use { gap: 8px; justify-content: center; flex-wrap: wrap; }
+.imp-meta { margin-top: 14px; }
+.imp-grid { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.imp-col { display: flex; flex-direction: column; gap: 5px; }
+.imp-col:first-child { flex: 1; }
+.ck.sub { margin-left: 18px; }
+.imp-warn { color: var(--gold); }
+/* 강조 표기 오류 (NAI 프롬프트 칸 위 경고) */
+.emph-errs { margin: 0 0 4px; padding: 6px 8px; border-radius: 6px; font-size: 12px; line-height: 1.45;
+  background: color-mix(in srgb, var(--gold) 14%, transparent); border: 1px solid color-mix(in srgb, var(--gold) 60%, transparent); color: var(--txt); }
+.emph-errs .more { opacity: .9; }
+.emph-errs:has(+ .pwrap > textarea[hidden]) { display: none; }
+.fnhelp { margin-top: 6px; padding: 10px; border-radius: 8px; background: var(--bg0); border: 1px solid var(--line); }
+.fnhelp-t { border-collapse: collapse; font-size: 12px; width: 100%; }
+.fnhelp-t td { padding: 3px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.fnhelp-t td:first-child { white-space: nowrap; }
+.inspect-pre { white-space: pre-wrap; max-height: 70vh; overflow-y: auto; font-family: monospace; font-size: 12px; padding: 12px; background: var(--bg0); border-radius: 8px; }
 #genBar { position: absolute; left: 12px; right: 12px; bottom: 12px; height: 22px; background: #0008; border-radius: 999px; overflow: hidden; z-index: 3; display: flex; align-items: center; }
 #genBar .gb-fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--grad); transition: width .2s; }
 #genBar .gb-txt { position: relative; width: 100%; text-align: center; font-size: 11.5px; color: #fff; font-weight: 700; }
@@ -482,6 +526,19 @@ ol.guide { padding-left: 20px; display: flex; flex-direction: column; gap: 6px; 
 .pos-cell { width: 46px; height: 46px; background: var(--bg2); border: 1px solid var(--line); border-radius: 9px; color: var(--dim); font-size: 11px; }
 .pos-cell:hover { border-color: var(--acc); color: var(--acc); }
 .pos-cell.on { background: var(--acc); color: var(--btnTxt); font-weight: 700; }
+.addchar-pop { position: absolute; right: 0; top: calc(100% + 4px); z-index: 40; display: flex; flex-direction: column; gap: 4px; padding: 6px; min-width: 120px;
+  border-radius: 8px; background: var(--bg1); border: 1px solid var(--line); box-shadow: 0 6px 20px #0006; }
+/* 캐릭터 위치 판 (NAI 결과 화면 위치 잡기) */
+.pos-bar { gap: 8px; align-items: center; flex-wrap: wrap; }
+.pos-stage { flex: 0 0 auto; position: relative; margin: 8px auto 4px; border-radius: 8px; overflow: hidden; background: var(--tbg, var(--bg2)); border: 1px solid var(--line); touch-action: none; cursor: crosshair; user-select: none; }
+.pos-stage img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; opacity: .7; pointer-events: none; }
+.pos-stage svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.pos-stage svg line { stroke: #fff; stroke-opacity: .55; stroke-width: 1; vector-effect: non-scaling-stroke; stroke-dasharray: 4 3; }
+.pos-dot { position: absolute; width: 26px; height: 26px; margin: -13px 0 0 -13px; border-radius: 50%; background: var(--bg1); color: var(--txt); border: 2px solid var(--line);
+  display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; box-shadow: 0 1px 6px #0007; cursor: grab; }
+.pos-dot.on { background: var(--acc); color: var(--btnTxt); border-color: #fff; z-index: 2; }
+.pos-dot.off { opacity: .45; }
+.char-warn { margin-top: 6px; padding: 6px 8px; border-radius: 6px; font-size: 12px; background: color-mix(in srgb, var(--gold) 14%, transparent); border: 1px solid color-mix(in srgb, var(--gold) 60%, transparent); color: var(--txt); }
 #maskCanvasWrap { position: relative; align-self: center; line-height: 0; }
 #maskCanvasWrap canvas { border-radius: 8px; max-width: 100%; }
 /* touch-action:none 이 없으면 펜·손가락으로 칠할 때 브라우저가 스크롤·확대로 가로채

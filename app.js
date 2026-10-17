@@ -171,6 +171,7 @@ function stripFurry(p, m) {   // → { prompt, furry }  (furry: null = 이 모�
 /* 바이브 상한. NAI 문서: "You can apply up to 16 vibes when generating an image."
    많이 붙일수록 생성이 느려지고, 5개째부터는 장당 2 Anlas 씩 더 나간다(V4 이상). */
 const VIBE_MAX = 16;
+const PREF_MAX = 16;   // NAI MAX_CHARACTER_REFERENCES (빌드 78a367e) — 켜 둔 정밀 레퍼런스가 이보다 많으면 생성하지 않는다
 /* 한 번에 뽑을 수 있는 장수 — NAI maxSamplesForSize 표 그대로 (빌드 78a367e):
    넓이 ≤360448 → 8장 · ≤409600 → 6장 · ≤3145728 → 4장.
    예전엔 «640×640 이하 6장, 나머지 4장»이라 512×512 같은 작은 크기에서 NAI 보다 2장 적었다.
@@ -260,6 +261,13 @@ const DEFAULTS = {
   enhStr: 0.5, enhNoise: 0, enhScale: 'auto', varStr: 0.8, varNoise: 0.1,
   /* NAI 설정 «투명 그림의 알파 방식»(imageStraightAlpha, 기본 Straight) · «투명 부분 보이기»(Transparency Background) · V3 SMEA 자동(기본 켬) */
   alphaMode: 'straight', transpBg: 'checker', autoSmea: true,
+  /* NAI 설정 «Show Streamed Images Unprocessed»(rawIntermediates, 처음 값 끔) · «Inspect Image Results»(imageResultsInspect, 끔)
+     · 결과 화면 보기 설정 «작은 그림 키워 보기»(imagegen-scaleup, 켬) */
+  rawIntermediates: false, inspectResults: false, scaleUp: true,
+  // NAI 설정 «Custom File Name Template»(imageFilenameTemplateEnabled 끔 · imageFilenameTemplate «{prompt} s-{seed}»)
+  fnTplOn: false, fnTpl: '{prompt} s-{seed}',
+  // 캐릭터 위치 격자 (NAI imagegen-position-grid-type «none» · columns 3 · rows 3)
+  posGrid: { type: 'none', cols: 3, rows: 3 },
   autoCount: 20, autoDelay: 3, autoSaveOn: false, stripOnSave: false,
   chunks: [], deleted: {}, ytQueue: [], ytPos: null, ytSize: 'normal', ytOpen: false, ytVol: 60, ytUsePop: false, ytPopMode: 'tab',
   theme: 'violet', lastDark: 'violet', lastLight: 'light', ov: {}, tagUnderscore: false,
@@ -1403,7 +1411,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.13';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.14';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -2016,6 +2024,7 @@ function buildPayload(ov) {
   /* Furry 모드는 맨 앞에 붙는다. ov.prompt 로 프롬프트를 직접 넘긴 경우(그림체 튜닝 등)는
      부르는 쪽이 이미 완성한 문자열이므로 건드리지 않는다. */
   if (ov.prompt == null) prompt = addFurry(prompt, m);
+  const userPrompt = prompt;   // 품질 태그·투명 배경을 붙이기 전 글 — 파일 이름 틀 {prompt} 에 쓴다 (NAI params.prompt)
   /* 투명 배경 + 품질 태그는 **한 덩어리로** 붙인다.
      NAI 는 투명 배경을 품질 프리셋의 suffix 앞에 끼워 넣고(번들 rr()),
      그 덩어리를 addQualityTag 가 정하는 자리에 넣는다.
@@ -2125,6 +2134,7 @@ function buildPayload(ov) {
   if (pre.input !== prompt || pre.uc !== uc || pre.chars.some((c, i) => c.prompt !== p.characterPrompts[i].prompt || c.uc !== p.characterPrompts[i].uc)) {
     Object.defineProperty(p, '_pre', { value: pre, enumerable: false, configurable: true });   // 요청 본문(JSON)에는 실리지 않는다
   }
+  Object.defineProperty(p, '_uprompt', { value: userPrompt, enumerable: false, configurable: true });
   /* 디크리스퍼는 능력표 dynamicThresholding 이 있는 모델(V3)만 받는다. NAI 요청 클래스는 나머지 모델에서
      dynamic_thresholding 을 false 로 바꿔 보낸다 — 예전엔 V3 에서 켜 둔 값이 V4.5·V5 요청에도 그대로 실렸다. */
   if (!caps.dynThr) p.dynamic_thresholding = false;
@@ -2301,7 +2311,9 @@ async function attachImages(body, ov) {
       } else mk = maskCells(p.width, p.height);
       p.mask = maskToB64(p.width, p.height, mk);
       p.add_original_image = false;
-      Object.defineProperty(body, '_inpaint', { value: { w: p.width, h: p.height, mk, baseB64: p.image, region, fullB64, fullW: F ? F.D : p.width, fullH: F ? F.B : p.height }, enumerable: false, configurable: true });
+      /* orig·m8: 결과에 기억시킬 원본 그림과 마스크 (NAI 인페인트 modifyImage: originalImage = 바탕 그림, mask = 1/8 마스크) */
+      Object.defineProperty(body, '_inpaint', { value: { w: p.width, h: p.height, mk, baseB64: p.image, region, fullB64, fullW: F ? F.D : p.width, fullH: F ? F.B : p.height,
+        orig: srcBlob, m8: R.mask8 || (F ? null : mk) }, enumerable: false, configurable: true });
       // NAI applyImg2ImgAdjustments: 그림이 있으면(인페인트 포함) extra_noise_seed 가 비어 있을 때 seed-1 을 넣는다
       if (p.extra_noise_seed == null) p.extra_noise_seed = Math.max(0, p.seed - 1);
       if (info.ver >= 40) {
@@ -2322,7 +2334,9 @@ async function attachImages(body, ov) {
   // noRef 는 i2i 만 막는다. 씬 모드처럼 '메인 화면의 이미지 입력을 쓰지 않는' 경우에는
   // 바이브·정밀 레퍼런스도 함께 빠져야 한다. 안 그러면 씬 화면에서는 보이지도 지울 수도
   // 없는 바이브가 모든 씬 이미지에 계속 붙는다.
-  const prefs = (!ov.noRef && caps.charRef) ? R.prefs.filter(v => v.b64) : [];
+  const prefs = (!ov.noRef && caps.charRef) ? R.prefs.filter(v => v.b64 && !v.off) : [];   // 꺼 둔 레퍼런스는 보내지 않는다 (NAI enabled)
+  /* NAI: 켜 둔 정밀 레퍼런스가 16개를 넘으면 생성하지 않는다 (characterReferenceMaximumExceeded) */
+  if (prefs.length > PREF_MAX) throw new Error(`정밀 레퍼런스는 ${PREF_MAX}개까지 쓸 수 있습니다 (지금 켜 둔 것 ${prefs.length}개) — 몇 개를 빼거나 끈 뒤 생성해 주세요 (NAI 와 같은 한도)`);
   /* V5 는 바이브 트랜스퍼도 캐릭터 레퍼런스도 받지 않는다 (novelai.net 도 이 모델에서는
      두 기능을 아예 숨긴다). 붙여둔 채로 V5 를 고르면 조용히 빠지므로 반드시 알린다. */
   const capsA = caps;
@@ -2332,8 +2346,9 @@ async function attachImages(body, ov) {
   }
   // 라이브러리에서 불러온 바이브는 원본 이미지(b64) 없이 인코딩(enc)만 있을 수 있다 — 그것도 포함해야 한다
   // 바이브는 모델마다 따로다 — 인코딩을 기다리는 사이 모델을 바꿔도 이 요청은 처음 모델의 목록으로 끝까지 만든다
-  const vlist = R.vibes;
-  let vibes = ov.noRef ? [] : vlist.filter(v => v.b64 || (info.ver >= 40 && v.enc));
+  /* 꺼 둔 바이브는 빼고(NAI enabled), 인코딩만 있는 바이브는 이 모델용 인코딩이 있을 때만 쓴다(NAI vibeWorksForModel — 화면에도 «다른 모델용» 경고) */
+  const vlist = R.vibes.filter(v => !v.off && (v.b64 || vibeEncFor(v, baseModel, v.ie)));
+  let vibes = ov.noRef ? [] : vlist.filter(v => v.b64 || (info.ver >= 40 && vibeEncFor(v, baseModel, v.ie)));
   if (!capsA.vibe && vibes.length) { toast('V5 는 바이브 트랜스퍼를 지원하지 않아 제외했습니다 — 바이브를 쓰시려면 V4.5 를 골라주세요', 'err'); vibes = []; }
   /* NAI 생성 코드는 레퍼런스가 하나라도 붙어 있으면 — 그 모델이 레퍼런스를 안 받아도 — 바이브를 뺀다
      (useGenerateImage: 바이브 조건이 '레퍼런스 목록이 비었을 때'). 화면도 그때 바이브 칸을 숨긴다. */
@@ -2357,9 +2372,10 @@ async function attachImages(body, ov) {
   }
   if (vibes.length) {
     if (info.ver >= 40) {
-      const encFails = await ensureVibes(baseModel);
+      const encFails = await ensureVibes(baseModel, vlist);
       // 이번 요청 모델(baseModel)용 인코딩만 쓴다 — 원본 없는 라이브러리 바이브는 재인코딩이 불가하므로 그 모델용일 때만
-      const ready = vlist.filter(v => v.enc && v.encModel === baseModel);
+      const ready = vlist.filter(v => vibeEncFor(v, baseModel, v.ie));
+      ready.forEach(v => { v.enc = vibeEncFor(v, baseModel, v.ie); });
       /* 하나도 못 붙이는데 그대로 보내면, 바이브가 전혀 안 걸린 그림에 Anlas 를 다 쓴다.
          예전엔 토스트만 띄우고 진행해서, 사용자는 "왜 바이브가 안 먹지?" 하며 돈을 계속 썼다.
          → 여기서 멈추고 무엇을 하면 되는지 알린다. */
@@ -2394,11 +2410,11 @@ async function attachImages(body, ov) {
 /* 실패한 개수를 돌려준다 — 부르는 쪽이 '하나도 못 붙였다' 를 구분해 요금 낭비를 막는다.
    mdl = 이번 요청을 그릴 모델. NAI 는 바이브를 생성에 쓰는 모델로 인코딩한다 — 변형은 그림을 만든 모델로 그리므로
    지금 화면 모델과 다를 수 있다. 인코딩은 «모델|IE» 마다 v.encs 에 남겨, 모델을 오가도 같은 인코딩에 Anlas 를 다시 쓰지 않는다. */
-async function ensureVibes(mdl) {
+async function ensureVibes(mdl, only) {
   mdl = mdl || S.model;
   let fails = 0;
-  for (const v of R.vibes) {
-    if (!v.b64) continue;
+  for (const v of (only || R.vibes)) {
+    if (!v.b64 || v.off) continue;   // 꺼 둔 바이브는 인코딩하지 않는다 (NAI 는 켜 둔 것만 보낸다)
     v.encs = v.encs || {};
     if (v.enc && v.encModel && v.encIe != null) v.encs[v.encModel + '|' + v.encIe] = v.enc;   // 지금 쓰던 인코딩도 남겨 둔다
     const key = mdl + '|' + v.ie;
@@ -2427,6 +2443,7 @@ function metaOf(body, ov) {
   if (ov && ov.randKeep) m.randFrom = ov.randFrom || {};
   // 무작위 값 이어 쓰기·인핸스 덧붙이기 전의 글 — 이 그림으로 변형을 하면 NAI 처럼 이 글로 다시 그린다
   if (body.parameters && body.parameters._pre) m.pre = body.parameters._pre;
+  if (body.parameters && typeof body.parameters._uprompt === 'string') m.uprompt = body.parameters._uprompt;   // 파일 이름 틀 {prompt}
   // 집중 영역 인페인트 결과는 원래 그림 크기다 (NAI onImage 가 width·height 를 원래 크기로 넘긴다)
   if (body._inpaint && body._inpaint.region) { p.width = body._inpaint.fullW; p.height = body._inpaint.fullH; }
   return m;
@@ -2609,10 +2626,12 @@ async function doGenerate(ov, label) {
   R.gen = true;
   const cont = R.auto.on && $('#contGen').checked;   // 연속 모드에선 버튼이 '정지'라 비활성화하지 않음
   const btn = $('#btnGen'); btn.disabled = !cont; btn.classList.add('busy');
+  { const o = $('#tOld'); if (o) o.disabled = true; }   // NAI: 생성 중에는 OLD 단추를 못 누른다
   $('#genStatus').textContent = label + ' 중…';
   const t0 = Date.now();
   let genKey = null;
   try {
+    if (mainBtn) fixCharOneGirl();
     const inpaint = !ov.image && !ov.noRef && !!R.i2iBlob && hasMask();
     /* NAI generateInfill: 기준 그림의 무작위 선택값(«||가|나||»)을 이어 쓰고(X), 결과 그림에 원본 값을 기억시킨다(promptRandomizerOriginImage).
        그림판이 바탕 그림을 새로 저장했으면 메타데이터는 처음 넣은 그림(R.i2iMarked — NAI MarkedInpaintImage)에서 읽는다. */
@@ -2677,19 +2696,36 @@ async function doGenerate(ov, label) {
       blobs = await generatePlain(body);
     }
     if (!blobs.length) throw new Error('응답에 이미지가 없습니다');
+    const sampIdx = blobs.sampIdx || blobs.map((_, k) => k);   // 장 번호 (스트림은 받은 순서가 아니라 장 번호대로 둔다)
     /* 인페인트 결과는 NAI 처럼 브라우저에서 원본 위에 부드럽게 합친다. 합치기가 실패하면 그림을 버리지 않고
-       받은 그대로 남기되 크게 알린다(요금은 이미 나갔다). */
+       받은 그대로 남기되 크게 알린다(요금은 이미 나갔다).
+       결과 살펴보기(NAI imageResultsInspect)를 켜 두었으면 [합친 결과, 받은 그대로, 마스크 적용] 세 변형으로 둔다. */
+    let vars = null, orig = null;
     if (body._inpaint) {
-      try { blobs = await Promise.all(blobs.map(b => compositeInpaint(b, body._inpaint))); }
+      const raws = blobs;
+      try {
+        const outs = await Promise.all(raws.map(b => compositeInpaint(b, body._inpaint, !!S.inspectResults)));
+        if (S.inspectResults) {
+          blobs = outs.map(o => o.merged);
+          vars = outs.map((o, k) => [{ blob: o.merged, tag: 'blended' }, { blob: raws[k], tag: 'rawResult', loc: o.loc }, { blob: o.overlay, tag: 'overlay', loc: o.loc }]);
+        } else blobs = outs;
+      }
       catch (e) { logErr('인페인트 합치기 실패(받은 그대로 남김): ' + e.message); toast('인페인트 결과를 원본과 합치지 못해 받은 그대로 남겼습니다: ' + e.message, 'err'); }
-    }
+      /* NAI 인페인트 modifyImage: 결과에 바탕 그림(originalImage)과 마스크(mask)를 기억시켜 «OLD» 단추로 비교한다 */
+      let om = null;
+      try { om = await maskPng8(body._inpaint.m8); } catch (e) { logErr('원본과 비교용 마스크를 만들지 못함: ' + e.message); }
+      if (body._inpaint.orig) orig = { orig: body._inpaint.orig, origMask: om };
+    } else if (ov.orig) orig = { orig: ov.orig };   // 인핸스: 고친 그림의 고른 변형 (NAI originalImage = data[selectedVariant])
     if (genKey) R._lastGenKey = genKey;   // NAI 처럼 성공한 요청만 «지난번»으로 기억한다
     R.varSel = 0;                         // NAI: 새로 뽑으면 결과 변형 번호를 0 으로 돌린다
     let item = null; const meta = metaOf(body, ov);
+    const nWant = (body.parameters && body.parameters.n_samples) || 1;
     for (let k = 0; k < blobs.length; k++) {
-      // 배치(장수 2~4)는 장마다 meta 를 복제하고 시드를 보정 — 같은 객체 공유·같은 파일명으로 덮어쓰기 방지
-      const m = blobs.length > 1 ? { ...meta, parameters: { ...meta.parameters, seed: (meta.parameters.seed || 0) + k }, batchIndex: k } : meta;
-      item = await addToHistory(blobs[k], m, label + (blobs.length > 1 ? ` (${k + 1}/${blobs.length})` : ''));
+      // 배치(장수 2~4)는 장마다 meta 를 복제하고 시드를 보정 — 같은 객체 공유·같은 파일명으로 덮어쓰기 방지.
+      // 시드는 받은 순서가 아니라 장 번호로 붙인다(한 장만 받았어도 그 장 번호의 시드).
+      const si = sampIdx[k] != null ? sampIdx[k] : k;
+      const m = nWant > 1 ? { ...meta, parameters: { ...meta.parameters, seed: (meta.parameters.seed || 0) + si }, batchIndex: si } : meta;
+      item = await addToHistory(blobs[k], m, label + (blobs.length > 1 ? ` (${k + 1}/${blobs.length})` : ''), { vars: vars && vars[k], ...(orig || {}) });
       if (S.autoSaveOn) await autoSave(item);
       if (S.judgeAuto) maybeAutoJudge(item);   // 자동 채점 (기본 꺼짐 · 생성을 기다리게 하지 않으려고 await 하지 않는다)
     }
@@ -2715,32 +2751,41 @@ async function doGenerate(ov, label) {
     if (typeof recordGenFail === 'function') recordGenFail(e.message);
     refreshAnlas().catch(() => {});   // 요청이 나간 뒤 끊긴 경우가 많다 — 잔액을 실제와 맞춘다
     $('#genStatus').textContent = '오류: ' + e.message; toast(e.message, 'err'); throw e;
-  } finally { R.gen = false; R.abort = null; btn.disabled = false; btn.classList.remove('busy'); hidePreview(); $('#btnCancel').hidden = true; }
+  } finally { R.gen = false; R.abort = null; btn.disabled = false; btn.classList.remove('busy'); hidePreview(); $('#btnCancel').hidden = true; { const o = $('#tOld'); if (o) o.disabled = false; } }
+}
+/* NAI 생성 단추(빌드 78a367e): 캐릭터 프롬프트 가운데 «1girl»·«1boy» 가 든 것이 있으면, 캐릭터마다 첫 «1girl»→«girl»·«1boy»→«boy» 로 바꾸고
+   화면 글도 그렇게 바꾼다 (캐릭터 칸은 한 사람이므로 숫자 태그를 빼는 NAI 규칙) */
+function fixCharOneGirl() {
+  const cs = S.chars || [];
+  if (!cs.some(c => (c.prompt || '').includes('1girl') || (c.prompt || '').includes('1boy'))) return;
+  cs.forEach(c => { if (typeof c.prompt === 'string') c.prompt = c.prompt.replace(/1girl/, 'girl').replace(/1boy/, 'boy'); });
+  save(); if (typeof renderChars === 'function') renderChars();
 }
 
 /* ─────────────── 스트리밍 생성 (실시간 미리보기) ─────────────── */
-function showPreview(pngBytes, step, total, t0, sampIx, nSamp, sampStep) {
+/* frac: 배치 전체 진행도 0~1 (NAI 와 같은 셈 — generateStreaming), sampStep/sampTot: 지금 장의 단계 */
+function showPreview(pngBytes, frac, t0, sampIx, nSamp, sampStep, sampTot) {
   const st = $('#vstage'); let img = $('#previewImg');
   if (!img) { img = document.createElement('img'); img.id = 'previewImg'; st.appendChild(img); }
   if (R._prevUrl) URL.revokeObjectURL(R._prevUrl);
   R._prevUrl = URL.createObjectURL(new Blob([pngBytes], { type: 'image/png' }));
   img.src = R._prevUrl; img.hidden = false;
+  /* NAI 설정 «Show Streamed Images Unprocessed»(rawIntermediates, 처음 값 끔): 꺼져 있으면 생성 중 그림을 흐리게(5px) 보여 준다 */
+  img.classList.toggle('raw', !!S.rawIntermediates);
   $('#viewerEmpty').hidden = true;
   let bar = $('#genBar');
   if (!bar) { bar = document.createElement('div'); bar.id = 'genBar'; bar.innerHTML = '<div class="gb-fill"></div><span class="gb-txt"></span>'; st.appendChild(bar); }
   bar.hidden = false;
-  // step/total 은 배치 전체 기준(장수 2~4면 장이 넘어가도 이어서 찬다)
-  const tot = total || S.steps;
-  bar.querySelector('.gb-fill').style.width = Math.min(100, Math.round((step / tot) * 100)) + '%';
+  frac = Math.max(0, Math.min(1, frac || 0));
+  bar.querySelector('.gb-fill').style.width = Math.round(frac * 100) + '%';
   // 남은 시간: 배치 전체 진행도로 계산해야 장이 바뀔 때 부풀지 않는다
   let eta = '';
-  if (t0 && step > 0) {
-    const left = Math.max(0, Math.round(((Date.now() - t0) / step) * (tot - step) / 1000));
+  if (t0 && frac > 0) {
+    const left = Math.max(0, Math.round(((Date.now() - t0) / frac) * (1 - frac) / 1000));
     if (left > 0) eta = ` · 약 ${left}초 남음`;
   }
   const who = (nSamp > 1) ? `${sampIx}/${nSamp}장 ` : '';
-  const st2 = sampStep != null ? sampStep : step, tot2 = (nSamp > 1) ? Math.round(tot / nSamp) : tot;
-  bar.querySelector('.gb-txt').textContent = `${who}${st2}/${tot2}${eta}`;
+  bar.querySelector('.gb-txt').textContent = `${who}${sampStep}/${sampTot}${eta}`;
 }
 function hidePreview() {
   const img = $('#previewImg'); if (img) img.hidden = true;
@@ -2768,11 +2813,21 @@ function streamOff(why) {
   if (typeof syncUI === 'function') syncUI();
 }
 
+/* NAI 가 단계를 반만 알려 주는 샘플러 (빌드 78a367e HALF_STEP_SAMPLERS) */
+const HALF_STEP_SAMPLERS = new Set(['k_dpmpp_2s_ancestral', 'k_dpmpp_sde']);
 async function generateStreaming(body) {
   const payload = { ...body, parameters: { ...body.parameters, stream: 'msgpack' } };
-  const steps = payload.parameters.steps;
-  const nS = payload.parameters.n_samples || 1;
-  const total = steps * nS;             // 장수 2~4면 배치 전체 스텝 기준으로 진행바를 채운다
+  const pp = payload.parameters, steps = pp.steps;
+  const nS = pp.n_samples || 1;
+  /* 진행도는 NAI requestStream 과 같은 셈이다: 배치 전체 단계 수(반 단계 샘플러는 반, i2i 는 세기만큼,
+     인페인트는 img2img.strength 만큼). 설정 «생성 중 그림 그대로 보기»가 꺼져 있으면(NAI 처음 값)
+     처음 5단계는 보여 주지 않고, 그만큼 진행도 셈에서도 뺀다. */
+  let total = steps * nS;
+  if (HALF_STEP_SAMPLERS.has(pp.sampler)) total /= 2;
+  if (payload.action === 'img2img' && pp.strength) total = Math.ceil(total * pp.strength);
+  if (payload.action === 'infill' && pp.img2img && pp.img2img.strength) total = Math.ceil(total * pp.img2img.strength);
+  const skip = S.rawIntermediates ? 0 : 5, denom = Math.max(1, total - nS * skip);
+  const seen = new Array(nS).fill(0);   // 장마다 마지막으로 보여 준 단계 − skip (NAI h[])
   const res = await apiFetch('/img/ai/generate-image-stream', {
     method: 'POST', headers: { ...authHeaders(true), Accept: 'application/x-msgpack' },
     body: JSON.stringify(payload), signal: R.abort && R.abort.signal,
@@ -2812,9 +2867,17 @@ async function generateStreaming(body) {
             // 몇 번째 장인지: samp_ix 가 오면 그걸 쓰고, 없으면 이미 완료된 final 개수로 대체
             const si = d.samp_ix != null ? d.samp_ix : finals.length;
             const st = d.step_ix != null ? d.step_ix : 0;
-            showPreview(d.image, si * steps + st, total, t0, si + 1, nS, st);
+            if (st < skip) continue;                                   // NAI: 처음 몇 단계는 보여 주지 않는다
+            if (seen[si] && !(st > seen[si])) { logErr(`순서가 어긋난 중간 그림을 건너뜀 (${si + 1}번째 장 ${st}단계)`); continue; }   // NAI 와 같은 판정
+            seen[si] = st - skip;
+            showPreview(d.image, seen.reduce((s, v) => s + v, 0) / denom, t0, si + 1, nS, st, Math.round(total / nS));
           }
-          else if (ev === 'final' && d.image) finals.push(new Blob([d.image], { type: 'image/png' }));
+          else if (ev === 'final' && d.image) {
+            /* NAI 는 받은 순서가 아니라 장 번호(samp_ix)대로 결과를 둔다 — 시드가 장 번호를 따르므로 순서가 바뀌면 시드 표시가 틀린다 */
+            const si = d.samp_ix != null ? d.samp_ix : finals.length;
+            seen[si] = steps - skip;
+            finals.push({ si, blob: new Blob([d.image], { type: 'image/png' }) });
+          }
         }
       }
       if (done) { finished = true; break; }
@@ -2838,7 +2901,10 @@ async function generateStreaming(body) {
     const e = new Error('스트림에서 최종 이미지를 받지 못했습니다' + (lastMsg ? ' (NAI: ' + lastMsg.slice(0, 120) + ')' : ''));
     e.charged = true; throw e;
   }
-  return finals;
+  finals.sort((x, y) => x.si - y.si);
+  const out = finals.map(f => f.blob);
+  out.sampIdx = finals.map(f => f.si);   // 장 번호 — 시드(seed + 장 번호)와 배치 번호를 맞추는 데 쓴다
+  return out;
 }
 
 /* ─────────────── 히스토리 / 뷰어 ─────────────── */
@@ -2874,7 +2940,11 @@ async function addToHistory(blob, meta, label, opt) {
   const item = { blob, meta, seed: p.seed, model: meta.model, w, h, fav: false, t: Date.now(), label: label || '', sceneId: meta.sceneId || null,
     name: `${meta.sceneName ? safeName(meta.sceneName) + '_' : 'nai_'}${ts()}_${p.seed != null ? p.seed : 'x'}_${uid()}.png` };
   if (vars) item.vars = vars;
-  try { item.id = await histPut({ blob, meta, seed: item.seed, model: item.model, w, h, fav: false, t: item.t, name: item.name, label: item.label, sceneId: item.sceneId, ...(vars ? { vars } : {}) }); }
+  /* 원본과 비교(NAI originalImage·mask): 인핸스·인페인트 결과에만 붙는다 */
+  if (opt && opt.orig) { item.orig = opt.orig; if (opt.origMask) item.origMask = opt.origMask; }
+  if (opt && opt.tool) item.tool = opt.tool;   // 디렉터 툴·업스케일 결과 (파일 이름 틀 {type} — NAI 는 툴 이름 그대로)
+  try { item.id = await histPut({ blob, meta, seed: item.seed, model: item.model, w, h, fav: false, t: item.t, name: item.name, label: item.label, sceneId: item.sceneId,
+    ...(vars ? { vars } : {}), ...(item.orig ? { orig: item.orig } : {}), ...(item.origMask ? { origMask: item.origMask } : {}), ...(item.tool ? { tool: item.tool } : {}) }); }
   catch (e) { item.unsaved = true; logErr('히스토리 저장 실패: ' + e.message); toast('이미지를 브라우저 저장소에 못 넣었습니다 (공간 부족?) — 새로고침하면 사라집니다', 'err'); }
   item.url = URL.createObjectURL(blob);
   R.hist.push(item);
@@ -3012,6 +3082,8 @@ function dropItemUrls(it) {   // 항목을 버릴 때 원본·작은 그림 주�
   try { URL.revokeObjectURL(it.url); } catch (e) {}
   if (it.thumbUrl && it.thumbUrl !== it.url) { try { URL.revokeObjectURL(it.thumbUrl); } catch (e) {} }
   it.thumbUrl = null;
+  const ou = ORIG_URL.get(it); if (ou) { try { URL.revokeObjectURL(ou.orig); if (ou.mask) URL.revokeObjectURL(ou.mask); } catch (e) { logErr('원본 주소 정리 실패: ' + e.message); } ORIG_URL.delete(it); }
+  if (Array.isArray(it.vars)) for (const v of it.vars) { const u = VAR_DISP.get(v); if (u) { try { URL.revokeObjectURL(u); } catch (e) { logErr('변형 주소 정리 실패: ' + e.message); } VAR_DISP.delete(v); } }
 }
 async function makeThumbUrl(it) {
   const w0 = it.w || THUMB_PX, h0 = it.h || THUMB_PX;
@@ -3072,6 +3144,9 @@ function histCardEl(i) {
     /* NAI 와 같은 수식어 클릭 (docs.novelai.net/en/image/history/):
          Ctrl+클릭 = 시드 뺀 전체 설정 · Shift+클릭 = 시드만 · Ctrl+Shift+클릭 = 설정+시드
        예전엔 그냥 띄우기만 해서, 설정을 가져오려면 클릭하고 툴바를 또 눌러야 했다. */
+    /* 히스토리 그림을 화면에 끌어다 놓으면 가져오기 창이 열린다 (NAI 히스토리 끌기 text/imageid 와 같은 길) */
+    d.draggable = true;
+    d.addEventListener('dragstart', e => { try { e.dataTransfer.setData('text/nai-hist', String(it.id != null ? it.id : it.t)); e.dataTransfer.effectAllowed = 'copy'; } catch (er) { logErr('히스토리 끌기 시작 실패: ' + er.message); } });
     d.onclick = e => {
       const meta = it.meta;
       if ((e.ctrlKey || e.metaKey) && e.shiftKey) { applyMeta(meta); toast('설정 + 시드를 가져왔습니다'); return; }
@@ -3150,7 +3225,58 @@ function histMarkCur(i) {
 /* 결과 변형 (배경 제거의 Masked·Generated·Blend) — NAI 와 같게 그림 한 장 안에 변형을 두고 지금 고른 변형 번호(R.varSel)로 보여 준다.
    NAI(빌드 78a367e): 새로 그림을 뽑으면 번호를 0 으로 돌리고, 디렉터 툴 결과는 고른 번호를 그대로 쓴다(Math.min 으로 맞춤).
    미리보기 그림은 늘 첫째 변형(Masked). 12.11 까지는 세 장을 따로 넣고 마지막(Blend)을 띄웠다. */
-const VAR_NAMES = { masked: '마스크 · Masked', generated: '생성 · Generated', blend: '혼합 · Blend' };
+const VAR_NAMES = { masked: '마스크 · Masked', generated: '생성 · Generated', blend: '혼합 · Blend',
+  // 결과 살펴보기를 켠 인페인트 결과 (NAI inpaintDebugVariationNames)
+  blended: '합친 결과 · Blended', rawResult: '받은 그대로 · Raw Result', overlay: '마스크 적용 · Overlay' };
+/* 보여 주기 전용 임시 주소 — 저장소에 들어가면 안 되므로(다음 실행에는 무효) 항목 바깥에 둔다 */
+const VAR_DISP = new WeakMap();   // 변형 → 원래 그림 틀 안 그 자리에 놓은 그림 주소 (집중 영역 인페인트의 받은 그대로·마스크 적용)
+const ORIG_URL = new WeakMap();   // 항목 → { orig, mask } 원본과 비교용 주소
+/* NAI variationLocations: 집중 영역 인페인트의 «받은 그대로»·«마스크 적용»은 원래 그림 틀 안 그 자리에 놓아 보여 준다.
+   틀의 나머지는 투명(체크무늬 배경이 보임 — NAI image-grid-variation-backdrop). 저장·복사는 받은 그림 그대로다. */
+async function varDisplayUrl(it) {
+  const k = itemVarIdx(it); if (k < 0) return null;
+  const v = it.vars[k]; if (!v || !v.loc) return null;
+  if (VAR_DISP.has(v)) return VAR_DISP.get(v);
+  const img = await blobToImage(v.blob);
+  /* 틀 = 원래 그림 크기(합친 결과와 같은 크기). 받은 그림은 집중 영역을 키워 그린 것이라(최대 1,048,576 화소)
+     받은 그림 크기에서 틀을 거꾸로 셈하면 틀이 원래 그림보다 몇 배 커진다 — NAI 도 % 자리로 줄여 보여 준다 */
+  let W = it.w, H = it.h;
+  if (!W || !H) { const b0 = await blobToImage(it.vars[0].blob); W = b0.width; H = b0.height; }
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const x = c.getContext('2d'); x.imageSmoothingQuality = 'high';
+  x.drawImage(img, Math.round(v.loc.x * W), Math.round(v.loc.y * H), Math.round(v.loc.w * W), Math.round(v.loc.h * H));
+  const b = await new Promise(r => c.toBlob(r, 'image/png'));
+  if (!b) throw new Error('변형 자리 그림을 만들지 못했습니다');
+  const u = URL.createObjectURL(b); VAR_DISP.set(v, u); return u;
+}
+function viewUrlOf(it) {   // 지금 큰 그림에 띄울 주소 (변형 자리 그림이 있으면 그것)
+  const k = itemVarIdx(it), v = k >= 0 ? it.vars[k] : null;
+  return (v && VAR_DISP.get(v)) || it.url;
+}
+/* 원본과 비교 (NAI display.old-compare): 단추를 누르고 있는 동안만 고치기 전 그림을 보여 주고, 인페인트면 마스크를 30% 로 겹친다 */
+function paintOld(it) {
+  const img = $('#viewerImg'), mk = $('#viewerOldMask'), btn = $('#tOld');
+  if (btn) { btn.classList.toggle('on', !!R.showOld); btn.firstChild.textContent = R.showOld ? '✧' : '✦'; }
+  if (!img || !mk) return;
+  if (R.showOld && it && it.orig) {
+    let u = ORIG_URL.get(it);
+    if (!u) { u = { orig: URL.createObjectURL(it.orig), mask: it.origMask ? URL.createObjectURL(it.origMask) : null }; ORIG_URL.set(it, u); }
+    img.src = u.orig;
+    if (u.mask) { mk.src = u.mask; mk.hidden = false; } else mk.hidden = true;
+  } else {
+    mk.hidden = true;
+    // 같은 주소를 다시 넣으면 브라우저가 그림을 다시 읽어 잠깐 크기가 0 이 된다 — 다를 때만 넣는다
+    if (it) { const u = viewUrlOf(it); if (img.src !== u) img.src = u; }
+  }
+  fitViewerBg();
+}
+/* 결과 화면 단추 줄에서 그림마다 보였다 숨었다 하는 것 */
+function paintViewTools(it) {
+  const o = $('#tOld'); if (o) { o.hidden = !(it && it.orig); o.disabled = !!R.gen; }
+  const ins = $('#tInspect'); if (ins) ins.hidden = !(it && S.inspectResults);
+  const ci = $('#tCopyImg'); if (ci) ci.hidden = !(it && typeof ClipboardItem === 'function' && navigator.clipboard && navigator.clipboard.write);
+  const iv = $('#viewerImg'); if (iv) iv.classList.toggle('noscale', S.scaleUp === false);
+}
 function itemVarIdx(it) { return it && Array.isArray(it.vars) && it.vars.length ? Math.min(R.varSel || 0, it.vars.length - 1) : -1; }
 function syncItemVar(it) {   // it.blob·it.url 을 지금 고른 변형으로 맞춘다 (저장·i2i·스마트 툴이 모두 이 blob 을 쓴다)
   const k = itemVarIdx(it); if (k < 0) return;
@@ -3189,19 +3315,28 @@ function transpBgCss(v) {
 function applyTranspBg() { document.documentElement.style.setProperty('--tbg', transpBgCss(S.transpBg)); fitViewerBg(); }
 /* 가운데 큰 그림은 칸을 꽉 채우고 object-fit: contain 으로 줄여 보이므로, 무늬는 그림이 실제로 그려진 자리에만 깐다 */
 function fitViewerBg() {
-  const img = $('#viewerImg'), bg = $('#viewerBg'); if (!img || !bg) return;
-  if (img.hidden || !img.naturalWidth) { bg.hidden = true; return; }
-  const bw = img.clientWidth, bh = img.clientHeight, s = Math.min(bw / img.naturalWidth, bh / img.naturalHeight);
+  const img = $('#viewerImg'), bg = $('#viewerBg'), mk = $('#viewerOldMask'); if (!img || !bg) return;
+  if (img.hidden || !img.naturalWidth) { bg.hidden = true; if (mk) mk.hidden = true; return; }
+  // «작은 그림 키워 보기»를 끄면(object-fit: scale-down) 실제 크기보다 키우지 않는다
+  let s = Math.min(img.clientWidth / img.naturalWidth, img.clientHeight / img.naturalHeight);
+  if (S.scaleUp === false) s = Math.min(1, s);
+  const bw = img.clientWidth, bh = img.clientHeight;
   const dw = img.naturalWidth * s, dh = img.naturalHeight * s;
-  bg.style.left = (img.offsetLeft + (bw - dw) / 2) + 'px'; bg.style.top = (img.offsetTop + (bh - dh) / 2) + 'px';
-  bg.style.width = dw + 'px'; bg.style.height = dh + 'px'; bg.hidden = false;
+  const L = (img.offsetLeft + (bw - dw) / 2) + 'px', T = (img.offsetTop + (bh - dh) / 2) + 'px';
+  bg.style.left = L; bg.style.top = T; bg.style.width = dw + 'px'; bg.style.height = dh + 'px'; bg.hidden = false;
+  if (mk && !mk.hidden) { mk.style.left = L; mk.style.top = T; mk.style.width = dw + 'px'; mk.style.height = dh + 'px'; }
 }
 function showImage(i) {
   if (i < 0 || i >= R.hist.length) return;
   R.cur = i; const it = R.hist[i];
   syncItemVar(it);
-  $('#viewerImg').src = it.url; $('#viewerImg').hidden = false; $('#viewerEmpty').hidden = true;
+  R.showOld = false;
+  $('#viewerImg').src = viewUrlOf(it); $('#viewerImg').hidden = false; $('#viewerEmpty').hidden = true;
+  { const mk = $('#viewerOldMask'); if (mk) mk.hidden = true; }
+  { const k = itemVarIdx(it); if (k >= 0 && it.vars[k].loc && !VAR_DISP.has(it.vars[k]))
+      varDisplayUrl(it).then(u => { if (u && R.hist[R.cur] === it && !R.showOld) $('#viewerImg').src = u; }).catch(e => logErr('변형 자리 그림 실패: ' + e.message)); }
   renderVarBar(it);
+  paintViewTools(it); paintOld(it);
   if (R.enhOpen && typeof enhPanelRender === 'function') { enhPanelRender(); refreshCost(); }   // NAI 인핸스 창은 그림을 바꿔도 떠 있고, 배율은 그 그림 것으로
   const p = (it.meta && it.meta.parameters) || {};
   $('#viewerMeta').innerHTML = '';
@@ -3231,9 +3366,60 @@ function stepImage(d) {
   k = Math.max(0, Math.min(idx.length - 1, k + d));
   showImage(idx[k]);
 }
+/* 그림을 클립보드에 (NAI save.copy — PNG 가 아니면 PNG 로 바꿔 넣는다) */
+async function copyImageToClipboard(blob) {
+  try {
+    if (!blob) throw new Error('그림이 없습니다');
+    let b = blob;
+    if (b.type !== 'image/png') {
+      const img = await blobToImage(b), c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+      c.getContext('2d').drawImage(img, 0, 0);
+      b = await new Promise(r => c.toBlob(r, 'image/png'));
+      if (!b) throw new Error('PNG 로 바꾸지 못했습니다');
+    }
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': b })]);
+    toast('그림을 클립보드에 복사했습니다');
+  } catch (e) { logErr('그림 복사 실패: ' + e.message); toast('그림을 클립보드에 복사하지 못했습니다: ' + e.message, 'err'); }
+}
+/* 생성 결과 살펴보기 (NAI imageResultsInspect 의 돋보기 — 결과 기록을 글로 보여 준다). 그림 자체는 크기만 적는다. */
+function openInspect(it) {
+  const { url, thumbUrl, unsaved, blob, orig, origMask, vars, ...rest } = it;
+  const view = { ...rest,
+    blob: blob ? `(그림 ${blob.size.toLocaleString()} 바이트 · ${blob.type || '?'})` : undefined,
+    vars: Array.isArray(vars) ? vars.map(v => ({ tag: v.tag, loc: v.loc || undefined, bytes: v.blob ? v.blob.size : 0 })) : undefined,
+    orig: orig ? `(원본 그림 ${orig.size.toLocaleString()} 바이트)` : undefined,
+    origMask: origMask ? `(마스크 ${origMask.size.toLocaleString()} 바이트)` : undefined };
+  openModal('생성 결과 살펴보기', body => {
+    const pre = document.createElement('div'); pre.className = 'inspect-pre';
+    pre.textContent = JSON.stringify(view, null, 2); body.appendChild(pre);
+  }, true);
+}
+/* 결과 화면 보기 설정 (NAI display.settings): 작은 그림 키워 보기 · 투명 부분 보이기(투명 그림을 만드는 모델일 때만) */
+const TBG_OPTS = [['checker', '테마 체크무늬'], ['checkerLight', '밝은 체크무늬'], ['checkerDark', '어두운 체크무늬'], ['none', '없음'], ['black', '검정'], ['white', '흰색'],
+  ['gray', '회색'], ['red', '빨강'], ['green', '초록'], ['blue', '파랑'], ['custom', '직접 고른 색']];
+function toggleViewPop(force) {
+  const pop = $('#viewPop'); if (!pop) return;
+  const open = force != null ? force : pop.hidden;
+  if (!open) { pop.hidden = true; return; }
+  pop.innerHTML = '';
+  const l1 = document.createElement('label'), c1 = document.createElement('input'); c1.type = 'checkbox'; c1.checked = S.scaleUp !== false;
+  c1.onchange = () => { S.scaleUp = c1.checked; save(); paintViewTools(curItem()); fitViewerBg(); };
+  l1.append(c1, ' 작은 그림 키워 보기 (끄면 실제 크기보다 키우지 않습니다)'); pop.appendChild(l1);
+  if (capsOf(S.model).transparency) {
+    const isHex = v => /^#[\da-f]{6}([\da-f]{2})?$/i.test(v || '');
+    const l2 = document.createElement('label'), sel = document.createElement('select'), col = document.createElement('input');
+    for (const [v, n] of TBG_OPTS) { const o = document.createElement('option'); o.value = v; o.textContent = n; sel.appendChild(o); }
+    col.type = 'color'; sel.value = isHex(S.transpBg) ? 'custom' : (S.transpBg || 'checker'); col.hidden = sel.value !== 'custom';
+    if (isHex(S.transpBg)) col.value = S.transpBg.slice(0, 7);
+    sel.onchange = () => { col.hidden = sel.value !== 'custom'; S.transpBg = sel.value === 'custom' ? col.value : sel.value; save(); applyTranspBg(); };
+    col.oninput = () => { S.transpBg = col.value; save(); applyTranspBg(); };
+    l2.append('투명 부분 보이기 ', sel, col); pop.appendChild(l2);
+  }
+  pop.hidden = false;
+}
 function clearViewer() {
   $('#viewerImg').hidden = true; $('#viewerEmpty').hidden = false; $('#viewerMeta').textContent = ''; $('#tSeedV').textContent = '';
-  renderVarBar(null); fitViewerBg();
+  renderVarBar(null); fitViewerBg(); paintViewTools(null);
   // 툴바도 초기화 — 안 하면 이미지가 없는데 ★즐겨찾기·✔저장됨 표시가 남는다
   const f = $('#tFav'); if (f) { f.textContent = '☆'; f.classList.remove('on'); }
   if (typeof paintSavedUI === 'function') paintSavedUI(null);
@@ -3317,15 +3503,196 @@ async function writeToDir(blob, name, sub) {
   if (perm !== 'granted') throw new Error('폴더 권한 없음');
   let dir = R.dirHandle;
   if (sub) dir = await dir.getDirectoryHandle(safeName(sub) || 'scene', { create: true });
+  /* 파일 이름 틀(«{prompt} s-{seed}» 등)을 켜 두면 다른 그림끼리 같은 이름이 나올 수 있다 — 그때는 덮어쓰지 않고
+     «이름 (2).png» 꼴로 비켜 쓴다(브라우저 다운로드와 같은 방식). 틀을 끈 기본 이름(날짜·고유 번호)은 그림마다 달라서
+     같은 그림을 다시 저장할 때만 겹치므로 예전처럼 그 파일에 다시 쓴다. */
+  const exists = async n => { try { await dir.getFileHandle(n); return true; } catch (e) { if (e && e.name === 'NotFoundError') return false; throw e; } };
+  if (S.fnTplOn && await exists(name)) {
+    const dot = name.lastIndexOf('.'), stem = dot > 0 ? name.slice(0, dot) : name, ext = dot > 0 ? name.slice(dot) : '';
+    let k = 2; while (k < 1000 && await exists(`${stem} (${k})${ext}`)) k++;
+    name = `${stem} (${k})${ext}`;
+  }
   const fh = await dir.getFileHandle(name, { create: true });
   const w = await fh.createWritable(); await w.write(blob); await w.close();
 }
 /* 결과 변형이 있는 그림은 파일 이름 끝에 변형 이름을 붙인다 — NAI 자동 다운로드와 같은 꼴 `이름_masked.png` */
 const varFileName = (name, tag) => (tag ? String(name).replace(/\.png$/i, '') + '_' + tag + '.png' : name);
+
+/* ── 파일 이름 틀 (NAI 설정 «Custom File Name Template», 빌드 78a367e renderFilenameTemplate 를 그대로 옮김) ──
+   {이름} 을 그림 정보로 바꾸고 | 로 거르개를 잇는다. 예: {prompt|first:40|pre:-} · {characters|max:2|join:&} */
+const FN_TPL_DEFAULT = '{prompt} s-{seed}';
+const FN_TEXT_FILTERS = { first: 'positiveInt', last: 'positiveInt', words: 'nonzeroInt', tags: 'nonzeroInt', pre: 'text', suf: 'text', pad: 'positiveInt', lower: 'none', upper: 'none' };
+const FN_CHAR_FILTERS = { max: 'positiveInt', at: 'positiveInt', each: 'positiveInt', join: 'text', full: 'none' };
+const FN_TOKENS = new Set(['prompt', 'seed', 'date', 'time', 'model', 'modelname', 'resolution', 'width', 'height', 'index', 'id', 'type', 'characters']);
+const FN_GENDER_TAGS = new Set(['girl', 'female', 'boy', 'male', '1girl', '1boy']);
+class FnTplError extends Error {}
+const fnInt = v => (v !== undefined && /^-?\d+$/.test(v.trim())) ? parseInt(v.trim(), 10) : undefined;
+function fnTplCheckArg(name, kind, arg) {
+  switch (kind) {
+    case 'none': if (arg !== undefined) throw new FnTplError(`«${name}» 필터는 값을 받지 않습니다`); break;
+    case 'text': if (arg === undefined) throw new FnTplError(`«${name}» 필터에는 값이 필요합니다 (예: «${name}:-»)`); break;
+    case 'positiveInt': { const v = fnInt(arg); if (v === undefined || v <= 0) throw new FnTplError(`«${name}» 필터에는 1 이상의 숫자가 필요합니다`); break; }
+    case 'nonzeroInt': { const v = fnInt(arg); if (v === undefined || v === 0) throw new FnTplError(`«${name}» 필터에는 0 이 아닌 숫자가 필요합니다`); }
+  }
+}
+function fnTplToken(body) {
+  const parts = body.split('|'), name = parts[0].trim();
+  if (!FN_TOKENS.has(name)) throw new FnTplError(`모르는 이름 «{${name}}»`);
+  const isChar = name === 'characters'; let textStarted = !isChar; const filters = [];
+  for (const raw of parts.slice(1)) {
+    const c = raw.indexOf(':'), fname = (c === -1 ? raw : raw.slice(0, c)).trim(), arg = c === -1 ? undefined : raw.slice(c + 1);
+    const tk = FN_TEXT_FILTERS[fname], ck = FN_CHAR_FILTERS[fname];
+    if (tk === undefined && ck === undefined) throw new FnTplError(`«${fname}» 라는 필터는 없습니다`);
+    if (tk === undefined) {
+      if (!isChar) throw new FnTplError(`«${fname}» 필터는 {characters} 에만 씁니다`);
+      if (textStarted) throw new FnTplError(`«${fname}» 필터는 «first»·«pre» 같은 글자 필터보다 앞에 써야 합니다`);
+    } else textStarted = true;
+    fnTplCheckArg(fname, tk || ck, arg);
+    filters.push({ name: fname, arg });
+  }
+  return { kind: 'token', name, filters };
+}
+function fnTplParse(s) {
+  const out = []; let txt = '', n = 0;
+  while (n < s.length) {
+    const ch = s[n];
+    if (ch === '{') {
+      if (s[n + 1] === '{') { txt += '{'; n += 2; continue; }
+      const close = s.indexOf('}', n);
+      if (close === -1) throw new FnTplError(`${n + 1}번째 글자의 «{» 가 닫히지 않았습니다`);
+      if (txt) { out.push({ kind: 'text', text: txt }); txt = ''; }
+      out.push(fnTplToken(s.slice(n + 1, close)));
+      n = close + 1; continue;
+    }
+    txt += ch; n++;
+  }
+  if (txt) out.push({ kind: 'text', text: txt });
+  return out;
+}
+function fnTplFilter(v, f) {
+  switch (f.name) {
+    case 'first': return [...v].slice(0, fnInt(f.arg)).join('');
+    case 'last': return [...v].slice(-fnInt(f.arg)).join('');
+    case 'words': { const w = v.split(/\s+/).filter(Boolean), n = fnInt(f.arg); return (n > 0 ? w.slice(0, n) : w.slice(n)).join(' '); }
+    case 'tags': { const t = v.split(',').map(x => x.trim()).filter(Boolean), n = fnInt(f.arg); return (n > 0 ? t.slice(0, n) : t.slice(n)).join(', '); }
+    case 'pre': return v === '' ? '' : (f.arg ?? '') + v;
+    case 'suf': return v === '' ? '' : v + (f.arg ?? '');
+    case 'pad': return /^\d+$/.test(v) ? v.padStart(fnInt(f.arg), '0') : v;
+    case 'lower': return v.toLowerCase();
+    case 'upper': return v.toUpperCase();
+  }
+  return v;
+}
+function fnTplChars(filters, chars) {
+  let max, at, each, r, full = false, join = '+';
+  const list = () => {
+    let e = (at === undefined ? chars.slice(0, max ?? 3) : (chars[at - 1] ? [chars[at - 1]] : [])).map(c => {
+      if (full) return c.prompt.trim();
+      if (c.name != null) return c.name;
+      const tags = c.prompt.split(',').map(x => x.trim()).filter(Boolean);
+      return tags.length === 0 ? '' : FN_GENDER_TAGS.has(tags[0].toLowerCase()) ? (tags[1] ?? tags[0]) : tags[0];   // 첫 태그가 girl·boy 꼴이면 다음 태그
+    });
+    if (each !== undefined) e = e.map(s => [...s].slice(0, each).join(''));
+    return e.filter(s => s.length > 0).join(join);
+  };
+  for (const f of filters) {
+    if (r === undefined && FN_TEXT_FILTERS[f.name] === undefined) {
+      switch (f.name) { case 'full': full = true; break; case 'max': max = fnInt(f.arg); break; case 'at': at = fnInt(f.arg); break; case 'each': each = fnInt(f.arg); break; case 'join': join = f.arg ?? ''; }
+      continue;
+    }
+    if (r === undefined) r = list();
+    r = fnTplFilter(r, f);
+  }
+  return r ?? list();
+}
+const pad2 = n => String(n).padStart(2, '0');
+function fnTplBase(name, d) {
+  switch (name) {
+    case 'prompt': return d.prompt ?? '';
+    case 'seed': return d.seed == null ? '' : String(d.seed);
+    case 'date': { if (!d.date) return ''; const t = new Date(d.date); return `${t.getFullYear()}-${pad2(t.getMonth() + 1)}-${pad2(t.getDate())}`; }
+    case 'time': { if (!d.date) return ''; const t = new Date(d.date); return `${pad2(t.getHours())}-${pad2(t.getMinutes())}-${pad2(t.getSeconds())}`; }
+    case 'model': return d.model ?? '';
+    case 'modelname': { if (!d.model) return ''; const mm = MODELS[d.model]; return mm ? mm.name.replace('NAI Diffusion ', '') : d.model; }
+    case 'resolution': return d.width && d.height ? `${d.width}x${d.height}` : '';
+    case 'width': return d.width ? String(d.width) : '';
+    case 'height': return d.height ? String(d.height) : '';
+    case 'index': return d.index === undefined ? '' : String(d.index + 1);
+    case 'id': return d.id ?? '';
+    case 'type': return d.type ?? '';
+  }
+  return '';
+}
+function fnTplRender(tpl, d) {
+  const toks = typeof tpl === 'string' ? fnTplParse(tpl) : tpl;
+  let o = '';
+  for (const t of toks) {
+    if (t.kind === 'text') { o += t.text; continue; }
+    if (t.name === 'characters') { o += fnTplChars(t.filters, d.characters || []); continue; }
+    let v = fnTplBase(t.name, d);
+    // {prompt} 는 길이 거르개가 없으면 80 글자까지 (NAI 와 같음)
+    if (t.name === 'prompt' && !t.filters.some(f => ['first', 'last', 'words', 'tags'].includes(f.name))) v = [...v].slice(0, 80).join('');
+    for (const f of t.filters) v = fnTplFilter(v, f);
+    o += v;
+  }
+  o = o.replace(/[\n\r"%*/:<>?\\|]/g, '_').trim();
+  if ([...o].length > 180) o = [...o].slice(0, 180).join('').trim();
+  return o;
+}
+/* {type}: NAI 이름표 순서 inpaint·enhanced·variations·upscale·image2image(·vibe-transfer) — 디렉터 툴은 툴 이름, 그냥 생성은 빈 글 */
+function fnTypeOf(it) {
+  if (it.tool) return it.tool;
+  const m = it.meta || {}, lb = String(it.label || '');
+  if (m.action === 'infill') return 'inpaint';
+  if (/^인핸스/.test(lb)) return 'enhanced';
+  if (/^변형/.test(lb)) return 'variations';
+  if (/^업스케일/.test(lb)) return 'upscale';
+  if (m.action === 'img2img') return 'image2image';
+  return '';
+}
+function fnTplData(it) {
+  const m = (it && it.meta) || {}, p = m.parameters || {};
+  const mdl = INPAINT_BASE[it.model] || it.model;
+  const chars = Array.isArray(p.characterPrompts)
+    ? p.characterPrompts.filter(c => c && c.enabled !== false && typeof c.prompt === 'string').map(c => ({ name: typeof c.name === 'string' && c.name.trim() ? c.name.trim() : undefined, prompt: c.prompt }))
+    : [];
+  return { prompt: typeof m.uprompt === 'string' ? m.uprompt : (m.pre && typeof m.pre.input === 'string' ? m.pre.input : (typeof m.input === 'string' ? m.input : '')),
+    seed: it.seed != null ? it.seed : p.seed, model: typeof mdl === 'string' ? mdl : undefined, width: it.w, height: it.h,
+    id: it.id != null ? String(it.id) : undefined, date: it.t, characters: chars, type: fnTypeOf(it), index: m.batchIndex || 0 };
+}
+/* 쓰는 법 (NAI imageFilenameTemplateHelp 를 우리말로) */
+function fnTplHelpHtml() {
+  const rows = a => a.map(([k, v]) => `<tr><td><code>${escHtml(k)}</code></td><td>${escHtml(v)}</td></tr>`).join('');
+  return `<div class="hint">이름은 <code>{이름}</code>처럼 중괄호로 감싸 쓰고, <code>|</code> 뒤에 필터를 이어 붙입니다. 예: <code>{prompt|first:40|pre:-}</code>.
+    값이 없는 이름은 아무것도 남기지 않고, 그때는 그 이름의 pre·suf 도 같이 빠집니다. 필터는 왼쪽부터 차례로 적용되므로
+    <code>{prompt|tags:4|tags:-2}</code> 는 앞 태그 둘을 건너뛰고 그다음 둘을 남깁니다. <code>{{</code> 는 글자 «{» 입니다.</div>
+    <div class="mtitle" style="margin-top:6px">이름</div><table class="fnhelp-t">${rows([
+      ['{prompt}', '프롬프트 (길이 필터가 없으면 80 글자까지)'], ['{seed}', '시드'], ['{date}', '만든 날짜 — 예: 2026-08-21'], ['{time}', '만든 시각 — 예: 09-30-05'],
+      ['{model}', '모델 ID — 예: nai-diffusion-5-full'], ['{modelname}', '모델 짧은 이름 — 예: V5 Full'], ['{resolution}', '크기 — 예: 832x1216'], ['{width}', '가로'], ['{height}', '세로'],
+      ['{index}', '한 번에 뽑은 장 가운데 몇 번째인지 (1부터)'], ['{id}', '그림마다 다른 번호'], ['{type}', '만든 방식 (inpaint·upscale 등, 일반 생성이면 비어 있음)'],
+      ['{characters}', '캐릭터 이름 — 이름이 없으면 그 캐릭터 프롬프트의 첫 태그(맨 앞 태그가 girl·boy 같은 성별 태그면 그다음 태그)']])}</table>
+    <div class="mtitle" style="margin-top:6px">필터</div><table class="fnhelp-t">${rows([
+      ['first:N, last:N', '앞·뒤 N 글자만 남기기'], ['words:N', '앞 N 단어만 (음수면 뒤 N 단어)'], ['tags:N', '쉼표로 나눈 태그 앞 N 개만 (음수면 뒤 N 개)'],
+      ['pre:X, suf:X', '앞·뒤에 X 붙이기 (값이 비면 안 붙임)'], ['pad:N', '숫자를 N 자리로 0 채우기'], ['lower, upper', '소문자·대문자로']])}</table>
+    <div class="mtitle" style="margin-top:6px">캐릭터 목록 필터 (글자 필터보다 앞에)</div><table class="fnhelp-t">${rows([
+      ['max:N', '캐릭터를 N 명까지 (기본값 3)'], ['at:N', 'N 번째 캐릭터만'], ['each:N', '캐릭터마다 N 글자까지'], ['join:X', '캐릭터 사이에 넣을 글자 (기본값 +)'],
+      ['full', '이름·첫 태그 대신 캐릭터 프롬프트 전체']])}</table>
+    <div class="hint">파일 이름에 쓸 수 없는 글자(" % * / : &lt; &gt; ? \\ |, 줄바꿈)는 _ 로 바뀌고, 180 글자를 넘으면 잘립니다. 같은 이름의 파일이 폴더에 있으면 «이름 (2).png» 처럼 번호를 붙여 저장합니다.</div>`;
+}
+/* 저장할 파일 이름 — 틀을 켜 두었으면 틀로(틀이 잘못됐거나 빈 이름이면 원래 이름), 끄면 지금까지의 이름 */
+function fileNameFor(it, tag) {
+  if (S.fnTplOn && it) {
+    try {
+      const n = fnTplRender(S.fnTpl || FN_TPL_DEFAULT, fnTplData(it));
+      if (n) return varFileName(n + '.png', tag);
+    } catch (e) { logErr('파일 이름 틀 오류(원래 이름으로 저장): ' + e.message); }
+  }
+  return varFileName(it.name, tag);
+}
 async function saveItem(item, strip, silent) {
   let blob = item.blob; if (strip) blob = await stripBlob(blob);
   const vk = itemVarIdx(item);
-  const name = (strip ? 'clean_' : '') + varFileName(item.name, vk >= 0 ? item.vars[vk].tag : null);
+  const name = (strip ? 'clean_' : '') + fileNameFor(item, vk >= 0 ? item.vars[vk].tag : null);
   if (R.dirHandle) { try { await writeToDir(blob, name, item.meta && item.meta.sceneName); if (!silent) toast((strip ? '메타데이터 제거 후 ' : '') + '저장됨: ' + name); markSaved(item, 'save', silent); return; } catch (e) { toast('폴더 저장 실패, 다운로드로 대체: ' + e.message, 'err'); } }
   if (strip && !silent) toast('메타데이터(청크+숨은 stealth) 제거 후 저장: ' + name);
   // 폴더가 지정돼 있지 않으면 브라우저 다운로드로 넘긴다. 받았는지는 확인할 수 없으므로
@@ -3342,8 +3709,8 @@ async function autoSave(item) {
     const sub = item.meta && item.meta.sceneName ? item.meta.sceneName : null;
     /* 결과 변형이 있으면 NAI 자동 다운로드처럼 변형마다 `이름_masked.png` 꼴로 모두 남긴다 */
     const parts = (Array.isArray(item.vars) && item.vars.length)
-      ? item.vars.map(v => ({ blob: v.blob, name: varFileName(item.name, v.tag) }))
-      : [{ blob: item.blob, name: item.name }];
+      ? item.vars.map(v => ({ blob: v.blob, name: fileNameFor(item, v.tag) }))
+      : [{ blob: item.blob, name: fileNameFor(item, null) }];
     // 폴더 쓰기가 실패해도(새로고침 뒤 권한이 'prompt' 로 돌아가는 경우가 흔하다)
     // 그냥 넘어가면 이미지가 디스크에 한 장도 안 남는다. 수동 저장처럼 다운로드로 대체한다.
     let how = 'auto';
@@ -3417,7 +3784,49 @@ async function autoLoopBody() {
 
 /* ─────────────── 캐릭터 프롬프트 (메인) ─────────────── */
 const POS_LABELS = 'ABCDE';
-function posName(c) { if (c.x == null) return '자동'; return POS_LABELS[Math.round((c.x - 0.1) / 0.2)] + (Math.round((c.y - 0.1) / 0.2) + 1); }
+/* NAI(빌드 78a367e) 캐릭터 자리 규칙
+   · V5 는 아무 자리에나 놓는다(능력표 freeformCharacterPosition), V4·V4.5 는 5×5 칸 가운데(0.1·0.3·0.5·0.7·0.9)에 맞춘다(snapCenterToGrid)
+   · V5 는 캐릭터가 한 명이어도 자리를 정할 수 있고(canPositionOneCharacter), V4·V4.5 는 두 명부터
+   · 새 캐릭터는 가운데 줄(0.5·0.3·0.7·0.1·0.9)부터, 그다음 가운데에서 가까운 칸 순서로 빈자리를 받는다(E1) */
+const POS_GRID_VALUES = [.1, .3, .5, .7, .9];
+const snapPos = v => POS_GRID_VALUES[Math.min(4, Math.max(0, Math.floor(5 * v)))];
+const freePos = m => isV5(m);
+const canPosOne = m => isV5(m);
+const POS_E1 = (() => {
+  const a = [.5, .3, .7, .1, .9].map(x => ({ x, y: .5 }));
+  const b = [.1, .3, .7, .9].flatMap(y => POS_GRID_VALUES.map(x => ({ x, y })));
+  b.sort((p, q) => Math.hypot(p.x - .5, p.y - .5) - Math.hypot(q.x - .5, q.y - .5) || Math.abs(p.y - .5) - Math.abs(q.y - .5) || p.x - q.x || p.y - q.y);
+  return a.concat(b);
+})();
+function nextCharPos(list, m) {
+  const ff = freePos(m);
+  for (const p of POS_E1) {
+    if (!list.some(c => c.x != null && (ff ? Math.hypot(c.x - p.x, c.y - p.y) < .1 : snapPos(c.x) === p.x && snapPos(c.y) === p.y))) return { x: p.x, y: p.y };
+  }
+  return { x: .5, y: .5 };
+}
+/* 겹침 (NAI stackedCharacterWarning): V5 는 두 캐릭터 사이가 0.1 보다 가까우면, V4·V4.5 는 같은 칸이면 */
+function charsOverlap(list, m) {
+  const cs = (list || []).filter(c => c && c.x != null);
+  const ff = freePos(m);
+  for (let i = 0; i < cs.length; i++) for (let j = i + 1; j < cs.length; j++) {
+    const a = cs[i], b = cs[j];
+    if (ff ? Math.hypot(a.x - b.x, a.y - b.y) < .1 : (snapPos(a.x) === snapPos(b.x) && snapPos(a.y) === snapPos(b.y))) return true;
+  }
+  return false;
+}
+const CHAR_OVERLAP_MSG = '캐릭터 자리가 겹치면 그림 품질이 떨어질 수 있습니다. 캐릭터 위치를 고치거나 «AI 자동 배치»를 켜 주세요.';
+function paintCharWarn() {
+  const w = $('#charWarn'); if (!w) return;
+  const show = !S.aiChoice && !!capsOf(S.model).maxChars && charsOverlap(S.chars, S.model) && !$('#modalBody .pos-stage');
+  w.hidden = !show; w.textContent = show ? '⚠ ' + CHAR_OVERLAP_MSG : '';
+}
+function posName(c) {
+  if (c.x == null) return '자동';
+  const gx = POS_GRID_VALUES.indexOf(Math.round(c.x * 10) / 10), gy = POS_GRID_VALUES.indexOf(Math.round(c.y * 10) / 10);
+  if (gx >= 0 && gy >= 0 && Math.abs(c.x - POS_GRID_VALUES[gx]) < 1e-6 && Math.abs(c.y - POS_GRID_VALUES[gy]) < 1e-6) return POS_LABELS[gx] + (gy + 1);
+  return `${Math.round(c.x * 100)}·${Math.round(c.y * 100)}`;   // V5 자유 자리 (가로·세로 %)
+}
 function renderChars() {
   const list = $('#charList'); list.innerHTML = '';
   /* 카드를 통째로 다시 만들면 R.lastTA 가 사라진 노드를 가리킨다 —
@@ -3427,6 +3836,7 @@ function renderChars() {
     { list: S.chars, redraw: renderChars })));
   $('#aiChoiceBtn').classList.toggle('on', !!S.aiChoice);
   $('#aiChoiceBtn').textContent = S.aiChoice ? '✔ AI 자동 배치' : '☐ 좌표 지정 사용';
+  paintCharWarn();
   /* 접힘·개수 표시도 여기서 같이 맞춘다. 12.8 은 ⏻ 를 누를 때만 갱신해서, 캐릭터를 추가·삭제하거나
      PNG 에서 불러와도 '2명' 같은 옛 숫자가 그대로 남았다. */
   if (window.applyCharFold) applyCharFold();
@@ -3482,27 +3892,121 @@ function charCard(c, i, onDel, onChange, opts) { // 메인·씬 공용 카드
   tp.addEventListener('input', () => { c.prompt = tp.value; markUserEdit(); onChange(); });
   tu.addEventListener('input', () => { c.uc = tu.value; markUserEdit(); onChange(); });
   card.querySelector('.del').onclick = onDel;
-  card.querySelector('.pos').onclick = () => openPosPicker(c, () => { onChange(); card.querySelector('.pos').textContent = '위치: ' + posName(c); });
+  { const pb = card.querySelector('.pos'), arr = opts.list || S.chars;
+    /* NAI: V4·V4.5 는 캐릭터가 두 명부터 자리를 정할 수 있다(V5 는 한 명도) — 못 정할 때는 단추를 잠그고 까닭을 적는다 */
+    const can = arr.length >= 2 || canPosOne(S.model);
+    pb.disabled = !can; if (!can) pb.title = 'V4·V4.5 는 캐릭터가 두 명 이상일 때 자리를 정할 수 있습니다 (NAI 와 같음 · V5 는 한 명도 됩니다)';
+    pb.onclick = () => openPosPicker(c, () => { onChange(); pb.textContent = '위치: ' + posName(c); }, arr); }
   card.querySelector('.savelib').onclick = () => { if (!c.prompt.trim()) { toast('프롬프트가 비었습니다', 'err'); return; } if (window.saveCharToLibrary) saveCharToLibrary(c); };
   return card;
 }
-function openPosPicker(c, after) {
+/* 캐릭터 더하기 (NAI: ＋ 를 누르면 «여자·남자·그 외» 가운데 고르고, 프롬프트가 «girl, »·«boy, »·빈 글로 시작한다.
+   새 캐릭터는 빈자리를 받고, 네거티브는 V4 모델이면 «lowres, aliasing, »·나머지는 빈 글 — characterPromptDefaultUcForModel) */
+const charDefaultUc = m => ((MODELS[modelOf(m)] || {}).ver === 40 ? 'lowres, aliasing, ' : '');
+function addCharWith(prefix) {
+  S.chars.push({ prompt: prefix, uc: charDefaultUc(S.model), ...nextCharPos(S.chars, S.model) });
+  // 접혀 있으면 펴 준다 — 숨은 목록에 추가되면 화면엔 아무 변화가 없어 '안 눌린다' 로 보인다
+  if (S.charsOpen === false) S.charsOpen = true;
+  save(); renderChars();
+  const tas = $$('#charList .cprompt'), ta = tas[tas.length - 1];
+  if (ta) { ta.focus(); try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) { logErr('캐릭터 칸 커서 옮기기 실패: ' + e.message); } }
+}
+function openAddCharMenu() {
+  const btn = $('#btnAddChar'); let pop = $('#addCharPop');
+  if (pop) { pop.remove(); return; }
+  pop = document.createElement('div'); pop.id = 'addCharPop'; pop.className = 'addchar-pop';
+  for (const [label, pre] of [['♀ 여자', 'girl, '], ['♂ 남자', 'boy, '], ['○ 그 외', '']]) {
+    const b = document.createElement('button'); b.className = 'btn sm'; b.textContent = label;
+    b.onclick = () => { pop.remove(); addCharWith(pre); };
+    pop.appendChild(b);
+  }
+  btn.parentNode.style.position = 'relative'; btn.parentNode.appendChild(pop);
+  const off = e => { if (!pop.isConnected) { document.removeEventListener('mousedown', off, true); return; } if (!pop.contains(e.target) && e.target !== btn) { pop.remove(); document.removeEventListener('mousedown', off, true); } };
+  document.addEventListener('mousedown', off, true);
+}
+/* 캐릭터 위치 — NAI 결과 화면의 위치 잡기와 같은 방식: 그림(바탕 그림, 없으면 지금 보는 그림이 같은 비율일 때) 위에서
+   캐릭터 점을 끌어 옮긴다. 격자 선(없음·3분할·황금비·직접 칸 수 2~12)은 NAI «Show Grid» 와 같다. */
+function posGridLines(g) {
+  const t = (g && g.type) || 'none';
+  if (t === 'thirds') return { v: [100 / 3, 200 / 3], h: [100 / 3, 200 / 3] };
+  if (t === 'golden') { const P = (1 + Math.sqrt(5)) / 2, a = (1 - 1 / P) * 100, b = 1 / P * 100; return { v: [a, b], h: [a, b] }; }
+  if (t === 'grid') {
+    const cl = Math.min(12, Math.max(2, g.cols || 3)), rw = Math.min(12, Math.max(2, g.rows || 3)), v = [], h = [];
+    for (let k = 1; k < cl; k++) v.push(k / cl * 100); for (let k = 1; k < rw; k++) h.push(k / rw * 100);
+    return { v, h };
+  }
+  return { v: [], h: [] };
+}
+function openPosPicker(c, after, list) {
+  list = list || S.chars;
+  const m = S.model, ff = freePos(m);
+  let cur = c;
   openModal('캐릭터 위치', body => {
-    body.innerHTML = '<div class="hint">칸을 고르면 좌표 지정 · "자동"은 AI가 배치. (좌표를 쓰려면 위 "AI 자동 배치"를 꺼야 합니다)</div>';
-    const auto = document.createElement('button'); auto.className = 'btn sm'; auto.textContent = 'AI 자동 배치'; auto.style.alignSelf = 'center';
-    auto.onclick = () => { c.x = null; c.y = null; after(); closeModal(); };
-    body.appendChild(auto);
-    const grid = document.createElement('div'); grid.className = 'pos-grid';
-    for (let row = 0; row < 5; row++) for (let col = 0; col < 5; col++) {
-      const b = document.createElement('button'); b.className = 'pos-cell';
-      const x = 0.1 + col * 0.2, y = 0.1 + row * 0.2;
-      b.textContent = POS_LABELS[col] + (row + 1);
-      if (c.x != null && Math.abs(c.x - x) < .01 && Math.abs(c.y - y) < .01) b.classList.add('on');
-      b.onclick = () => { c.x = x; c.y = y; S.aiChoice = false; renderChars(); after(); closeModal(); };
-      grid.appendChild(b);
-    }
-    body.appendChild(grid);
-  });
+    const g = S.posGrid = { type: 'none', cols: 3, rows: 3, ...(S.posGrid || {}) };   // 처음 값 객체를 같이 고치지 않게 새로 만든다
+    body.innerHTML = `<div class="hint">점을 끌거나 원하는 자리를 누르면 고른 캐릭터가 그 자리로 옮겨집니다. ${ff ? 'V5 는 아무 자리에나 놓을 수 있습니다.' : 'V4·V4.5 는 5×5 칸 가운데에 맞춰집니다.'} 좌표를 쓰면 «AI 자동 배치»가 꺼집니다.</div>
+      <div class="row pos-bar"><button class="btn sm" id="ppAuto">AI 자동 배치</button>
+        <label class="hint">격자 <select id="ppGrid"><option value="none">없음</option><option value="thirds">3분할</option><option value="golden">황금비</option><option value="grid">직접 칸 수</option></select></label>
+        <span id="ppGridN" class="hint"></span></div>
+      <div class="pos-stage" id="ppStage"><img id="ppBg" alt="" hidden><svg id="ppLines" viewBox="0 0 100 100" preserveAspectRatio="none"></svg></div>
+      <div class="char-warn" id="ppWarn" hidden></div>`;
+    const stage = body.querySelector('#ppStage'), bg = body.querySelector('#ppBg'), svg = body.querySelector('#ppLines');
+    // 판 크기: 지금 생성 크기 비율 (긴 쪽 460px · 화면 높이의 60% 안)
+    const ar = (S.w || 832) / (S.h || 1216), maxH = Math.max(220, window.innerHeight * 0.6);
+    let W = 460, H = W / ar; if (H > maxH) { H = maxH; W = H * ar; }
+    stage.style.width = Math.round(W) + 'px'; stage.style.height = Math.round(H) + 'px';
+    // 바탕: NAI 처럼 바탕 그림이 있으면 그것, 없으면 지금 보는 그림이 같은 비율일 때만
+    const it = curItem();
+    if (R.i2iBlob) { bg.src = URL.createObjectURL(R.i2iBlob); bg.hidden = false; bg.onload = () => URL.revokeObjectURL(bg.src); }
+    else if (it && it.w && it.h && Math.abs(it.w / it.h - ar) <= .01) { bg.src = viewUrlOf(it); bg.hidden = false; }
+    const drawLines = () => {
+      const L = posGridLines(g);
+      svg.innerHTML = L.v.map(x => `<line x1="${x}" y1="0" x2="${x}" y2="100"/>`).join('') + L.h.map(y => `<line x1="0" y1="${y}" x2="100" y2="${y}"/>`).join('');
+      const n = body.querySelector('#ppGridN');
+      if (g.type === 'grid') {
+        n.innerHTML = `가로 <button class="btn xs" data-k="cols" data-d="-1">−</button> ${g.cols} <button class="btn xs" data-k="cols" data-d="1">＋</button> · 세로 <button class="btn xs" data-k="rows" data-d="-1">−</button> ${g.rows} <button class="btn xs" data-k="rows" data-d="1">＋</button>`;
+        n.querySelectorAll('button').forEach(b => {
+          const k = b.dataset.k, d = +b.dataset.d;
+          b.disabled = d < 0 ? g[k] <= 2 : g[k] >= 12;
+          b.onclick = () => { g[k] = Math.min(12, Math.max(2, g[k] + d)); save(); drawLines(); };
+        });
+      } else n.innerHTML = '';
+    };
+    const sel = body.querySelector('#ppGrid'); sel.value = g.type; sel.onchange = () => { g.type = sel.value; save(); drawLines(); };
+    const dots = [];
+    const paint = () => {
+      list.forEach((ch, k) => {
+        let d = dots[k];
+        if (!d) { d = document.createElement('div'); d.className = 'pos-dot'; d.textContent = String(k + 1); d.dataset.k = k; stage.appendChild(d); dots[k] = d; }
+        const has = ch.x != null;
+        d.hidden = !has; d.classList.toggle('on', ch === cur); d.classList.toggle('off', !!ch.off);
+        if (has) { d.style.left = (ch.x * 100) + '%'; d.style.top = (ch.y * 100) + '%'; }
+        d.title = `캐릭터 ${k + 1}${ch.prompt ? ' — ' + ch.prompt.slice(0, 40) : ''}`;
+      });
+      const w = body.querySelector('#ppWarn'), ov = charsOverlap(list, m);
+      w.hidden = !ov; w.textContent = ov ? '⚠ ' + CHAR_OVERLAP_MSG : '';
+    };
+    const place = (ev) => {
+      const r = stage.getBoundingClientRect();
+      let x = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)), y = Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height));
+      if (!ff) { x = snapPos(x); y = snapPos(y); }
+      else { x = Math.round(x * 1000) / 1000; y = Math.round(y * 1000) / 1000; }
+      cur.x = x; cur.y = y; S.aiChoice = false; paint();
+    };
+    let drag = false;
+    stage.addEventListener('pointerdown', ev => {
+      const d = ev.target.closest && ev.target.closest('.pos-dot');
+      if (d) cur = list[+d.dataset.k] || cur;
+      drag = true; try { stage.setPointerCapture(ev.pointerId); } catch (e) { logErr('위치 끌기 잡기 실패: ' + e.message); }
+      ev.preventDefault(); place(ev);
+    });
+    stage.addEventListener('pointermove', ev => { if (drag) place(ev); });
+    const end = () => { if (!drag) return; drag = false; after(); if (list === S.chars) { save(); const b = $('#aiChoiceBtn'); if (b) { b.classList.toggle('on', !!S.aiChoice); b.textContent = S.aiChoice ? '✔ AI 자동 배치' : '☐ 좌표 지정 사용'; } } };
+    stage.addEventListener('pointerup', end); stage.addEventListener('pointercancel', end);
+    body.querySelector('#ppAuto').onclick = () => { S.aiChoice = true; save(); after(); if (list === S.chars) renderChars(); closeModal(); };
+    // 자리가 없는(예전 «자동») 캐릭터는 NAI 처럼 빈자리를 하나 준다 — 판에 점이 있어야 끌 수 있다
+    for (const ch of list) if (ch.x == null) { const p = nextCharPos(list.filter(o => o !== ch), m); ch.x = p.x; ch.y = p.y; }
+    drawLines(); paint();
+  }, false, () => { if (list === S.chars) renderChars(); });
 }
 
 /* ─────────────── i2i / 마스크 / 바이브 / 정밀 레퍼런스 ─────────────── */
@@ -3619,7 +4123,20 @@ function pngCopyText(srcU8, dstU8) {
 }
 /* 결과를 기준 그림 위에 부드러운 마스크로 합친다 (NAI applyMaskToSource → placeImageInOtherImage).
    결과의 숨은 메타 점(stealth)은 먼저 지우고(removeAlphaMetadata), 원래 결과의 글 메타데이터는 옮겨 붙인다. */
-async function compositeInpaint(blob, info) {
+/* 원본과 비교 때 겹쳐 보일 인페인트 마스크 PNG (NAI InfillMask 와 같은 꼴 — 그림의 1/8 크기, 칠한 칸은 흰색 불투명·나머지는 투명).
+   m 은 그림판 마스크({w8,h8,data})나 요청용 칸({cw,ch,cells}) 둘 다 받는다. */
+async function maskPng8(m) {
+  if (!m) return null;
+  const w = m.w8 || m.cw, h = m.h8 || m.ch, cells = m.data || m.cells;
+  if (!w || !h || !cells) return null;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d'), d = x.createImageData(w, h);
+  for (let k = 0; k < w * h; k++) if (cells[k]) { const i = k * 4; d.data[i] = d.data[i + 1] = d.data[i + 2] = d.data[i + 3] = 255; }
+  x.putImageData(d, 0, 0);
+  return await new Promise(r => c.toBlob(r, 'image/png'));
+}
+/* full 이면 결과 살펴보기(NAI imageResultsInspect)에 쓸 «마스크 적용» 그림(applyMaskToSource 결과)과 집중 영역 자리도 같이 돌려준다 */
+async function compositeInpaint(blob, info, full) {
   const { w, h } = info, RG = info.region;   // RG: 집중 영역이면 원래 그림에서 붙일 자리 (그림 화소)
   const base = await blobToImage(new Blob([b64ToU8(RG ? info.fullB64 : info.baseB64)], { type: 'image/png' }));
   const res = await blobToImage(blob);
@@ -3638,7 +4155,11 @@ async function compositeInpaint(blob, info) {
   const pb = await new Promise(r => out.toBlob(r, 'image/png'));
   if (!pb) throw new Error('합친 그림을 만들지 못했습니다');
   const merged = pngCopyText(new Uint8Array(await blob.arrayBuffer()), new Uint8Array(await pb.arrayBuffer()));
-  return new Blob([merged], { type: 'image/png' });
+  const mergedBlob = new Blob([merged], { type: 'image/png' });
+  if (!full) return mergedBlob;
+  const ob = await new Promise(r => top.toBlob(r, 'image/png'));
+  if (!ob) throw new Error('마스크 적용 그림을 만들지 못했습니다');
+  return { merged: mergedBlob, overlay: ob, loc: RG ? { x: RG.x / OW, y: RG.y / OH, w: RG.w / OW, h: RG.h / OH } : null };
 }
 function maskToB64Full(w, h) {   // (12.11 까지 쓰던 원본 크기 마스크 — 시험·비교용으로만 남긴다)
   const c = document.createElement('canvas'); c.width = w; c.height = h;
@@ -3715,38 +4236,255 @@ function renderVibes() {
   refreshCost();     // 바이브 수가 바뀌면 예상 비용도 달라진다
   R._vibeKeyShown = vibeKey(S.model);   // 어느 모델의 목록을 그렸는지 — 모델이 바뀌면 syncUI 가 다시 그린다
   const list = $('#vibeList'); list.innerHTML = '';
+  const v4 = (MODELS[modelOf(S.model)] || {}).ver >= 40;   // 인코딩을 쓰는 모델 (NAI encodedVibes)
   R.vibes.forEach((v, i) => {
-    const d = document.createElement('div'); d.className = 'vibe-slot';
+    const d = document.createElement('div'); d.className = 'vibe-slot' + (v.off ? ' off' : '');
     d.innerHTML = `<img class="vthumb"><div class="vctl">
+      ${v4 ? '<div class="row vtop"><input type="text" class="vname" spellcheck="false" title="바이브 이름 (NAI 처럼 내보내는 파일 이름에 쓰입니다)"><span class="vact"></span></div>' : ''}
       <label class="rng">Strength <output class="vs"></output><input type="range" class="rs" min="0.01" max="1" step="0.01"></label>
       <label class="rng">Info Extracted <output class="vi"></output><input type="range" class="ri" min="0.01" max="1" step="0.01"></label>
-      <div class="row"><span class="vibe-state" style="flex:1"></span><button class="btn xs vlib" title="인코딩된 바이브를 라이브러리에 저장 (다음부터 Anlas 없이 재사용)">📚 저장</button></div></div><button class="ic" title="제거">✕</button>`;
+      <div class="vwarn hint" hidden></div>
+      <div class="row"><span class="vibe-state" style="flex:1"></span><button class="btn xs vlib" title="인코딩된 바이브를 라이브러리에 저장 (다음부터 Anlas 없이 재사용)">📚 저장</button></div></div>
+      <div class="vside"><button class="ic vtog" title="이 바이브를 켜고 끕니다 — 끄면 생성에 쓰이지 않습니다 (NAI 와 같음)"></button><button class="ic vdel" title="제거">✕</button></div>`;
     d.querySelector('.vthumb').src = v.thumb;
     const rs = d.querySelector('.rs'), ri = d.querySelector('.ri'); rs.value = v.strength; ri.value = v.ie;
     const upd = () => { d.querySelector('.vs').textContent = v.strength; d.querySelector('.vi').textContent = v.ie; }; upd();
     rs.oninput = () => { v.strength = +rs.value; upd(); };
     // Info Extracted 를 바꾸면 다음 생성에서 다시 인코딩된다(장당 2 Anlas) → 예상 비용도 따라가야 한다
-    ri.oninput = () => { v.ie = +ri.value; upd(); refreshCost(); };
+    ri.oninput = () => { v.ie = +ri.value; upd(); refreshCost(); paintAct(); };
     const st = d.querySelector('.vibe-state'); st.textContent = v.state || (v.enc ? '인코딩 있음' : ''); st.className = 'vibe-state ' + (v.stateCls || '');
     d.querySelector('.vlib').onclick = () => saveVibeToLib(v);
-    d.querySelector('button.ic').onclick = () => { R.vibes.splice(i, 1); renderVibes(); };
+    d.querySelector('.vdel').onclick = () => { R.vibes.splice(i, 1); renderVibes(); };
+    const tg = d.querySelector('.vtog'); tg.textContent = v.off ? '⭘' : '⏻'; tg.classList.toggle('on', !v.off);
+    tg.onclick = () => { v.off = !v.off; renderVibes(); };
+    // NAI: 인코딩만 있는 바이브에 이 모델용 인코딩이 없으면 «다른 모델용이라 생성할 때 무시됩니다»
+    const w = d.querySelector('.vwarn'); if (!vibeWorksFor(v, S.model)) { w.hidden = false; w.textContent = '⚠ 이 바이브는 다른 모델용이라 생성할 때 쓰이지 않습니다 (NAI 와 같음)'; }
+    const nm = d.querySelector('.vname'); if (nm) { nm.value = v.name || ''; nm.oninput = () => { v.name = nm.value; }; }
+    const act = d.querySelector('.vact');
+    function paintAct() {
+      if (!act) return;
+      act.innerHTML = '';
+      const b = document.createElement('button'); b.className = 'btn xs';
+      if (vibeDownloadable(v)) { b.textContent = '⬇'; b.title = '이 바이브를 .naiv4vibe 파일로 내보냅니다 (NAI 에서도 읽힙니다)'; b.onclick = () => exportVibe(v); }
+      else if (v.b64) { b.textContent = '인코딩 ◈2'; b.title = '지금 이 모델·정보 추출 값으로 인코딩합니다 (2 Anlas — 다음 생성 때 하셔도 됩니다)'; b.onclick = () => encodeVibeNow(v); }
+      else return;
+      act.appendChild(b);
+    }
+    paintAct();
     list.appendChild(d);
   });
-  $('#vibeN').textContent = R.vibes.length ? `(${R.vibes.length})` : '';
+  // 개수: 켜 둔 것/전부 (NAI 처럼 켜 둔 것이 16개를 넘으면 경고 색)
+  const on = R.vibes.filter(v => !v.off).length;
+  $('#vibeN').textContent = R.vibes.length ? `(${on}${on !== R.vibes.length ? '/' + R.vibes.length : ''})` : '';
+  $('#vibeN').classList.toggle('warn', on > 16);
+  // 안내 (NAI 바이브 칸 아래): 다섯 번째부터 추가 요금 · 인페인트에서는 쓰이지 않음
+  const notes = $('#vibeNotes');
+  if (notes) {
+    const msg = [];
+    if (v4 && on > 4) msg.push(`네 번째 다음부터는 바이브 하나에 2 Anlas 씩 더 듭니다 (지금 ${2 * Math.max(0, on - 4)} Anlas)`);
+    if (R.vibes.length && R.i2iBlob && hasMask() && v4) msg.push('인페인트에서는 바이브를 쓸 수 없습니다 (NAI 와 같음)');
+    notes.hidden = !msg.length; notes.textContent = msg.join(' · ');
+  }
+  const mb = $('#vibeMore'); if (mb) mb.hidden = !(R.vibes.length && v4);
   updateRefBadge();
+}
+/* NAI 바이브 처음 값 (빌드 78a367e defaultVTSettingsForModel): 세기 0.6, 정보 추출은 V4.5 Full 만 0.7·나머지 1 */
+const vibeDefaults = m => ({ strength: 0.6, ie: /nai-diffusion-4-5-full/.test(vibeKey(INPAINT_BASE[m] || m)) ? 0.7 : 1 });
+async function sha256Hex(s) {
+  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
 }
 async function addVibe(blob) {
   if (R.vibes.length >= VIBE_MAX) { toast(`바이브는 최대 ${VIBE_MAX}개`, 'err'); return; }
   /* V5 처럼 바이브를 안 받는 모델이면 NAI 처럼 받는 모델로 바꾼 뒤 넣는다.
      예전엔 V5 에서도 그대로 넣고 생성할 때만 빼서, 넣은 바이브가 쓰이는 것처럼 보였다. */
   ensureRefModel('vibe');
-  const b64 = await blobToB64(blob);
+  // NAI 는 PNG 가 아니면 PNG 로 바꿔 넣는다 (그림 해시·파일이 NAI 와 같아야 내보낸 파일이 NAI 에서도 읽힌다)
+  const pb = await toPngBlob(blob);
+  const b64 = await blobToB64(pb);
+  const id = await sha256Hex(b64);   // NAI 바이브 id = 그림 base64 의 SHA-256
+  // NAI: 같은 그림은 한 번만 넣는다 (vibeOnlyOneCopyAllowed)
+  if (R.vibes.some(v => v.id === id)) { toast('같은 바이브 그림은 하나만 넣을 수 있습니다 — 넣지 않았습니다 (NAI 와 같음)', 'err'); return; }
   // 여러 장을 한 번에 넣으면 위 검사는 전부 통과한 뒤에야 push 가 일어난다 → 넣기 직전에 다시 센다
   if (R.vibes.length >= VIBE_MAX) { toast(`바이브는 최대 ${VIBE_MAX}개`, 'err'); return; }
-  R.vibes.push({ b64, thumb: URL.createObjectURL(blob), strength: 0.6, ie: 1, enc: null, state: '대기 (생성 시 인코딩)', stateCls: '' });
+  const d = vibeDefaults(S.model);
+  R.vibes.push({ id, name: `${id.slice(0, 6)}-${id.slice(-6)}`, b64, thumb: URL.createObjectURL(pb), strength: d.strength, ie: d.ie, enc: null, state: '대기 (생성 시 인코딩)', stateCls: '' });
   renderVibes(); switchRefTab('vibe');
   // NAI 도 레퍼런스가 붙어 있으면 바이브를 넣어도 쓰지 않는다 — 넣은 직후에 알려야 '왜 안 먹지' 가 안 된다
   if (R.prefs.length) toast('레퍼런스가 붙어 있어 이 바이브는 생성에 쓰이지 않습니다 (NAI 와 같습니다) — 레퍼런스를 떼면 쓰입니다', 'err');
+}
+async function toPngBlob(blob) {
+  const u8 = new Uint8Array(await blob.slice(0, 8).arrayBuffer());
+  if (PNG_SIG.every((b, i) => u8[i] === b)) return blob.type === 'image/png' ? blob : new Blob([blob], { type: 'image/png' });
+  const img = await blobToImage(blob), c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+  c.getContext('2d').drawImage(img, 0, 0);
+  const out = await new Promise(r => c.toBlob(r, 'image/png'));
+  if (!out) throw new Error('PNG 로 바꾸지 못했습니다');
+  return out;
+}
+/* ── NAI 바이브 파일 (.naiv4vibe · .naiv4vibebundle · 그림 속 naidata) — 빌드 78a367e VTSHelper 와 같은 꼴 ──
+   { identifier:"novelai-vibe-transfer", version:1, type:"image"|"encoding", image?, id(SHA-256), encodings:{모델열쇠:{설정해시:{encoding,params}}},
+     name, thumbnail(data URL), createdAt, importInfo:{model, information_extracted, strength} } */
+const NAI_VKEY = { 'nai-diffusion-4-curated-preview': 'v4curated', 'nai-diffusion-4-full': 'v4full', 'nai-diffusion-4-5-curated': 'v4-5curated', 'nai-diffusion-4-5-full': 'v4-5full',
+  'nai-diffusion-5-curated': 'v5curated', 'nai-diffusion-5-full': 'v5full' };
+const naiVKeyOf = m => NAI_VKEY[vibeKey(INPAINT_BASE[m] || m)] || null;
+const modelOfNaiVKey = k => Object.keys(NAI_VKEY).find(m => NAI_VKEY[m] === k) || null;
+const vibeParamsHash = p => sha256Hex(Object.entries(p).sort((a, b) => a[0].localeCompare(b[0], 'en')).filter(([, v]) => v != null)
+  .map(([k, v]) => (typeof v === 'object' ? `${k}:${JSON.stringify(v)}` : `${k}:${v}`)).join(','));
+function vibeEncFor(v, m, ie) {   // 이 모델·정보 추출 값의 인코딩 (없으면 null)
+  m = vibeKey(INPAINT_BASE[m] || m);
+  if (v.encs && v.encs[m + '|' + ie]) return v.encs[m + '|' + ie];
+  // 그림이 있는 바이브는 정보 추출 값마다 인코딩이 다르고, 인코딩만 있는 바이브(라이브러리·파일)는 그 값과 상관없이 그 인코딩을 쓴다
+  if (v.enc && v.encModel === m && (v.encIe === ie || !v.b64)) return v.enc;
+  if (!v.b64 && v.encs && v.encs[m + '|*']) return v.encs[m + '|*'];   // 인코딩만 있는 바이브(정보 추출 값과 상관없음)
+  return null;
+}
+/* NAI vibeWorksForModel: 그림이 있는 바이브는 어느 모델에서도 쓰이고(인코딩하면 됨), 인코딩만 있는 바이브는 그 모델용 인코딩이 있어야 한다 */
+const vibeWorksFor = (v, m) => !!v.b64 || !!vibeEncFor(v, m, v.ie);
+async function vibeToNai(v, model, asEnc) {
+  const m = vibeKey(INPAINT_BASE[model] || model), key = naiVKeyOf(m);
+  const importInfo = { model: m, information_extracted: v.ie, strength: v.strength };
+  if (asEnc || !v.b64) {   // 인코딩으로 내보내기 (NAI makeImageTypeIntoEncoding — 원본 그림·작은 그림은 빠지고 다른 모델용으로 다시 인코딩할 수 없다)
+    const enc = vibeEncFor(v, m, v.ie); if (!enc || !key) return null;
+    return { identifier: 'novelai-vibe-transfer', version: 1, type: 'encoding', id: await sha256Hex(enc), encodings: { [key]: { unknown: { encoding: enc } } },
+      name: v.name || '', createdAt: new Date().toISOString(), importInfo };
+  }
+  const encodings = {};
+  for (const [k, enc] of Object.entries(v.encs || {})) {
+    const [em, ie] = k.split('|'), nk = naiVKeyOf(em); if (!nk || ie === '*') continue;
+    (encodings[nk] = encodings[nk] || {})[await vibeParamsHash({ information_extracted: +ie })] = { encoding: enc, params: { information_extracted: +ie } };
+  }
+  if (v.enc && v.encModel && v.encIe != null && naiVKeyOf(v.encModel)) {
+    const nk = naiVKeyOf(v.encModel); (encodings[nk] = encodings[nk] || {})[await vibeParamsHash({ information_extracted: v.encIe })] = { encoding: v.enc, params: { information_extracted: v.encIe } };
+  }
+  return { identifier: 'novelai-vibe-transfer', version: 1, type: 'image', image: v.b64, id: v.id || await sha256Hex(v.b64), encodings,
+    name: v.name || '', thumbnail: await makeThumb(v.b64, 256).then(t => t || undefined), createdAt: new Date().toISOString(), importInfo };
+}
+/* 내보낼 수 있나 (NAI: 지금 모델·정보 추출 값의 인코딩이 있어야 내보내기 단추가 생긴다) */
+const vibeDownloadable = v => !!vibeEncFor(v, S.model, v.ie);
+async function exportVibe(v) {
+  const j = await vibeToNai(v, S.model, !!S.vibeExportEnc);
+  if (!j) { toast('바이브 파일을 만들지 못했습니다 — 이 모델용 인코딩이 없습니다', 'err'); return; }
+  downloadBlob(new Blob([JSON.stringify(j, null, 2)], { type: 'application/json' }), `${safeName(v.name || j.id.slice(0, 12))}.naiv4vibe`);
+}
+async function vibeBundleJson() {
+  const on = R.vibes.filter(v => !v.off), vibes = [];
+  for (const v of on) { const j = await vibeToNai(v, S.model, !!S.vibeExportEnc); if (!j) return null; vibes.push(j); }
+  return JSON.stringify({ identifier: 'novelai-vibe-transfer-bundle', version: 1, vibes }, null, 2);
+}
+const vibeBundleReady = () => R.vibes.some(v => !v.off) && R.vibes.every(v => v.off || vibeDownloadable(v));
+async function exportVibeBundle() {
+  const s = await vibeBundleJson();
+  if (!s) { toast('바이브 파일을 내보내지 못했습니다 — 켜 둔 바이브가 모두 인코딩되어 있어야 합니다 (NAI 와 같음)', 'err'); return; }
+  downloadBlob(new Blob([s], { type: 'application/json' }), new Date().toISOString().slice(0, 10) + '.naiv4vibebundle');
+}
+/* 그림에 묶음 넣기 (NAI «Embed Into Image»): 고른 그림에 naidata 글 조각(base64 로 된 묶음)을 넣어 «이름.naiv4vibebundle.png» 로 받는다 */
+function pngAddText(u8, keyword, text) {
+  const enc = new TextEncoder(), kw = new Uint8Array([...keyword].map(c => c.charCodeAt(0) & 255));
+  const body = new Uint8Array(kw.length + 1 + text.length); body.set(kw, 0); body[kw.length] = 0;
+  for (let i = 0; i < text.length; i++) body[kw.length + 1 + i] = text.charCodeAt(i) & 255;   // base64 라 latin1 그대로
+  const type = enc.encode('tEXt'), td = new Uint8Array(4 + body.length); td.set(type, 0); td.set(body, 4);
+  const chunk = new Uint8Array(12 + body.length), dv = new DataView(chunk.buffer);
+  dv.setUint32(0, body.length); chunk.set(td, 4); dv.setUint32(8 + body.length, (crc32(td) ^ 0xFFFFFFFF) >>> 0);
+  // IHDR 바로 뒤에 넣는다. 같은 이름의 글 조각이 이미 있으면 빼고 새로 넣는다
+  const parts = [u8.subarray(0, 8)];
+  pngWalk(u8, (t, ds, len, pos, total) => {
+    if (t === 'tEXt') { const z = u8.indexOf(0, ds); if (z > 0 && new TextDecoder('latin1').decode(u8.subarray(ds, z)) === keyword) return; }
+    parts.push(u8.subarray(pos, pos + total));
+    if (t === 'IHDR') parts.push(chunk);
+  });
+  const n = parts.reduce((a, p) => a + p.length, 0), out = new Uint8Array(n);
+  let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+async function embedVibeBundle() {
+  const s = await vibeBundleJson();
+  if (!s) { toast('바이브 파일을 만들지 못했습니다 — 켜 둔 바이브가 모두 인코딩되어 있어야 합니다 (NAI 와 같음)', 'err'); return; }
+  pickFiles(false, async f => {
+    try {
+      const png = new Uint8Array(await (await toPngBlob(f)).arrayBuffer());
+      const out = pngAddText(png, 'naidata', bufToB64(new TextEncoder().encode(s).buffer));   // NAI 는 묶음 글을 base64 로 넣는다
+      downloadBlob(new Blob([out], { type: 'image/png' }), `${(f.name || 'vibes').split('.')[0] || new Date().toISOString().slice(0, 10)}.naiv4vibebundle.png`);
+    } catch (e) { logErr('바이브 묶음을 그림에 넣지 못함: ' + e.message); toast('바이브 묶음을 그림에 넣지 못했습니다: ' + e.message, 'err'); }
+  });
+}
+/* 가져오기 (NAI VTSHelper.import·importBundle·importManyFilesAsVibes): 확인(아이디 64자리·해시 맞음·작은 그림 꼴) → 목록에 넣기.
+   묶음에 모델이 적혀 있으면 NAI 처럼 그 모델로 바꾼다. */
+async function vibeFromNai(j) {
+  if (!j || j.identifier !== 'novelai-vibe-transfer' || !/^[\da-f]{64}$/.test(j.id || '')) return null;
+  if (j.type === 'image' && await sha256Hex(j.image || '') !== j.id) { toast('가져오기 실패: 그림 해시가 아이디와 다릅니다', 'err'); return null; }
+  if (j.type === 'encoding') {
+    const e0 = Object.values(j.encodings || {}).flatMap(o => Object.values(o || {}))[0];
+    if (!e0) { toast('가져오기 실패: 인코딩이 없습니다', 'err'); return null; }
+    if (await sha256Hex(e0.encoding) !== j.id) { toast('가져오기 실패: 인코딩 해시가 아이디와 다릅니다', 'err'); return null; }
+  }
+  if (j.thumbnail && !/^data:image\/[^;]+;base64,/.test(j.thumbnail)) { toast('가져오기 실패: 작은 그림이 base64 가 아닙니다', 'err'); return null; }
+  const encs = {};
+  for (const [nk, o] of Object.entries(j.encodings || {})) {
+    const m = modelOfNaiVKey(nk); if (!m) continue;
+    for (const e of Object.values(o || {})) { if (!e || !e.encoding) continue; encs[m + '|' + (e.params && e.params.information_extracted != null ? e.params.information_extracted : '*')] = e.encoding; }
+  }
+  const ii = j.importInfo || {};
+  return { model: ii.model && MODELS[ii.model] ? ii.model : null, v: { id: j.id, name: j.name || `${j.id.slice(0, 6)}-${j.id.slice(-6)}`, b64: j.type === 'image' ? j.image : null,
+    thumb: j.thumbnail || (j.image ? 'data:image/png;base64,' + j.image : ''), strength: ii.strength, ie: ii.information_extracted, encs, enc: null,
+    state: j.type === 'image' ? '대기 (생성 시 인코딩)' : '인코딩만 있는 바이브', stateCls: '' } };
+}
+async function vibeJsonOfPng(u8) {   // 그림 안 naidata 글 조각 (NAI getEmbeddedVibes)
+  const t = (await pngTextChunks(u8)).find(c => c.key === 'naidata'); if (!t) return null;
+  try { const s = new TextDecoder().decode(b64ToU8(t.text)), j = JSON.parse(s); return (j.identifier === 'novelai-vibe-transfer' || j.identifier === 'novelai-vibe-transfer-bundle') ? j : null; }
+  catch (e) { logErr('그림 속 바이브 글 조각을 읽지 못함: ' + e.message); return null; }
+}
+async function importVibeFiles(files) {
+  const found = [];   // {model, v}
+  const plain = [];
+  for (const f of files) {
+    try {
+      let j = null;
+      if (f.type && f.type.startsWith('image/')) { const u8 = new Uint8Array(await f.arrayBuffer()); j = await vibeJsonOfPng(u8); if (!j) { plain.push(f); continue; } }
+      else j = JSON.parse(await f.text());
+      const list = j.identifier === 'novelai-vibe-transfer-bundle' ? (j.vibes || []) : [j];
+      for (const one of list) { const r = await vibeFromNai(one); if (!r) { toast('바이브 가져오기 실패: ' + (f.name || ''), 'err'); continue; } found.push(r); }
+    } catch (e) { logErr('바이브 파일 읽기 실패: ' + e.message); toast('바이브 가져오기 실패: ' + (f.name || '') + ' — ' + e.message, 'err'); }
+  }
+  if (found.length) {
+    // NAI: 적힌 모델로 바꾸고(바이브를 받지 않는 모델이면 받는 모델로) 그 모델 목록에 넣는다
+    const want = found.find(r => r.model) ? found.find(r => r.model).model : S.model;
+    if (want !== S.model && MODELS[want]) switchModel(want);
+    ensureRefModel('vibe');
+    let n = 0;
+    for (const { v } of found) {
+      if (R.vibes.some(x => x.id === v.id)) { toast('같은 바이브는 하나만 넣을 수 있습니다 — 겹친 것은 넣지 않았습니다', 'err'); continue; }
+      if (R.vibes.length >= VIBE_MAX) { toast(`바이브는 최대 ${VIBE_MAX}개`, 'err'); break; }
+      const d = vibeDefaults(S.model);
+      if (v.strength == null) v.strength = d.strength; if (v.ie == null) v.ie = d.ie;
+      R.vibes.push(v); n++;
+    }
+    renderVibes(); switchRefTab('vibe');
+    if (n) toast(`바이브 ${n}개를 가져왔습니다`);
+  }
+  for (const f of plain) await addVibe(f);
+}
+/* 지금 바로 인코딩 (NAI 바이브 칸의 «N Anlas» 단추 — 하나에 2 Anlas) */
+async function encodeVibeNow(v) {
+  if (!v.b64) return;
+  const fails = await ensureVibes(S.model, [v]);
+  if (!fails && vibeEncFor(v, S.model, v.ie)) toast('바이브를 인코딩했습니다');
+  refreshAnlas().catch(e => logErr('Anlas 다시 읽기 실패: ' + e.message));
+}
+/* 바이브 칸 «⋯» (NAI): 묶음 내보내기 · 그림에 넣기 · 인코딩으로 내보내기 */
+function toggleVibeMore(force) {
+  const pop = $('#vibeMorePop'); if (!pop) return;
+  const open = force != null ? force : pop.hidden;
+  if (!open) { pop.hidden = true; return; }
+  const ready = vibeBundleReady();
+  pop.innerHTML = `<button class="btn sm" id="vmBundle" ${ready ? '' : 'disabled'}>⬇ 묶음 내보내기 (.naiv4vibebundle)</button>
+    <button class="btn sm" id="vmEmbed" ${ready ? '' : 'disabled'} title="고른 그림 파일에 바이브 묶음을 넣어 받습니다 — 그 그림을 NAI 나 이 앱에 넣으면 바이브가 들어옵니다">🖼 그림에 넣기</button>
+    <label class="ck" title="인코딩만 내보내면 원본 그림이 빠져, 다른 모델이나 다른 정보 추출 값으로 다시 인코딩할 수 없습니다 (NAI 와 같음)"><input type="checkbox" id="vmEnc" ${S.vibeExportEnc ? 'checked' : ''}> 인코딩으로 내보내기</label>
+    ${ready ? '' : '<div class="hint">켜 둔 바이브가 모두 인코딩되어 있어야 묶음으로 받을 수 있습니다 (NAI 와 같음)</div>'}`;
+  pop.querySelector('#vmBundle').onclick = () => { pop.hidden = true; exportVibeBundle(); };
+  pop.querySelector('#vmEmbed').onclick = () => { pop.hidden = true; embedVibeBundle(); };
+  pop.querySelector('#vmEnc').onchange = e => { S.vibeExportEnc = e.target.checked; save(); };
+  pop.hidden = false;
 }
 /* 바이브 라이브러리 — 인코딩 결과(모델·IE별)를 저장해 재사용 (인코딩 Anlas 절약) · .naiv4vibe 가져오기 */
 async function vibeLibAll() { return (await idbGet('vibelib')) || []; }
@@ -3856,33 +4594,84 @@ function renderPrefs() {
   refreshCost();     // 레퍼런스 수가 바뀌면 예상 비용도 달라진다 (장당·장수만큼 곱해진다)
   const list = $('#prefList'); list.innerHTML = '';
   R.prefs.forEach((v, i) => {
-    const d = document.createElement('div'); d.className = 'vibe-slot';
+    const d = document.createElement('div'); d.className = 'vibe-slot' + (v.off ? ' off' : '');
+    // 설명 순서는 NAI 와 같게: 캐릭터+스타일 · 캐릭터 · 스타일
     d.innerHTML = `<img class="vthumb"><div class="vctl">
-      <div class="seg pref-type"><button data-t="character">캐릭터</button><button data-t="character&style">캐릭터+스타일</button><button data-t="style">스타일</button></div>
+      <div class="seg pref-type"><button data-t="character&style">캐릭터+스타일</button><button data-t="character">캐릭터</button><button data-t="style">스타일</button></div>
       <label class="rng">Strength <output class="vs"></output><input type="range" class="rs" min="0" max="1" step="0.05"></label>
       <label class="rng">Fidelity <output class="vf"></output><input type="range" class="rf" min="0" max="1" step="0.05"></label>
-      </div><button class="ic" title="제거">✕</button>`;
+      </div><div class="vside"><button class="ic vtog" title="이 레퍼런스를 켜고 끕니다 — 끄면 생성에 쓰이지 않습니다 (NAI 와 같음)"></button><button class="ic vdel" title="제거">✕</button></div>`;
     d.querySelector('.vthumb').src = v.thumb;
     d.querySelectorAll('.pref-type button').forEach(b => { b.classList.toggle('on', b.dataset.t === v.type); b.onclick = () => { v.type = b.dataset.t; renderPrefs(); }; });
     const rs = d.querySelector('.rs'), rf = d.querySelector('.rf'); rs.value = v.strength; rf.value = v.fidelity;
     const upd = () => { d.querySelector('.vs').textContent = v.strength; d.querySelector('.vf').textContent = v.fidelity; }; upd();
-    rs.oninput = () => { v.strength = +rs.value; upd(); }; rf.oninput = () => { v.fidelity = +rf.value; upd(); };
-    d.querySelector('.ic').onclick = () => { R.prefs.splice(i, 1); renderPrefs(); };
+    rs.oninput = () => { v.strength = +rs.value; upd(); paintPrefNotes(); }; rf.oninput = () => { v.fidelity = +rf.value; upd(); };
+    d.querySelector('.vdel').onclick = () => { R.prefs.splice(i, 1); renderPrefs(); };
+    const tg = d.querySelector('.vtog'); tg.textContent = v.off ? '⭘' : '⏻'; tg.classList.toggle('on', !v.off);
+    tg.onclick = () => { v.off = !v.off; renderPrefs(); };
     list.appendChild(d);
   });
-  $('#prefN').textContent = R.prefs.length ? `(${R.prefs.length})` : '';
+  const on = R.prefs.filter(v => !v.off).length;
+  $('#prefN').textContent = R.prefs.length ? `(${on}${on !== R.prefs.length ? '/' + R.prefs.length : ''})` : '';
+  $('#prefN').classList.toggle('warn', on > PREF_MAX);
+  const zb = $('#prefZip'); if (zb) zb.hidden = !R.prefs.length;
+  paintPrefNotes();
   updateRefBadge();
 }
-async function addPref(blob) {
-  if (R.prefs.length >= 4) { toast('레퍼런스는 최대 4개', 'err'); return; }
+/* NAI 정밀 레퍼런스 칸 안내: 인페인트에서 스타일 레퍼런스 세기 합이 0.8 을 넘으면 «그림이 일그러질 수 있다» · 켜 둔 것이 16개를 넘으면 */
+function paintPrefNotes() {
+  const n = $('#prefNotes'); if (!n) return;
+  const msg = [];
+  const styleSum = R.prefs.reduce((a, v) => (!v.off && (v.type === 'style' || v.type === 'character&style')) ? a + v.strength : a, 0);
+  if (R.i2iBlob && hasMask() && styleSum > .8) msg.push('인페인트할 때 스타일 레퍼런스의 세기가 너무 크면 그림이 일그러질 수 있습니다 (NAI 와 같은 안내)');
+  const on = R.prefs.filter(v => !v.off).length;
+  if (on > PREF_MAX) msg.push(`정밀 레퍼런스는 ${PREF_MAX}개까지 쓸 수 있습니다 — 생성 전에 몇 개를 빼거나 꺼 주세요`);
+  n.hidden = !msg.length; n.textContent = msg.map(m => '⚠ ' + m).join(' · ');
+}
+/* 넣을 때 NAI 처음 값 (doImportCharacterReference): 캐릭터+스타일 · 세기 1 · 충실도 1 · 켬. 개수는 넣을 때 막지 않고 생성 때 16개를 넘으면 막는다(NAI 와 같음).
+   12.13 까지는 «캐릭터 · 1 · 0.75»로 넣고 4개까지만 받았다. */
+async function addPref(blob, opt) {
+  opt = opt || {};
   // V4.5 가 아니면 NAI 처럼 V4.5 로 바꾼 뒤 넣는다 (V5 Full → V4.5 Full, 나머지 → V4.5 Curated)
   ensureRefModel('pref');
-  const pb64 = await blobToB64Letterbox(blob);
-  // await 사이에 다른 파일이 먼저 들어갔을 수 있다 → 넣기 직전에 다시 센다
-  if (R.prefs.length >= 4) { toast('레퍼런스는 최대 4개', 'err'); return; }
-  R.prefs.push({ b64: pb64, thumb: URL.createObjectURL(blob), type: 'character', strength: 1, fidelity: 0.75 });
-  renderPrefs(); switchRefTab('pref');
-  if (R.prefs.length === 1 && R.vibes.length) toast('레퍼런스를 넣어서, 붙어 있던 바이브는 이제 생성에 쓰이지 않습니다 (NAI 와 같습니다) — 레퍼런스를 떼면 다시 쓰입니다', 'err');
+  const png = await toPngBlob(blob);
+  const pb64 = await blobToB64Letterbox(png);
+  R.prefs.push({ b64: pb64, ob64: await blobToB64(png), thumb: URL.createObjectURL(png), filename: opt.filename || blob.name || 'reference.png',
+    type: opt.type || 'character&style', strength: opt.strength != null ? opt.strength : 1, fidelity: opt.fidelity != null ? opt.fidelity : 1, off: opt.off === true });
+  if (!opt.quiet) { renderPrefs(); switchRefTab('pref'); }
+  if (!opt.quiet && R.prefs.length === 1 && R.vibes.length) toast('레퍼런스를 넣어서, 붙어 있던 바이브는 이제 생성에 쓰이지 않습니다 (NAI 와 같습니다) — 레퍼런스를 떼면 다시 쓰입니다', 'err');
+}
+/* 정밀 레퍼런스 전부를 ZIP 으로 (NAI «Download All Precise References as ZIP»: metadata.json + 그림, 같은 이름은 _1·_2) */
+async function exportPrefZip() {
+  if (!R.prefs.length) return;
+  const files = [], used = new Set(), meta = [];
+  R.prefs.forEach((v, i) => {
+    let fn = (String(v.filename || `reference_${i + 1}.png`).replace(/[\\/:*?"<>|]/g, '_')) || `reference_${i + 1}.png`;
+    const parts = fn.split('.');
+    if (used.has(fn)) { let k = 1; while (used.has(`${parts[0]}_${k}.${parts[1] || 'png'}`)) k++; fn = `${parts[0]}_${k}.${parts[1] || 'png'}`; }
+    used.add(fn);
+    files.push({ name: fn, u8: b64ToU8(v.ob64 || v.b64) });
+    meta.push({ filename: fn, description: v.type, fidelity: v.fidelity, strength: v.strength, information_extracted: 1, enabled: !v.off });
+  });
+  files.push({ name: 'metadata.json', u8: new TextEncoder().encode(JSON.stringify(meta, null, 2)) });
+  downloadBlob(await zipBuild(files), 'reference_images.zip');
+}
+async function importPrefZip(file) {
+  try {
+    const entries = await unzip(await file.arrayBuffer());
+    const mf = entries.find(e => e.name === 'metadata.json');
+    if (!mf) throw new Error('ZIP 안에 metadata.json 이 없습니다');
+    const list = JSON.parse(new TextDecoder().decode(mf.data));
+    let n = 0;
+    for (const m of list) {
+      const f = entries.find(e => e.name === m.filename);
+      if (!f) { logErr('레퍼런스 ZIP 에 그림이 없음: ' + m.filename); continue; }
+      await addPref(new Blob([f.data], { type: 'image/png' }), { filename: m.filename, type: m.description, strength: m.strength, fidelity: m.fidelity, off: m.enabled === false, quiet: true });
+      n++;
+    }
+    renderPrefs(); switchRefTab('pref');
+    toast(`정밀 레퍼런스 ${n}개를 가져왔습니다`);
+  } catch (e) { logErr('레퍼런스 ZIP 가져오기 실패: ' + e.message); toast('정밀 레퍼런스 ZIP 을 가져오지 못했습니다: ' + e.message, 'err'); }
 }
 
 /* ─────────────── 구조화 프롬프트 칸 (NAI 권장 순서: 캐릭터 → 행동 → 배경 → 스타일) ─────────────── */
@@ -4127,11 +4916,51 @@ function mirrorFit(ta, hl) {
   }
   hl.style.width = base + 'px'; hl._fit = 0;         // 못 맞추면 원래대로 (줄 수가 원래 다른 경우)
 }
+/* 강조 표기 오류 셈 — NAI 프롬프트 칸의 emphasisHighlight(빌드 78a367e)와 같은 규칙.
+   글을 앞에서부터 읽으며 강조 값을 이어 셈한다: { ×1.05 · } ÷1.05 · [ ÷1.05 · ] ×1.05 · «숫자::» 는 그 숫자, 숫자 없는 «::» 는 1.
+   ① «1.5 ::» 처럼 숫자와 :: 사이 빈칸 ② «::1.5» 처럼 숫자를 :: 뒤에 씀 ③ 강조 값이 70 을 넘음 — 세 가지를 알려 준다. */
+const EMPH_SEQ = [{ s: '{', f: e => 1.05 * e }, { s: '}', f: e => e / 1.05 }, { s: '[', f: e => e / 1.05 }, { s: ']', f: e => 1.05 * e },
+  { s: '::', num: true, f: (e, t) => (t === undefined || Number.isNaN(t)) ? 1 : t }];
+function emphErrors(text) {
+  const errs = []; let u = 1;   // NAI 처럼 강조 값은 줄이 바뀌어도 이어진다
+  for (const line of String(text || '').replace(/\r/g, '').split('\n')) {
+    let o = '';
+    for (let e = 0; e < line.length; e++) {
+      o += line[e];
+      const a = EMPH_SEQ.find(q => q.s === o);
+      if (!a) { if (!EMPH_SEQ.some(q => q.s.startsWith(o))) { e -= o.length - 1; o = ''; } continue; }
+      let n;
+      if (a.num) { const t = line.slice(0, e - 1).match(/-?\d*\.?\d*$/); if (t) { n = Number.parseFloat(t[0]); if (t[0] === '-' || t[0] === '-.' || t[0] === '.') n = 0; } }
+      const prev = u; u = a.f(u, n);
+      if (o === '::' && Math.abs(u) > 70) errs.push(`«${n}::» 의 강조 값이 지나치게 큽니다 — 숫자와 :: 사이에 빈칸을 넣으려던 것은 아닌가요? (예: «${n} ::»)`);
+      if (o === '::' && u === 1 && prev === 1) {
+        const t = line.slice(0, e - 1).match(/(?:^|[\s,])(-?\d*\.?\d* )$/), aft = line.slice(e + 1).match(/(^ ?-?\d*\.?\d*)(?![\d.-]*::)/);
+        const nn = Number.parseFloat(t ? t[1] : ''), ll = Number.parseFloat(aft ? aft[0] : '');
+        if (t && t[0].trim() !== '' && Math.abs(nn) < 21) errs.push(`«${t[1]}::» 에서 빈칸 때문에 숫자가 강조 값으로 쓰이지 않습니다 — 빈칸을 지우는 것이 좋습니다 (예: «${t[1].trim()}::»)`);
+        if (aft && aft[0].trim() !== '' && Math.abs(ll) < 21) errs.push(`«::${aft[0]}» 에서 숫자는 :: 바로 앞에 써야 합니다 (예: «${aft[0].trim()}::») — 뒤가 아닙니다`);
+      }
+      o = '';
+    }
+  }
+  return errs;
+}
+/* NAI 처럼 칸에서 벗어날 때 오류를 칸 위에 세 개까지 보여 준다 (강조 색칠을 켜 두었을 때만 — NAI 도 같다) */
+function paintEmphErrors(ta, box) {
+  const errs = S.emphHl ? emphErrors(ta.value) : [];
+  box.innerHTML = '';
+  box.hidden = !errs.length;
+  for (const m of errs.slice(0, 3)) { const d = document.createElement('div'); d.textContent = '⚠ ' + m; box.appendChild(d); }
+  if (errs.length > 3) { const d = document.createElement('div'); d.className = 'more'; d.textContent = `⚠ 오류가 모두 ${errs.length}개입니다 (세 개만 보입니다)`; box.appendChild(d); }
+}
 function attachHighlight(ta) {
   if (!ta || ta.dataset.hl) return;
   ta.dataset.hl = '1';
   const wrap = document.createElement('div'); wrap.className = 'pwrap';
   ta.parentNode.insertBefore(wrap, ta);
+  const eb = document.createElement('div'); eb.className = 'emph-errs'; eb.hidden = true;
+  wrap.parentNode.insertBefore(eb, wrap);
+  ta.addEventListener('blur', () => paintEmphErrors(ta, eb));
+  ta._emphBox = eb;
   const hl = document.createElement('div'); hl.className = 'phl' + (ta.classList.contains('big') ? ' big' : ''); hl.setAttribute('aria-hidden', 'true');
   wrap.appendChild(hl); wrap.appendChild(ta);
   /* 내용도 청크도 그대로면 다시 그릴 필요가 없다.
@@ -4155,7 +4984,7 @@ function attachHighlight(ta) {
 }
 /* 강제 갱신이다. 그냥 부르면 sync 의 '내용·청크 개수가 같으면 건너뛰기' 캐시에 걸려
    '가중치 강조 표시' 토글처럼 글자가 안 바뀌는 변경이 화면에 반영되지 않았다. */
-function refreshHighlights() { $$('textarea[data-hl]').forEach(t => t._hlSync && t._hlSync(true)); }
+function refreshHighlights() { $$('textarea[data-hl]').forEach(t => { if (t._hlSync) t._hlSync(true); if (t._emphBox && !S.emphHl) t._emphBox.hidden = true; }); }
 
 /* ─────────────── 모달 / 파일 ─────────────── */
 function openModal(title, build, wide, onClose) {
@@ -4165,9 +4994,10 @@ function openModal(title, build, wide, onClose) {
   R._modalClose = onClose || null;
 }
 function closeModal() { $('#modalOverlay').hidden = true; const f = R._modalClose; R._modalClose = null; if (f) { try { f(); } catch (e) {} } }
-function pickFiles(multi, cb, accept) {
+/* all: 고른 파일을 한 번에 배열로 넘긴다 (바이브 묶음·여러 장 가져오기처럼 함께 다뤄야 할 때) */
+function pickFiles(multi, cb, accept, all) {
   const inp = document.createElement('input'); inp.type = 'file'; if (multi) inp.multiple = true; inp.accept = accept || 'image/*';
-  inp.onchange = () => { [...inp.files].forEach(f => cb(f)); }; inp.click();
+  inp.onchange = () => { const fs = [...inp.files]; if (all) cb(fs); else fs.forEach(f => cb(f)); }; inp.click();
 }
 /* 창 전체 드롭 가드 — 드롭 영역을 살짝 빗나간 파일을 브라우저가 열어 버리면
    앱을 떠나게 되고, 붙여 둔 이미지·마스크·진행 중이던 생성이 통째로 사라진다.
@@ -4175,13 +5005,15 @@ function pickFiles(multi, cb, accept) {
 window.__dropGuard = true;
 addEventListener('dragover', e => { e.preventDefault(); }, false);
 addEventListener('drop', e => { e.preventDefault(); }, false);
-function bindDrop(el, cb, multi) {
+function bindDrop(el, cb, multi, all) {
+  el.dataset.dropzone = '1';   // 화면 전체 가져오기 덮개(NAI ImageGenImportOverlay)가 이 칸 위에서는 뜨지 않게
   el.addEventListener('dragover', e => { e.preventDefault(); el.classList.add('over'); });
   el.addEventListener('dragleave', () => el.classList.remove('over'));
   el.addEventListener('drop', e => {
-    e.preventDefault(); el.classList.remove('over');
-    const fs = [...e.dataTransfer.files].filter(f => f.type.startsWith('image/') || /\.(png|json|zip|naiv4vibe)$/i.test(f.name));
-    (multi ? fs : fs.slice(0, 1)).forEach(f => cb(f));
+    e.preventDefault(); e.stopPropagation(); el.classList.remove('over');
+    const fs = [...e.dataTransfer.files].filter(f => f.type.startsWith('image/') || /\.(png|json|zip|naiv4vibe|naiv4vibebundle)$/i.test(f.name));
+    const pick = multi ? fs : fs.slice(0, 1);
+    if (all) { if (pick.length) cb(pick); } else pick.forEach(f => cb(f));
   });
 }
 
@@ -4254,13 +5086,21 @@ function openSettings() {
       <label class="ck"><input type="checkbox" id="mShowChunks"> 청크 칩을 프롬프트 아래에 항상 표시 (기본: 칸에 커서가 있을 때만 떠서 보임)</label>
       <label class="ck"><input type="checkbox" id="mAutoText"> V5 글자 그리기 자동 처리 <span class="hint">— 프롬프트에 따옴표로 감싼 글자가 있으면 novelai.net 처럼 <b>teXt:</b> 를 자동으로 붙입니다 (V5 전용). 끄면 붙이지 않습니다.</span></label>
       <label class="ck"><input type="checkbox" id="mStream"> 생성 중 실시간 미리보기 (msgpack 스트림) <span class="hint">— 끄면 다 그려진 뒤 한 번에 받습니다. NAI 가 스트림 형식을 바꿔 그림이 안 나올 때 여기서 끄세요.</span></label>
+      <label class="ck"><input type="checkbox" id="mRawInter"> 생성 중 그림을 그대로 보기 <span class="hint">— 꺼져 있으면(NAI 기본값) 생성 중 그림을 흐리게 보여 주고 처음 5단계는 보여 주지 않습니다. 켜면 모든 단계를 그대로 보여 줍니다 (NAI «Show Streamed Images Unprocessed»).</span></label>
+      <label class="ck"><input type="checkbox" id="mInspect"> 생성 결과 살펴보기 <span class="hint">— 켜면 결과 아래에 🔍 단추가 생겨 그 그림의 기록 내용을 글로 볼 수 있고, 인페인트 결과에 «받은 그대로»·«마스크 적용» 두 장이 함께 붙습니다 (NAI «Inspect Image Results», 기본값 꺼짐).</span></label>
       <hr>
       <div class="mtitle">투명 그림 <span class="hint">(NAI 설정과 같은 칸)</span></div>
-      <label class="fld">투명 부분 보이기 <span class="hint">— 배경 제거·투명 배경 그림의 투명한 곳을 무엇으로 보여 줄지 (NAI «Transparency Background», 처음 값 테마 체크무늬)</span>
+      <label class="fld">투명 부분 보이기 <span class="hint">— 배경 제거·투명 배경 그림의 투명한 곳을 무엇으로 보여 줄지 (NAI «Transparency Background», 기본값 테마 체크무늬)</span>
         <select id="mTranspBg"><option value="checker">테마 체크무늬</option><option value="checkerLight">밝은 체크무늬</option><option value="checkerDark">어두운 체크무늬</option><option value="none">없음</option><option value="black">검정</option><option value="white">흰색</option><option value="gray">회색</option><option value="red">빨강</option><option value="green">초록</option><option value="blue">파랑</option><option value="custom">직접 고른 색</option></select></label>
       <input type="color" id="mTranspColor" value="#808080" hidden>
-      <label class="fld">투명 그림의 알파 방식 <span class="hint">— V5 요청에 늘 들어가는 값 (NAI «Alpha Mode for Transparent Images», 처음 값 Straight)</span>
-        <select id="mAlpha"><option value="straight">Straight (NAI 처음 값)</option><option value="premultiplied">Premultiplied</option></select></label>
+      <label class="fld">투명 그림의 알파 방식 <span class="hint">— V5 요청에 늘 들어가는 값 (NAI «Alpha Mode for Transparent Images», 기본값 Straight)</span>
+        <select id="mAlpha"><option value="straight">Straight (NAI 기본값)</option><option value="premultiplied">Premultiplied</option></select></label>
+      <hr>
+      <div class="mtitle">파일 이름 틀 <span class="hint">(NAI «Custom File Name Template»)</span></div>
+      <label class="ck"><input type="checkbox" id="mFnOn"> 저장하는 그림 이름을 틀로 만들기 <span class="hint">— 끄면 지금까지처럼 «nai_날짜_시드_번호.png» 로 저장합니다</span></label>
+      <div class="row" id="mFnRow"><input type="text" id="mFnTpl" style="flex:1" spellcheck="false" autocomplete="off"><button class="btn sm" id="mFnReset">처음으로</button><button class="btn sm" id="mFnHelp">❓ 쓰는 법</button></div>
+      <div class="hint" id="mFnPrev"></div>
+      <div class="fnhelp" id="mFnHelpBox" hidden></div>
       <hr>
       <div class="mtitle">NAI 웹과 동일하게 재현하기</div>
       <div class="hint">NAI 웹에서 만든 PNG를 아래에 드롭하면 프롬프트·시드·스텝·가이던스·UC 프리셋·Variety 등이 <b>전부 그대로</b> 복원됩니다. 그 상태로 생성하면 NAI 웹과 같은 결과가 나와야 정상입니다 (다르면 알려주세요).</div>
@@ -4386,6 +5226,25 @@ function openSettings() {
     const stm = body.querySelector('#mStream'); stm.checked = S.stream !== false;
     stm.onchange = () => { S.stream = stm.checked; S.streamOffAuto = false; save(); toast(stm.checked ? '실시간 미리보기 켬' : '실시간 미리보기 끔 — 다 그려진 뒤 한 번에 받습니다'); };
     const sc = body.querySelector('#mShowChunks'); sc.checked = !!S.showChunkBars; sc.onchange = () => { S.showChunkBars = sc.checked; document.body.classList.toggle('show-chunks', sc.checked); save(); };
+    const ri = body.querySelector('#mRawInter'); ri.checked = !!S.rawIntermediates; ri.onchange = () => { S.rawIntermediates = ri.checked; save(); };
+    { // 파일 이름 틀 — 미리 보기는 지금 보는 그림(없으면 지금 설정으로 만든 보기 그림)으로
+      const on = body.querySelector('#mFnOn'), inp = body.querySelector('#mFnTpl'), row = body.querySelector('#mFnRow'), pv = body.querySelector('#mFnPrev');
+      const sample = () => curItem() || { seed: 1234567890, model: S.model, w: S.w, h: S.h, t: Date.now(), label: '생성',
+        meta: { input: S.prompt || '', uprompt: S.prompt || '', action: 'generate', parameters: { characterPrompts: (S.chars || []).filter(c => !c.off).map(c => ({ prompt: c.prompt || '', enabled: true })) } } };
+      const paint = () => {
+        row.hidden = pv.hidden = !on.checked; inp.value = S.fnTpl || FN_TPL_DEFAULT;
+        body.querySelector('#mFnReset').disabled = (S.fnTpl || FN_TPL_DEFAULT) === FN_TPL_DEFAULT;
+        try { pv.textContent = '미리 보기: ' + (fnTplRender(S.fnTpl || FN_TPL_DEFAULT, fnTplData(sample())) || '(빈 이름 — 원래 이름으로 저장합니다)') + '.png'; pv.style.color = ''; }
+        catch (e) { pv.textContent = '틀이 잘못됐습니다: ' + e.message; pv.style.color = 'var(--red)'; }
+      };
+      on.checked = !!S.fnTplOn; on.onchange = () => { S.fnTplOn = on.checked; save(); paint(); };
+      inp.oninput = () => { S.fnTpl = inp.value; save(); const c = inp.selectionStart; paint(); try { inp.setSelectionRange(c, c); } catch (e) { logErr('커서 자리 되돌리기 실패: ' + e.message); } };
+      body.querySelector('#mFnReset').onclick = () => { S.fnTpl = FN_TPL_DEFAULT; save(); paint(); };
+      body.querySelector('#mFnHelp').onclick = () => { const b = body.querySelector('#mFnHelpBox'); if (!b.innerHTML) b.innerHTML = fnTplHelpHtml(); b.hidden = !b.hidden; };
+      paint();
+    }
+    const ins = body.querySelector('#mInspect'); ins.checked = !!S.inspectResults;
+    ins.onchange = () => { S.inspectResults = ins.checked; save(); const it = curItem(); if (it) paintViewTools(it); };
     { // 투명 그림 — NAI 설정 두 칸
       const tb = body.querySelector('#mTranspBg'), tc = body.querySelector('#mTranspColor'), al = body.querySelector('#mAlpha');
       const isHex = v => /^#[\da-f]{6}([\da-f]{2})?$/i.test(v || '');
@@ -4686,13 +5545,14 @@ function updateCostHint() {
     sm: smOn, smDyn: smOn && !!S.smeaDyn,
     strength: enh ? enh.strength : (R.i2iBlob ? S.strength : 1), isOpus, opusLeft: R.opusUsage,
     usageNegative: !!(R.usage && R.usage.isNegative),
-    vibeCount: vibesSent ? R.vibes.length : 0,
-    charRefCount: caps.charRef ? R.prefs.length : 0,   // 그 모델이 안 받으면 비용도 0
+    // 꺼 둔 바이브·레퍼런스, 다른 모델용 인코딩만 있는 바이브는 요청에 안 실리므로 세지 않는다
+    vibeCount: vibesSent ? R.vibes.filter(v => !v.off && vibeWorksFor(v, S.model)).length : 0,
+    charRefCount: caps.charRef ? R.prefs.filter(v => !v.off).length : 0,   // 그 모델이 안 받으면 비용도 0
     /* "인코딩이 있으면 공짜" 가 아니다. ensureVibes 는 모델이나 Info Extracted 가
        바뀌면 같은 조건(v.encModel === S.model && v.encIe === v.ie)으로 다시 인코딩한다.
        예전엔 v.enc 만 봐서, 모델을 바꾼 뒤에도 비용이 0 으로 보이다가 실제로는
        장당 2 Anlas 씩 더 나갔다. 여기도 같은 조건으로 센다. (모델마다 남겨 둔 인코딩 v.encs 가 있으면 다시 쓰므로 0) */
-    unencodedVibes: vibesSent ? R.vibes.filter(v => v.b64 && !(v.enc && v.encModel === S.model && v.encIe === v.ie) && !(v.encs && v.encs[S.model + '|' + v.ie])).length : 0 });
+    unencodedVibes: vibesSent ? R.vibes.filter(v => !v.off && v.b64 && !vibeEncFor(v, S.model, v.ie)).length : 0 });
   const el = $('#genCost');
   renderUsageBar();   // 사용량 막대는 토큰 유무와 무관하게 갱신한다 (없으면 스스로 숨는다)
   if (!hasToken()) { el.textContent = ''; return; }
@@ -4853,20 +5713,24 @@ function init() {
   window.applyCharFold = applyCharFold;
   $('#btnCharFold').onclick = () => { S.charsOpen = S.charsOpen === false; save(); applyCharFold(); };
   applyCharFold();
-  $('#btnAddChar').onclick = () => { const mx = capsOf(S.model).maxChars || 0; if (!mx) { toast(MODELS[modelOf(S.model)].name + ' 은 캐릭터 프롬프트를 받지 않습니다', 'err'); return; } if (S.chars.length >= mx) { toast('이 모델은 캐릭터를 최대 ' + mx + '명까지 받습니다', 'err'); return; } S.chars.push({ prompt: '', uc: '', x: null, y: null });
-    // 접혀 있으면 펴 준다 — 숨은 목록에 추가되면 화면엔 아무 변화가 없어 '안 눌린다' 로 보인다
-    if (S.charsOpen === false) S.charsOpen = true;
-    save(); renderChars(); };
+  $('#btnAddChar').onclick = () => { const mx = capsOf(S.model).maxChars || 0; if (!mx) { toast(MODELS[modelOf(S.model)].name + ' 은 캐릭터 프롬프트를 받지 않습니다', 'err'); return; } if (S.chars.length >= mx) { toast('이 모델은 캐릭터를 최대 ' + mx + '명까지 받습니다', 'err'); return; } openAddCharMenu(); };
 
   $$('.reftab').forEach(b => b.onclick = () => switchRefTab(b.dataset.t));
   // 올리기 — NAI 처럼 마스크를 지우고 생성 크기를 그림에 맞춘다(cs)
   const drop = $('#i2iDrop'); bindDrop(drop, f => setI2I(f, null, true)); drop.onclick = () => pickFiles(false, f => setI2I(f, null, true));
+  if (typeof initImportOverlay === 'function') initImportOverlay();   // NAI 처럼 화면 아무 데나 끌어다 놓으면 가져오기 창
   $('#btnI2iClear').onclick = clearI2I; $('#btnMask').onclick = openMaskEditor;
   $('#btnPaintNew').onclick = () => cvPaintNew().catch(e => { logErr('그림판 열기 실패: ' + e.message); toast('그림판을 열지 못했습니다: ' + e.message, 'err'); });
   $('#btnEditI2i').onclick = () => cvEditImage(R.i2iBlob, R.i2iMeta).catch(e => { logErr('그림판 열기 실패: ' + e.message); toast('그림판을 열지 못했습니다: ' + e.message, 'err'); });
-  $('#vibeAdd').onclick = () => pickFiles(true, f => addVibe(f)); bindDrop($('#panelVibe'), f => addVibe(f), true);
+  // 바이브: 그림·.naiv4vibe·.naiv4vibebundle·바이브가 든 그림 (NAI importManyFilesAsVibes 와 같이 한꺼번에)
+  $('#vibeAdd').onclick = () => pickFiles(true, fs => importVibeFiles(fs), 'image/*,.naiv4vibe,.naiv4vibebundle,.json', true); bindDrop($('#panelVibe'), fs => importVibeFiles(fs), true, true);
   $('#vibeLibBtn').onclick = openVibeLib;
-  $('#prefAdd').onclick = () => pickFiles(true, f => addPref(f)); bindDrop($('#panelPref'), f => addPref(f), true);
+  $('#vibeMore').onclick = e => { e.stopPropagation(); toggleVibeMore(); };
+  document.addEventListener('mousedown', e => { const pop = $('#vibeMorePop'); if (pop && !pop.hidden && !(e.target.closest && e.target.closest('#vibeMore, #vibeMorePop'))) pop.hidden = true; });
+  // 정밀 레퍼런스: 그림 또는 NAI 레퍼런스 ZIP
+  const prefIn = f => (/\.zip$/i.test(f.name) || f.type === 'application/zip' || f.type === 'application/x-zip-compressed') ? importPrefZip(f) : addPref(f);
+  $('#prefAdd').onclick = () => pickFiles(true, prefIn, 'image/*,.zip'); bindDrop($('#panelPref'), prefIn, true);
+  $('#prefZip').onclick = () => exportPrefZip().catch(e => { logErr('레퍼런스 ZIP 만들기 실패: ' + e.message); toast('ZIP 을 만들지 못했습니다: ' + e.message, 'err'); });
 
   const genClick = () => {
     // NAI: 인핸스 창이 떠 있으면 생성 단추가 «Enhance!» 다 (연속 생성이 돌고 있으면 그 정지가 먼저)
@@ -4917,6 +5781,17 @@ function init() {
   $('#tToVibe').onclick = () => { const it = curItem(); if (it) addVibe(it.blob); };
   $('#tToPref').onclick = () => { const it = curItem(); if (it) addPref(it.blob); };
   $('#tMeta').onclick = () => { const it = curItem(); if (it) openMetaViewer(it.blob, '생성 이미지 메타데이터'); };
+  /* 원본과 비교 (NAI display.old-compare): 누르는 동안만 원본. 창 밖에서 손을 떼거나 창이 가려져도 돌아오게 한다 */
+  $('#tOld').addEventListener('pointerdown', e => {
+    const it = curItem(); if (!it || !it.orig || R.gen) return;
+    e.preventDefault(); R.showOld = true; paintOld(it);
+    const up = () => { R.showOld = false; ['pointerup', 'pointercancel'].forEach(t => document.removeEventListener(t, up)); window.removeEventListener('blur', up); paintOld(curItem()); };
+    ['pointerup', 'pointercancel'].forEach(t => document.addEventListener(t, up)); window.addEventListener('blur', up);
+  });
+  $('#tInspect').onclick = () => { const it = curItem(); if (it) openInspect(it); };
+  $('#tCopyImg').onclick = () => { const it = curItem(); if (it) copyImageToClipboard(it.blob); };
+  $('#tView').onclick = e => { e.stopPropagation(); toggleViewPop(); };
+  document.addEventListener('mousedown', e => { const pop = $('#viewPop'); if (pop && !pop.hidden && !(e.target.closest && e.target.closest('.viewpop-wrap'))) pop.hidden = true; });
   $('#tDelete').onclick = deleteCur;
   $('#tSeed').onclick = () => { const it = curItem(); if (it && it.seed != null) { fixSeed(it.seed); toast('시드 고정: ' + it.seed); } };
   $('#tCopy').onclick = () => { const it = curItem(); if (!it) return;

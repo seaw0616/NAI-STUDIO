@@ -1619,7 +1619,8 @@ async function toolEnhance() {
   const max = sc === 'max';
   const w = max ? it.w : Math.floor(it.w * sc), h = max ? it.h : Math.floor(it.h * sc);
   const randFrom = await randInfoOf((it.vars && it.vars[0] && it.vars[0].blob) || it.blob, it.meta);
-  await doGenerate({ image: it.blob, strength: S.enhStr, noise: S.enhNoise, w, h, n: 1, seed: randSeed(), upscaledEnhance: max, enhanceAdd: !max, randFrom, randKeep: true }, `인핸스 ${enhLabel(sc)}`).catch(() => {});
+  // orig: 결과에 기억시킬 원본(NAI originalImage = 고른 변형) — 결과 아래 «✦ 원본» 단추로 비교한다
+  await doGenerate({ image: it.blob, orig: it.blob, strength: S.enhStr, noise: S.enhNoise, w, h, n: 1, seed: randSeed(), upscaledEnhance: max, enhanceAdd: !max, randFrom, randKeep: true }, `인핸스 ${enhLabel(sc)}`).catch(() => {});
 }
 /* 변형 — NAI generateVariations (빌드 78a367e):
    · 그림 자신의 모델(절약 모드 포함)·설정·프롬프트·네거티브·캐릭터로 다시 그린다 (ovFromMeta)
@@ -1677,7 +1678,7 @@ async function runUpscale(it) {
     if (!res.ok) throw await apiError(res);
     const imgs = await respImages(res);
     if (!imgs.length) throw new Error('업스케일 결과에 이미지가 없습니다');
-    for (const b of imgs) { const item = await addToHistory(b, it.meta || { parameters: {} }, `업스케일 ${UPSCALE_X}×`); if (S.autoSaveOn) autoSave(item); }
+    for (const b of imgs) { const item = await addToHistory(b, it.meta || { parameters: {} }, `업스케일 ${UPSCALE_X}×`, { tool: 'upscale' }); if (S.autoSaveOn) autoSave(item); }
     setGenStatus('업스케일 완료'); refreshAnlas().catch(() => {});
   } catch (e) { setGenStatus('오류: ' + e.message); toast(e.message, 'err'); }
   finally { R.gen = false; $('#btnGen').disabled = false; }
@@ -1786,11 +1787,11 @@ async function runDirector(req, label, srcItem) {
     const imgs = await respImages(res);
     if (tags && imgs.length > 1) {
       const vars = imgs.map((b, i) => ({ blob: b, tag: tags[i] || String(i) }));
-      last = await addToHistory(vars[0].blob, (it && it.meta) || { parameters: {} }, label, { vars });
+      last = await addToHistory(vars[0].blob, (it && it.meta) || { parameters: {} }, label, { vars, tool: req.req_type });
       if (S.autoSaveOn) autoSave(last);
     } else {
       for (let i = 0; i < imgs.length; i++) {
-        const item = await addToHistory(imgs[i], (it && it.meta) || { parameters: {} }, label);
+        const item = await addToHistory(imgs[i], (it && it.meta) || { parameters: {} }, label, { tool: req.req_type });
         last = item; if (S.autoSaveOn) autoSave(item);
       }
     }
@@ -1898,9 +1899,13 @@ function cleanMetaUc(p, modelId, uc) {
 }
 
 /* ─────────────── 메타 → 설정 적용 (NAI PNG 재현) ─────────────── */
-function applyMeta(meta) {
+/* o (가져오기 창에서 고른 것 — NAI doImportSettings 의 importPrompt·importUc·importCharacters·appendCharacters·importSettings·importSeed·
+   importVibeTransfer·appendVibeTransfer·cleanBrackets·actualPrompt). o 가 없으면 예전처럼 전부 가져온다(⤴ 단추·히스토리 Ctrl+클릭·설정 창 PNG 드롭).
+   NAI 와 같게: 모델은 설정이나 바이브를 가져올 때만 바꾸고, 시드를 안 가져오면 지금 시드를 그대로 둔다. */
+const cleanBrackets = s => String(s || '').replace(/[[\]{}]/g, '').replace(/,(?=[^ ])/g, ', ').replace(/ ,/g, ',');
+function applyMeta(meta, o) {
   if (!meta) { toast('설정 정보가 없습니다', 'err'); return; }
-  const p = meta.parameters || {};
+  let p = meta.parameters || {};
   /* 생성 정보가 없는 이미지(스마트 툴로 올린 외부 PNG, 옛 백업의 빈 메타)에서 ⤴ 를 누르면
      예전엔 빈 값들이 그대로 적용돼 **지금 쓰던 프롬프트·캐릭터·네거티브가 통째로 지워졌다**.
      되돌릴 방법도 없었다 — 아무것도 안 바꾸고 알리기만 한다. */
@@ -1908,23 +1913,39 @@ function applyMeta(meta) {
   if (!anyPrompt && p.width == null && p.steps == null && !p.sampler && !p.characterPrompts) {
     toast('이 이미지에는 생성 정보가 없습니다 — 지금 설정은 그대로 둡니다', 'err'); return;
   }
-  const m = baseModelOf(meta.model); if (MODELS[m]) S.model = m;
+  const want = k => !o || !!o[k];
+  let rawInput = meta.input || (p.v4_prompt && p.v4_prompt.caption.base_caption) || '';
+  /* 실제 무작위 값으로 (NAI Actual Prompt): 그림에 적힌 actual_prompts 로 프롬프트·네거티브·캐릭터를 쓴다.
+     NAI 는 이때 v4 캡션을 {caption} 만으로 갈아 끼워 좌표 사용(use_coords) 값이 비어 «AI 자동 배치»가 된다 — 그대로 따른다. */
+  if (o && o.actual && p.actual_prompts) {
+    const ap = p.actual_prompts;
+    rawInput = (ap.prompt && ap.prompt.base_caption) || rawInput;
+    p = { ...p, characterPrompts: undefined, use_coords: undefined, v4_prompt: { caption: { ...(ap.prompt || {}) } }, v4_negative_prompt: { caption: { ...(ap.negative_prompt || {}) } },
+      negative_prompt: ap.negative_prompt && ap.negative_prompt.base_caption != null ? ap.negative_prompt.base_caption : p.negative_prompt };
+  }
+  const m = baseModelOf(meta.model);
+  if ((!o || o.settings || o.vibes) && MODELS[m]) S.model = m;
   const info = MODELS[S.model];
-  const cm = cleanMetaPrompt(p, S.model, meta.input || (p.v4_prompt && p.v4_prompt.caption.base_caption) || '');
-  const { chars, useCoords } = cm; let prompt = cm.prompt;
-  S.quality = cm.quality;                 // 못 뗐으면 프롬프트에 이미 들어 있는 것 — 토글은 끈다 (두 벌 방지)
-  S.transparent = cm.transparent;
-  if (cm.furry != null) S.furryMode = cm.furry;   // NAI 와 같다: 접두어가 있으면 켜고 없으면 끈다 (V4 이상에서만)
+  // 품질 태그·네거티브 프리셋을 떼는 기준은 그림을 만든 모델이다 (NAI: Source 의 모델로 찾는다)
+  const detModel = MODELS[m] ? m : S.model;
+  const cm = cleanMetaPrompt(p, detModel, rawInput);
+  const { useCoords } = cm; let prompt = cm.prompt, chars = cm.chars;
+  if (o && o.clean) { prompt = cleanBrackets(prompt); chars = chars.map(c => ({ ...c, prompt: cleanBrackets(c.prompt), uc: cleanBrackets(c.uc) })); }
+  if (want('settings')) {
+    S.quality = cm.quality;                 // 못 뗐으면 프롬프트에 이미 들어 있는 것 — 토글은 끈다 (두 벌 방지)
+    S.transparent = cm.transparent;
+  }
+  if (want('prompt') && cm.furry != null) S.furryMode = cm.furry;   // NAI 와 같다: 접두어가 있으면 켜고 없으면 끈다 (V4 이상에서만)
   /* 이미지에 쓰인 프리셋(standard/light)에 맞춰 준다. 다만 사용자가 **직접 고쳐 둔 문구**는 지우지 않는다 —
      예전엔 이미지를 한 장 불러올 때마다 그 모델의 퀄리티 태그 편집본이 조용히 기본값으로 돌아갔다.
      (그 이미지가 실제로 편집본으로 만들어졌으면 cm.keep 이 서고, 이 분기 자체를 타지 않는다) */
-  if (cm.qid && !cm.keep) {
+  if (want('settings') && cm.qid && !cm.keep) {
     S.ov = S.ov || {}; const cur = (S.ov[S.model] || {}).q;
     const isCustom = cur != null && qNorm(cur) !== qNorm(info.quality) && qNorm(cur) !== qNorm(info.quality2);
     if (!isCustom) { S.ov[S.model] = S.ov[S.model] || {}; if (cm.qid === 3) S.ov[S.model].q = info.quality2; else delete S.ov[S.model].q; }
     else toast('이 모델의 퀄리티 태그는 직접 고쳐 두신 것이라 그대로 두었습니다');
   }
-  setPromptText(prompt); S.activeStyle = null;
+  if (want('prompt')) { setPromptText(prompt); S.activeStyle = null; }
   let uc = p.negative_prompt != null ? p.negative_prompt : (p.v4_negative_prompt ? p.v4_negative_prompt.caption.base_caption : '');
   /* NAI 웹이 자동으로 붙인 "nsfw, " 는 떼어내고(앱이 같은 규칙으로 다시 붙임),
      사용자가 직접 쓴 경우(프롬프트에 nsfw 있음)는 유지.
@@ -1945,27 +1966,58 @@ function applyMeta(meta) {
     if (!getUcText(S.model, ucIdx(S.model))) return;             // UC 프리셋 "없음" — 원래 대상이 아니다
     S.autoNsfw = hadNsfw;
   };
-  const cu = cleanMetaUc(p, S.model, uc);
-  S.ucPreset = cu.presetIdx; uc = cu.uc;
-  S.uc = uc;
-  nsfwDecide();     // 프리셋이 정해진 뒤에 판단한다 (프리셋이 "없음" 이면 건드리지 않는다)
-  if (p.width) S.w = p.width; if (p.height) S.h = p.height;
-  if (p.steps) S.steps = p.steps; if (p.scale != null) S.scale = p.scale;
-  if (p.cfg_rescale != null) S.rescale = p.cfg_rescale;
-  if (p.sampler) S.sampler = p.sampler; if (p.noise_schedule) S.schedule = p.noise_schedule;
-  if (p.seed != null) { S.seed = String(p.seed); S.randomSeed = false; }
-  S.variety = p.skip_cfg_above_sigma != null && p.skip_cfg_above_sigma !== 0;
-  S.decrisper = !!p.dynamic_thresholding;
-  S.smea = !!p.sm; S.smeaDyn = !!p.sm_dyn;
-  if (p.uncond_scale != null) S.ucStrength = p.uncond_scale;
-  S.legacyUc = !!p.legacy_uc;
-  S.aiChoice = !useCoords;
-  /* 캐릭터는 통째로 바꾼다 — 예전엔 characterPrompts 가 없으면 이전 캐릭터가 그대로 남았다 */
-  S.chars = chars.map(c => ({ prompt: c.prompt, uc: c.uc, x: c.x, y: c.y }));
+  if (want('uc')) {
+    const cu = cleanMetaUc(p, detModel, uc);
+    S.ucPreset = cu.presetIdx; uc = cu.uc;
+    S.uc = o && o.clean ? cleanBrackets(uc) : uc;
+    nsfwDecide();     // 프리셋이 정해진 뒤에 판단한다 (프리셋이 "없음" 이면 건드리지 않는다)
+  }
+  if (want('settings')) {
+    if (p.width) S.w = p.width; if (p.height) S.h = p.height;
+    if (p.steps) S.steps = p.steps; if (p.scale != null) S.scale = p.scale;
+    if (p.cfg_rescale != null) S.rescale = p.cfg_rescale;
+    if (p.sampler) S.sampler = p.sampler; if (p.noise_schedule) S.schedule = p.noise_schedule;
+    // NAI: V4 묶음 모델에서 노이즈 스케줄 native 는 karras 로 가져온다
+    if (S.schedule === 'native' && (MODELS[S.model] || {}).ver >= 40 && (MODELS[S.model] || {}).ver < 50) S.schedule = 'karras';
+    S.variety = p.skip_cfg_above_sigma != null && p.skip_cfg_above_sigma !== 0;
+    S.decrisper = !!p.dynamic_thresholding;
+    S.smea = !!p.sm; S.smeaDyn = !!p.sm_dyn;
+    if (p.uncond_scale != null) S.ucStrength = p.uncond_scale;
+    S.legacyUc = !!p.legacy_uc;
+    S.aiChoice = !useCoords;   // 좌표 사용 여부는 설정에 든다 (NAI use_coords)
+  }
+  if (want('seed') && p.seed != null) { S.seed = String(p.seed); S.randomSeed = false; }
+  if (want('chars')) {
+    const got = chars.map(c => ({ prompt: c.prompt, uc: c.uc, x: c.x, y: c.y }));
+    /* 캐릭터는 통째로 바꾼다(이어 붙이기를 고르면 뒤에 붙인다) — 예전엔 characterPrompts 가 없으면 이전 캐릭터가 그대로 남았다 */
+    let next = o && o.appendChars ? (S.chars || []).concat(got) : got;
+    const mx = capsOf(S.model).maxChars || 0;
+    if (mx && next.length > mx) { toast(`캐릭터는 최대 ${mx}명이라 ${Math.max(0, mx - (o && o.appendChars ? (S.chars || []).length : 0))}명만 가져왔습니다 (NAI 와 같음)`, 'err'); next = next.slice(0, mx); }
+    S.chars = next;
+  }
+  /* 바이브 (NAI importVibeTransfer): 그림에 든 인코딩(reference_image_multiple)을 인코딩만 있는 바이브로 넣는다 — 인코딩을 쓰는 모델(V4 이상)일 때만 */
+  if (o && o.vibes && Array.isArray(p.reference_image_multiple) && p.reference_image_multiple.length && (MODELS[S.model] || {}).ver >= 40) {
+    (async () => {
+      const st = p.reference_strength_multiple || [], ie = p.reference_information_extracted_multiple || [];
+      if (!o.appendVibes && st.length > 1) { const sum = st.reduce((a, b) => a + Math.abs(b), 0); if (sum >= .99 && sum <= 1.01) S.vibeNormalize = true; else if (sum > 1) S.vibeNormalize = false; }
+      const d = vibeDefaults(S.model), got = [];
+      for (let i = 0; i < p.reference_image_multiple.length; i++) {
+        const enc = p.reference_image_multiple[i], id = await sha256Hex(enc);
+        got.push({ id, name: `${id.slice(0, 6)}-${id.slice(-6)}`, b64: null, thumb: '', strength: st[i] != null ? st[i] : d.strength, ie: ie[i] != null ? ie[i] : d.ie,
+          encs: { [vibeKey(S.model) + '|*']: enc }, enc: null, state: '그림에서 가져온 인코딩', stateCls: 'ok' });
+      }
+      R.vibes = o.appendVibes ? R.vibes.concat(got.filter(g => !R.vibes.some(v => v.id === g.id))) : got;
+      renderVibes(); syncUI();
+    })().catch(e => { logErr('그림의 바이브를 가져오지 못함: ' + e.message); toast('그림의 바이브를 가져오지 못했습니다: ' + e.message, 'err'); });
+  }
   /* save() 가 아니라 savePrompt(). 불러온 프롬프트가 빈 이미지였을 때 save() 는
      서버의 빈-프롬프트 보호(409)에 걸리고, 그 되돌림이 방금 불러온 설정까지 통째로 지웠다. */
   savePrompt(); syncUI(); renderChars();
-  toast('프롬프트·설정을 불러왔습니다 (시드 고정됨)');
+  if (!o) toast('프롬프트·설정을 불러왔습니다 (시드 고정됨)');
+  else {
+    const what = [want('prompt') && '프롬프트', want('uc') && '네거티브', want('chars') && '캐릭터', want('settings') && '설정', want('seed') && '시드', o.vibes && '바이브'].filter(Boolean);
+    toast((what.length ? what.join('·') : '아무것도') + ' 가져왔습니다');
+  }
 }
 async function importFromPng(blob) {
   const chunks = await pngTextChunks(new Uint8Array(await blob.arrayBuffer()));
@@ -1979,6 +2031,117 @@ async function importFromPng(blob) {
   let j; try { j = JSON.parse(comment.text); } catch (e) { toast('메타데이터 파싱 실패', 'err'); return; }
   applyMeta({ model: modelFromSource(src), input: j.prompt || (j.v4_prompt && j.v4_prompt.caption.base_caption) || '', parameters: { ...j, negative_prompt: j.uc != null ? j.uc : (j.v4_negative_prompt ? j.v4_negative_prompt.caption.base_caption : '') } });
   closeModal();
+}
+/* ── 그림 가져오기 창 (NAI «What do you want to do with this image?», 빌드 78a367e G3·ImageGenImportOverlay) ──
+   쓰는 곳: i2i(바탕 그림) · 바이브 · 정밀 레퍼런스. 그림에 NAI 설정이 들어 있으면 고른 칸만 가져온다.
+   고르기 칸의 처음 값과 기억은 NAI 와 같다: 프롬프트·네거티브·캐릭터 켬 / 이어 붙이기·설정·시드·바이브·괄호 정리·실제 무작위 값 끔 */
+const IMPORT_DEF = { prompt: true, uc: true, chars: true, appendChars: false, settings: false, seed: false, vibes: false, appendVibes: false, clean: false, actual: false };
+const importOpts = () => ({ ...IMPORT_DEF, ...(S.importOpts || {}) });
+const SOURCE_KNOWN = src => /\bV?5\b/i.test(src) || /4\.5/.test(src) || /Diffusion V4/i.test(src) || /furry/i.test(src) || /V3/i.test(src);
+async function readImportInfo(blob) {
+  const u8 = new Uint8Array(await blob.arrayBuffer());
+  const chunks = await pngTextChunks(u8);
+  const get = k => (chunks.find(c => c.key === k) || {}).text;
+  let comment = get('Comment'), src = get('Source') || '', soft = get('Software') || '';
+  if (!comment) {
+    const st = await readStealthMeta(blob).catch(e => { logErr('숨은 메타 읽기 실패: ' + e.message); return null; });
+    if (st && st.Comment) { comment = String(st.Comment); src = String(st.Source || ''); soft = String(st.Software || ''); }
+  }
+  if (!comment) return null;
+  let j; try { j = JSON.parse(comment); } catch (e) { logErr('그림 메타 해석 실패: ' + e.message); return null; }
+  // NAI: Software 에 «NovelAI» 가 있고, 디렉터 툴 결과(req_type)가 아니어야 설정을 가져올 수 있다
+  const isNai = /NovelAI/.test(soft) && j.req_type === undefined;
+  let notRepro = null;
+  if (j.request_type === 'Img2ImgRequest') notRepro = 'i2i';
+  else if (j.request_type === 'NativeInfillingRequest') notRepro = '인페인트';
+  else if (Array.isArray(j.reference_strength_multiple) && j.reference_strength_multiple.length && !(Array.isArray(j.reference_image_multiple) && j.reference_image_multiple.length)) notRepro = '바이브(인코딩이 들어 있지 않음)';
+  else if (Array.isArray(j.director_reference_strengths) && j.director_reference_strengths.length) notRepro = '정밀 레퍼런스';
+  const meta = { model: modelFromSource(src), input: j.prompt || (j.v4_prompt && j.v4_prompt.caption.base_caption) || '',
+    parameters: { ...j, negative_prompt: j.uc != null ? j.uc : (j.v4_negative_prompt ? j.v4_negative_prompt.caption.base_caption : '') } };
+  return { meta, isNai, notRepro, deprecated: !!src && !SOURCE_KNOWN(src),
+    hasVibes: Array.isArray(j.reference_image_multiple) && j.reference_image_multiple.length > 0, hasActual: !!j.actual_prompts };
+}
+async function openImportDialog(file) {
+  if (!file) return;
+  const info = await readImportInfo(file).catch(e => { logErr('가져오기 정보 읽기 실패: ' + e.message); return null; });
+  const url = URL.createObjectURL(file);
+  openModal('이 그림으로 무엇을 할까요?', body => {
+    const o = importOpts();
+    const ck = (k, label, extra) => `<label class="ck${extra && extra.sub ? ' sub' : ''}"${extra && extra.title ? ` title="${extra.title}"` : ''}><input type="checkbox" data-k="${k}"${o[k] ? ' checked' : ''}> ${label}</label>`;
+    const metaHtml = info && info.isNai ? `
+      <div class="imp-meta">
+        <div class="mtitle">이 그림에는 설정이 들어 있습니다! 대신 설정을 가져올까요?</div>
+        ${info.notRepro ? `<div class="hint imp-warn">⚠ 이 그림은 ${info.notRepro}로 만든 것이라 설정만으로는 똑같이 다시 만들 수 없습니다 (NAI 와 같은 안내)</div>` : ''}
+        <div class="imp-grid">
+          <div class="imp-col">
+            ${ck('prompt', '프롬프트')}${ck('uc', '네거티브')}${ck('chars', '캐릭터')}${ck('appendChars', '이어 붙이기', { sub: 1, title: '지금 캐릭터 뒤에 붙입니다 (끄면 바꿉니다)' })}
+            ${info.hasVibes ? ck('vibes', '바이브') + ck('appendVibes', '이어 붙이기', { sub: 1, title: '지금 바이브 뒤에 붙입니다 (끄면 바꿉니다)' }) : ''}
+            ${info.deprecated ? '<div class="hint imp-warn">옛 모델로 만든 그림이라 설정은 가져올 수 없습니다 (NAI 와 같음)</div>' : ck('settings', '설정') + ck('seed', '시드')}
+          </div>
+          <div class="imp-col">
+            <button class="btn primary" data-a="meta">설정 가져오기</button>
+            ${ck('clean', '괄호 정리', { title: '[ ] { } 를 지우고 쉼표 뒤에 빈칸을 넣습니다 (NAI Clean Imports)' })}
+            ${info.hasActual ? ck('actual', '실제 무작위 값', { title: '프롬프트·네거티브를 무작위 묶음에서 실제로 뽑힌 값으로 가져옵니다 (NAI Actual Prompt)' }) : ''}
+          </div>
+        </div>
+      </div>` : '';
+    body.innerHTML = `<div class="imp-prev"><img src="${url}" alt=""></div>
+      <div class="row imp-use"><button class="btn" data-a="i2i">🖼 i2i (바탕 그림)</button><button class="btn" data-a="vibe">🎨 바이브</button><button class="btn" data-a="pref">🪞 정밀 레퍼런스</button></div>${metaHtml}`;
+    const paint = () => {
+      const cur = importOpts();
+      const ac = body.querySelector('[data-k="appendChars"]'); if (ac) ac.disabled = !cur.chars;
+      const av = body.querySelector('[data-k="appendVibes"]'); if (av) av.disabled = !cur.vibes;
+    };
+    body.querySelectorAll('input[data-k]').forEach(i => { i.onchange = () => { S.importOpts = { ...importOpts(), [i.dataset.k]: i.checked }; save(); paint(); }; });
+    paint();
+    const done = () => closeModal();
+    body.querySelector('[data-a="i2i"]').onclick = () => { setI2I(file, null, true); switchRefTab('i2i'); toast('바탕 그림으로 넣었습니다'); done(); };
+    body.querySelector('[data-a="vibe"]').onclick = () => { done(); addVibe(file).catch(e => { logErr('바이브 넣기 실패: ' + e.message); toast('바이브를 넣지 못했습니다: ' + e.message, 'err'); }); };
+    body.querySelector('[data-a="pref"]').onclick = () => { done(); addPref(file, { filename: file.name || 'reference.png' }).catch(e => { logErr('레퍼런스 넣기 실패: ' + e.message); toast('레퍼런스를 넣지 못했습니다: ' + e.message, 'err'); }); };
+    const mb = body.querySelector('[data-a="meta"]');
+    if (mb) mb.onclick = () => {
+      const cur = importOpts();
+      const sel = { ...cur, settings: !info.deprecated && cur.settings, seed: !info.deprecated && cur.seed, vibes: info.hasVibes && cur.vibes, actual: info.hasActual && cur.actual };
+      done(); applyMeta(info.meta, sel);
+    };
+  }, false, () => URL.revokeObjectURL(url));
+}
+/* 여러 장 (NAI onFilesImport): 바이브가 이미 있으면 모두 바이브로, 정밀 레퍼런스가 있으면 모두 레퍼런스로, 둘 다 없으면 묻는다 */
+function importManyImages(files) {
+  if (!files.length) return;
+  if (R.vibes.length) { importVibeFiles(files); return; }
+  if (R.prefs.length) { (async () => { for (const f of files) await addPref(f, { filename: f.name, quiet: true }); renderPrefs(); switchRefTab('pref'); })().catch(e => { logErr('레퍼런스 여러 장 넣기 실패: ' + e.message); toast('레퍼런스를 넣지 못했습니다: ' + e.message, 'err'); }); return; }
+  openModal(`그림 ${files.length}장 가져오기`, body => {
+    body.innerHTML = `<div class="hint">이 그림들로 무엇을 할까요?</div><div class="row imp-use"><button class="btn" data-a="vibe">🎨 바이브</button><button class="btn" data-a="pref">🪞 정밀 레퍼런스</button></div>`;
+    body.querySelector('[data-a="vibe"]').onclick = () => { closeModal(); importVibeFiles(files); };
+    body.querySelector('[data-a="pref"]').onclick = () => { closeModal(); (async () => { for (const f of files) await addPref(f, { filename: f.name, quiet: true }); renderPrefs(); switchRefTab('pref'); })().catch(e => { logErr('레퍼런스 여러 장 넣기 실패: ' + e.message); toast('레퍼런스를 넣지 못했습니다: ' + e.message, 'err'); }); };
+  });
+}
+/* 화면 아무 데나 끌어다 놓기 (NAI ImageGenImportOverlay): 메인 화면에서 파일이나 히스토리 그림을 끌고 오면 안내 덮개를 띄우고,
+   각 칸(바탕 그림·바이브·레퍼런스·설정 창 드롭) 밖에 놓으면 가져오기 창을 연다. 각 칸에 놓는 것은 지금처럼 그 칸이 받는다. */
+function initImportOverlay() {
+  const ov = document.createElement('div'); ov.id = 'importOverlay'; ov.className = 'import-overlay'; ov.hidden = true;
+  ov.innerHTML = '<div class="io-box"><div class="io-ico">⬆</div><div>여기에 놓으면 가져오기 창이 열립니다</div><div class="hint">바탕 그림·바이브·레퍼런스 칸에 놓으면 그 칸에 바로 들어갑니다</div></div>';
+  document.body.appendChild(ov);
+  const usable = e => S.mode === 'main' && $('#modalOverlay').hidden && !R.cvOpen && e.dataTransfer &&
+    [...(e.dataTransfer.types || [])].some(t => t === 'Files' || t === 'text/nai-hist');
+  document.addEventListener('dragover', e => {
+    if (!usable(e)) { ov.hidden = true; return; }
+    ov.hidden = !!(e.target.closest && e.target.closest('[data-dropzone]'));
+  });
+  document.addEventListener('dragleave', e => { if (!e.relatedTarget) ov.hidden = true; });
+  document.addEventListener('dragend', () => { ov.hidden = true; });
+  document.addEventListener('drop', async e => {
+    ov.hidden = true;
+    if (!usable(e) || (e.target.closest && e.target.closest('[data-dropzone]'))) return;
+    e.preventDefault();
+    const hid = e.dataTransfer.getData('text/nai-hist');
+    if (hid) { const it = R.hist.find(h => String(h.id != null ? h.id : h.t) === hid); if (it) openImportDialog(new File([it.blob], (it.name || 'image.png'), { type: it.blob.type || 'image/png' })); return; }
+    const fs = [...e.dataTransfer.files].filter(f => f.type.startsWith('image/') || /\.(naiv4vibe|naiv4vibebundle|json)$/i.test(f.name));
+    if (!fs.length) return;
+    if (fs.some(f => /\.(naiv4vibe|naiv4vibebundle|json)$/i.test(f.name))) { importVibeFiles(fs); return; }
+    if (fs.length > 1) importManyImages(fs); else openImportDialog(fs[0]);
+  });
 }
 /* PNG 의 Source 문자열 → 모델 id.
    Source 에는 "curated" 라는 단어가 안 들어간다. 실제 형식은
@@ -2638,11 +2801,15 @@ function openBackup() {
             /* 결과 변형(배경 제거의 Masked·Generated·Blend)이 있으면 변형마다 파일을 따로 담는다 — 안 담으면 복원 때 한 장만 남는다 */
             let vars = null;
             if (Array.isArray(h.vars) && h.vars.length) {
-              vars = h.vars.map((v, k) => { const vf = fn.replace(/\.png$/i, '') + '_' + (v.tag || k) + '.png'; files.push({ name: vf, blob: v.blob }); return { file: vf, tag: v.tag || String(k) }; });
+              vars = h.vars.map((v, k) => { const vf = fn.replace(/\.png$/i, '') + '_' + (v.tag || k) + '.png'; files.push({ name: vf, blob: v.blob }); return { file: vf, tag: v.tag || String(k), ...(v.loc ? { loc: v.loc } : {}) }; });
             }
+            /* 원본과 비교(12.14)의 원본 그림·마스크도 담는다 — 안 담으면 복원 뒤 «✦ 원본» 단추가 사라진다 */
+            let orig = null, origMask = null;
+            if (h.orig) { orig = fn.replace(/\.png$/i, '') + '_orig.png'; files.push({ name: orig, blob: h.orig }); }
+            if (h.origMask) { origMask = fn.replace(/\.png$/i, '') + '_origmask.png'; files.push({ name: origMask, blob: h.origMask }); }
             /* judge 를 함께 담는다. 채점은 한 장에 Gemini 호출 1회 = 요금 1회다.
                여기서 빠뜨리면 복원한 사람은 돈을 다시 내고 채점해야 한다. */
-            idx.push({ file: fn, meta: h.meta, seed: h.seed, model: h.model, w: h.w, h: h.h, fav: !!h.fav, t: h.t, label: h.label, sceneId: h.sceneId || null, name: h.name, judge: h.judge || null, vars });
+            idx.push({ file: fn, meta: h.meta, seed: h.seed, model: h.model, w: h.w, h: h.h, fav: !!h.fav, t: h.t, label: h.label, sceneId: h.sceneId || null, name: h.name, judge: h.judge || null, vars, orig, origMask });
             i++; if (i % 20 === 0) st.textContent = `이미지 담는 중… ${i}/${items.length}`;
           }
           files.push({ name: 'history/index.json', u8: new TextEncoder().encode(JSON.stringify(idx)) });
@@ -2769,9 +2936,12 @@ function openBackup() {
             if (it.judge && typeof it.judge === 'object') rec.judge = it.judge;
             // 결과 변형(12.12 부터 담음) — 파일이 다 있을 때만 되살린다
             if (Array.isArray(it.vars) && it.vars.length && it.vars.every(v => histFiles[v.file])) {
-              rec.vars = it.vars.map(v => ({ blob: new Blob([histFiles[v.file]], { type: 'image/png' }), tag: v.tag }));
+              rec.vars = it.vars.map(v => ({ blob: new Blob([histFiles[v.file]], { type: 'image/png' }), tag: v.tag, ...(v.loc ? { loc: v.loc } : {}) }));
               rec.blob = rec.vars[0].blob;
             }
+            // 원본과 비교(12.14 부터 담음)
+            if (it.orig && histFiles[it.orig]) rec.orig = new Blob([histFiles[it.orig]], { type: 'image/png' });
+            if (it.origMask && histFiles[it.origMask]) rec.origMask = new Blob([histFiles[it.origMask]], { type: 'image/png' });
             try { rec.id = await histPut({ ...rec }); } catch (e) { failed++; }
             rec.url = URL.createObjectURL(rec.blob); R.hist.push(rec); n++;
             if (n % 20 === 0) rst.textContent = `이미지 복원 중… ${n}/${histIdx.length}`;

@@ -183,6 +183,8 @@ try {
           <div class="row"><button id="aiChoiceBtn" class="btn xs" title="캐릭터 위치: AI 자동 배치 / 좌표 지정">✔ AI 자동 배치</button><button id="btnAddChar" class="btn xs">＋ 캐릭터</button></div>
         </div>
         <div id="charList"></div>
+        <!-- NAI 캐릭터 겹침 경고 (좌표를 쓸 때 캐릭터 자리가 겹치면) -->
+        <div id="charWarn" class="char-warn" hidden></div>
       </div>
     </div>
 
@@ -206,12 +208,15 @@ try {
           </div>
         </div>
         <div id="panelVibe" class="panel" hidden>
+          <div id="vibeNotes" class="hint panel-notes" hidden></div>
           <div id="vibeList"></div>
-          <div class="row"><button id="vibeAdd" class="btn sm">＋ 바이브 이미지</button><button id="vibeLibBtn" class="btn sm" title="저장한 바이브 재사용 (인코딩 Anlas 절약) · .naiv4vibe 가져오기">📚 라이브러리</button><label class="ck"><input type="checkbox" id="vibeNormalize" checked> 강도 정규화</label></div>
+          <div class="row"><button id="vibeAdd" class="btn sm" title="그림·.naiv4vibe·.naiv4vibebundle·바이브가 든 그림을 넣습니다 (NAI 와 같은 파일)">＋ 바이브 이미지</button><button id="vibeLibBtn" class="btn sm" title="저장한 바이브 재사용 (인코딩 Anlas 절약) · .naiv4vibe 가져오기">📚 라이브러리</button><label class="ck"><input type="checkbox" id="vibeNormalize" checked> 강도 정규화</label>
+            <span class="viewpop-wrap"><button id="vibeMore" class="btn sm" hidden title="바이브 묶음 내보내기 · 그림에 넣기 · 인코딩으로 내보내기 (NAI ⋯)">⋯</button><div id="vibeMorePop" class="viewpop" hidden></div></span></div>
         </div>
         <div id="panelPref" class="panel" hidden>
+          <div id="prefNotes" class="hint panel-notes" hidden></div>
           <div id="prefList"></div>
-          <div class="row"><button id="prefAdd" class="btn sm">＋ 레퍼런스 이미지</button><span class="hint">V4.5 · 장당 +5 Anlas · 바이브와 동시 불가</span></div>
+          <div class="row"><button id="prefAdd" class="btn sm" title="그림이나 레퍼런스 ZIP(NAI 에서 받은 것)을 넣습니다">＋ 레퍼런스 이미지</button><button id="prefZip" class="btn sm" hidden title="정밀 레퍼런스 전부를 ZIP 으로 받습니다 — NAI 에서도 읽힙니다 (NAI Download All Precise References as ZIP)">⬇ ZIP</button><span class="hint">V4.5 · 장당 +5 Anlas · 바이브와 동시 불가</span></div>
         </div>
       </div>
     </details>
@@ -227,7 +232,7 @@ try {
           <label class="fld">Noise Schedule<select id="schedule"></select></label>
         </div>
         <div id="v3Box" hidden>
-          <label class="ck" title="NAI «Auto nai_smea»: 큰 크기(넓이 2,166,785 이상)에서는 SMEA 를 자동으로 켜고, 그보다 작으면 SMEA·DYN 을 끕니다. NAI 처음 값은 켜짐입니다."><input type="checkbox" id="autoSmea"> SMEA 자동 <span class="hint">(큰 크기에서만 SMEA)</span></label>
+          <label class="ck" title="NAI «Auto nai_smea»: 큰 크기(넓이 2,166,785 이상)에서는 SMEA 를 자동으로 켜고, 그보다 작으면 SMEA·DYN 을 끕니다. NAI 기본값은 켜짐입니다."><input type="checkbox" id="autoSmea"> SMEA 자동 <span class="hint">(큰 크기에서만 SMEA)</span></label>
           <div class="grid2"><label class="ck"><input type="checkbox" id="smea"> SMEA</label><label class="ck"><input type="checkbox" id="smeaDyn"> SMEA DYN</label></div>
           <label class="rng">Undesired Content 강도 <output id="ucStrengthV"></output><input type="range" id="ucStrength" min="0" max="1.5" step="0.05"></label>
         </div>
@@ -287,6 +292,8 @@ try {
         </div>
         <div id="viewerBg" hidden></div>
         <img id="viewerImg" alt="" hidden>
+        <!-- 원본과 비교(NAI OLD 단추)를 누르고 있는 동안 인페인트 마스크를 옅게 겹쳐 보인다 -->
+        <img id="viewerOldMask" alt="" hidden>
         <button id="btnPrev" class="vnav l" title="이전">‹</button>
         <button id="btnNext" class="vnav r" title="다음">›</button>
         <!-- 결과 변형 단추 (배경 제거 Masked·Generated·Blend) — NAI 처럼 그림 아래 가운데 -->
@@ -309,12 +316,19 @@ try {
           <button id="tToPref" class="tb" title="Precise Reference로 (V4.5)">🪞<span>레퍼런스</span></button>
         </div>
         <div class="vgroup">
+          <!-- NAI 결과 화면 단추 줄의 «보기 설정»(display.settings)·«OLD»(display.old-compare) -->
+          <span class="viewpop-wrap"><button id="tView" class="tb" title="보기 설정 — 작은 그림 키워 보기 · 투명 부분 보이기 (NAI 결과 화면 ⚙)">⚙</button><div id="viewPop" class="viewpop" hidden></div></span>
+          <button id="tOld" class="tb" hidden title="누르고 있는 동안 고치기 전 원본 그림을 보여 줍니다 — 인핸스·인페인트 결과에만 있습니다 (NAI OLD 단추)">✦<span>원본</span></button>
+          <button id="tInspect" class="tb" hidden title="이 결과의 기록 내용을 글로 봅니다 (⚙설정 «생성 결과 살펴보기»를 켜면 나타납니다)">🔍</button>
+        </div>
+        <div class="vgroup">
           <button id="tFav" class="tb" title="즐겨찾기 (F)">☆</button>
           <button id="tCopy" class="tb" title="설정 복사">📋</button>
           <button id="tApply" class="tb" title="이 이미지의 프롬프트·설정 불러오기">⤴</button>
           <button id="tSeed" class="tb" title="이 시드 재사용">🌱<span id="tSeedV"></span></button>
           <button id="tSave" class="tb" title="저장">💾</button>
           <button id="tSaveClean" class="tb" title="메타데이터 제거 후 저장">🧹</button>
+          <button id="tCopyImg" class="tb" title="그림을 클립보드에 복사합니다 — 다른 프로그램에 바로 붙여 넣을 수 있습니다 (NAI Copy to Clipboard)">🖼</button>
           <button id="tMeta" class="tb" title="메타데이터 보기">🏷</button>
           <button id="tDelete" class="tb danger" title="삭제 (Delete)">🗑</button>
         </div>
