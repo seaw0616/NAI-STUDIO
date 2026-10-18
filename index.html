@@ -379,12 +379,13 @@ try {
     </details>
 
     <div class="card grow">
-      <div class="card-body grow">
+      <div class="card-body grow hist-body">
         <div class="ptool">
           <span class="ptitle">히스토리 <span id="histCount" class="hint"></span></span>
-          <div class="ptool-r"><button id="histFavOnly" class="btn xs ghost">☆</button><button id="histClear" class="btn xs ghost danger">비우기</button></div>
+          <div class="ptool-r"><button id="histLock" class="btn xs ghost" title="스크롤 위치 고정 — 켜 두면 새 그림이 나오거나 다른 그림을 골라도 히스토리가 저절로 움직이지 않습니다" aria-pressed="false">🔒</button><button id="histFavOnly" class="btn xs ghost">☆</button><button id="histClear" class="btn xs ghost danger">비우기</button></div>
         </div>
         <div id="histGrid" class="hgrid"></div>
+        <button id="histTop" class="hist-top" title="맨 위로" hidden>↑</button>
       </div>
     </div>
   </aside>

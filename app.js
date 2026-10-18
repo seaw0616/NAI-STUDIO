@@ -272,6 +272,7 @@ const DEFAULTS = {
   chunks: [], deleted: {}, ytQueue: [], ytPos: null, ytSize: 'normal', ytOpen: false, ytVol: 60, ytUsePop: false, ytPopMode: 'tab',
   theme: 'violet', lastDark: 'violet', lastLight: 'light', ov: {}, tagUnderscore: false,
   histFavOnly: false, transparent: false,   // V5 전용 — 투명 배경(straight_alpha)
+  histScrollLock: false,   // NAI «Lock scroll position» (imagegen-history-scroll-lock, 기본 꺼짐)
   furryMode: false,   // NAI 의 Furry mode — 프롬프트 맨 앞에 'fur dataset,' 을 붙인다 (V4 이상)
   /* 채점(🔬) 관련.
      judgeAuto: 0 = 끔. N = 생성 N장마다 1회 자동 채점. 기본이 0 인 이유는
@@ -1411,7 +1412,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.14';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.15';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -3201,6 +3202,7 @@ function histAddCard(it) {
   if (i < 0) return;
   if (!S.histFavOnly || it.fav) g.insertBefore(histCardEl(i), g.firstChild);
   updateHistCount();
+  if (i === R.cur) histFollowCur();   // 그림을 먼저 고르고 카드가 나중에 붙어도 따라간다
 }
 function histDropCard(it) {
   const d = it && HCARD.get(it);
@@ -3221,6 +3223,29 @@ function histMarkCur(i) {
   const now = R.hist[i] ? HCARD.get(R.hist[i]) : null;
   if (prev && prev !== now) prev.classList.remove('cur');
   if (now && now.isConnected) now.classList.add('cur');
+  histFollowCur();
+}
+/* NAI 히스토리 자동 스크롤 (빌드 78a367e): 고른 그림이 바뀌면 그 카드가 보이게 히스토리를 움직인다.
+   카드가 위로 벗어나 있으면 그만큼 올리고, 아래로 벗어나 있으면 min(아래 차이, 위 차이)만큼 내린다(부드럽게).
+   같은 그림으로는 한 번만 움직이고, «스크롤 위치 고정»(S.histScrollLock)을 켜 두면 그 그림을 본 것으로만 적고 움직이지 않는다. */
+function histFollowCur() {
+  const it = R.hist[R.cur];
+  if (!it) { R._histFollowed = undefined; return; }
+  if (S.histScrollLock) { R._histFollowed = it; return; }
+  if (R._histFollowed === it) return;
+  const box = $('#histGrid'), card = HCARD.get(it);
+  if (!box || !card || !card.isConnected) return;
+  R._histFollowed = it;
+  const o = box.getBoundingClientRect(), n = card.getBoundingClientRect();
+  let l = 0;
+  if (n.top < o.top) l = n.top - o.top;
+  else if (n.bottom > o.bottom) l = Math.min(n.bottom - o.bottom, n.top - o.top);
+  if (l !== 0) box.scrollBy({ top: l, behavior: 'smooth' });
+}
+function paintHistLock() {
+  const b = $('#histLock'); if (!b) return;
+  b.classList.toggle('on', !!S.histScrollLock);
+  b.setAttribute('aria-pressed', S.histScrollLock ? 'true' : 'false');
 }
 /* 결과 변형 (배경 제거의 Masked·Generated·Blend) — NAI 와 같게 그림 한 장 안에 변형을 두고 지금 고른 변형 번호(R.varSel)로 보여 준다.
    NAI(빌드 78a367e): 새로 그림을 뽑으면 번호를 0 으로 돌리고, 디렉터 툴 결과는 고른 번호를 그대로 쓴다(Math.min 으로 맞춤).
@@ -5809,6 +5834,11 @@ function init() {
   };
   $('#tApply').onclick = () => { const it = curItem(); if (it) applyMeta(it.meta); };
   $('#histFavOnly').onclick = () => { S.histFavOnly = !S.histFavOnly; save(); renderHist(); };
+  $('#histLock').onclick = () => { S.histScrollLock = !S.histScrollLock; save(); paintHistLock(); histFollowCur(); };
+  paintHistLock();
+  /* NAI «Back to top»: 히스토리를 400px 넘게 내리면 맨 위로 가는 단추가 생긴다 */
+  $('#histGrid').addEventListener('scroll', e => { $('#histTop').hidden = !(e.target.scrollTop > 400); }, { passive: true });
+  $('#histTop').onclick = () => $('#histGrid').scrollTo({ top: 0, behavior: 'smooth' });
   /* 실제로 지우는 일은 한 곳에만 둔다 — 두 버튼이 같은 길을 쓰게 해서,
      한쪽만 고치고 다른 쪽에서 사고가 나는 일을 막는다. */
   async function histWipe(targets) {
