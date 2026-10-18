@@ -246,7 +246,9 @@ input[type=range]::-moz-range-thumb { width: 11px; height: 11px; border-radius: 
 .ic.danger:hover { border-color: var(--red); color: var(--red); }
 
 /* ── prompt ── */
-.ptool, .chead { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+/* 12.16: 좁은 패널에서 오른쪽 단추 묶음이 잘렸다(«무작위 캐릭터 지우기»). 자리가 모자라면 단추 묶음이 제목 아래 줄로 내려간다 */
+.ptool, .chead { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; row-gap: 5px; }
+.ptool > .ptool-r, .chead > .row { margin-left: auto; justify-content: flex-end; }
 .ptool-r { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .ptitle { font-size: 12px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase; color: var(--dim); white-space: nowrap; }
 .pwrap:has(> textarea[hidden]) { display: none; }
@@ -265,8 +267,10 @@ body:not(.show-chunks) .chunkbar:not(.floating) { display: none; }
 .chip .cdot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; }
 .char-card { background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 9px; display: flex; flex-direction: column; gap: 6px; }
 .char-card + .char-card { margin-top: 6px; }
-.char-card .ch-top { display: flex; gap: 6px; align-items: center; }
-.char-card .ch-name { font-size: 12px; color: var(--acc); font-weight: 700; flex: 1; }
+/* 12.16: 좁은 패널에서 머리 줄 단추(켜기·▲▼·보관함·위치·저장·✕)에 밀려 이름이 12px 폭으로 눌려 세로로 쪼개졌다(«캐릭터 1» 네 줄).
+   이름은 한 줄로 두고, 자리가 모자라면 단추가 다음 줄로 내려간다. */
+.char-card .ch-top { display: flex; gap: 6px; row-gap: 4px; align-items: center; flex-wrap: wrap; }
+.char-card .ch-name { font-size: 12px; color: var(--acc); font-weight: 700; flex: 1 1 auto; white-space: nowrap; min-width: max-content; }
 .char-card .ch-lib { width: auto; max-width: 130px; padding: 3px 24px 3px 8px; font-size: 11.5px; border-radius: 7px; }
 .char-card textarea { background: var(--bg1); }
 select.style-sel.sm { width: auto; max-width: 180px; padding: 3px 24px 3px 8px; font-size: 11.5px; border-radius: 7px; }
@@ -284,6 +288,8 @@ select.style-sel.sm { width: auto; max-width: 180px; padding: 3px 24px 3px 8px; 
 .phl mark { color: transparent; border-radius: 6px; }
 .phl mark.hl-chunk { background: color-mix(in srgb, var(--cc, var(--acc)) 28%, transparent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--cc, var(--acc)) 55%, transparent); }
 .phl mark.hl-wild { background: color-mix(in srgb, var(--gold) 22%, transparent); }
+/* 12.16 NAI «|»(섞기)·«||»(무작위 고르기) 색칠 — NAI 는 글자를 굵게·제목 색으로 칠한다. 우리는 글자 자리를 지키려고 뒤에 진한 바탕만 칠한다 */
+.phl mark.hl-bar, .phl mark.hl-bar2 { background: color-mix(in srgb, var(--txt) 34%, transparent); border-radius: 2px; }
 [data-theme="light"] .phl mark.hl-chunk, [data-theme="pink"] .phl mark.hl-chunk, [data-theme="menhera"] .phl mark.hl-chunk, [data-theme="sakura"] .phl mark.hl-chunk, [data-theme="mint"] .phl mark.hl-chunk { background: color-mix(in srgb, var(--cc, var(--acc)) 20%, transparent); }
 
 /* ── 가중치 강조/비강조 ({} 와 N::>1 은 올림 · [] 와 N::<1 은 내림) ──
@@ -437,6 +443,10 @@ select.style-sel.sm { width: auto; max-width: 180px; padding: 3px 24px 3px 8px; 
 .hgrid .hitem:hover { transform: scale(1.03); }
 .hgrid .hitem .fav { position: absolute; top: 3px; right: 4px; color: var(--gold); font-size: 13px; text-shadow: 0 0 4px #000; }
 .hgrid .hitem.saved { border-color: var(--green); box-shadow: inset 0 0 0 1px var(--green); }
+/* 12.16 NAI 🎲 무작위 프롬프트 칸 (NAI: 굵은 «Random Prompt» 머리 + ✕·↻) */
+.rand-box { display: flex; flex-direction: column; gap: 6px; }
+.rand-head { display: flex; align-items: center; justify-content: space-between; }
+.rand-title { font-size: 13px; font-weight: 600; color: var(--txt); }
 /* 12.15 히스토리 스크롤 위치 고정(NAI 자물쇠: 꺼져 있으면 흐리게 .35) · 맨 위로 단추(NAI «Back to top») */
 .hist-body { position: relative; }
 #histLock { opacity: .35; }

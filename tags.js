@@ -20,7 +20,7 @@ const CAT_NAME = { 0: '일반', 1: '아티스트', 3: '작품', 4: '캐릭터', 
 const hasKo = s => /[가-힣ㄱ-ㅎㅏ-ㅣ]/.test(s);
 /* 무거운 루프를 프레임 사이로 쪼갠다.
    태그 사전 22만 행을 한 태스크에서 돌리면 메인 스레드가 5.8~7.1초 통째로 멈춘다
-   (실측). 총 시간은 비슷하지만, 쪼개면 그 사이 클릭·타이핑이 정상으로 먹는다. */
+   (실제 PC 에서 잼). 총 시간은 비슷하지만, 쪼개면 그 사이 클릭·타이핑이 정상으로 먹는다. */
 const yieldToUI = () => new Promise(r =>
   (window.scheduler && scheduler.yield) ? scheduler.yield().then(r, () => setTimeout(r, 0)) : setTimeout(r, 0));
 

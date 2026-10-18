@@ -51,7 +51,7 @@ VERSION = 17
 # 같은 PC 의 다른 프로그램은 127.0.0.1 에 닿을 수는 있어도 이 값은 모른다.
 SESSION_KEY = secrets.token_urlsafe(24)
 
-RELEASE = "12.15"   # 배포 버전. GitHub 릴리스 태그 "v12.15" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
+RELEASE = "12.16"   # 배포 버전. GitHub 릴리스 태그 "v12.16" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
 # 이 앱이 배포되는 저장소. 비워 두면 ⬆ 업데이트 버튼이 아예 안 뜬다 —
 # 사용자가 ⚙설정에 직접 타이핑해 넣기 전까지는 새 버전이 나온 줄도 모른다.
 # 실제로 그 때문에 옛 버전을 계속 쓰시는 분들이 있었다. 기본값을 박아 둔다.
@@ -962,6 +962,355 @@ def nai_model_watch(max_age=86400):
     except Exception as e:
         _nai_watch["err"] = str(e)[:140]
     return _nai_watch["new"]
+
+
+# ── NAI 무작위 프롬프트(🎲) 생성기 ──────────────────────────────────────────────
+# NAI 이미지 페이지의 생성기(V4 이상 캐릭터·V3·퍼리 V3)와 태그표는 NAI 저작물이라 이 저장소에 넣지 않는다.
+# 사용자 PC 에서 novelai.net 이 공개로 내주는 웹앱 스크립트를 받아, 생성기 세 개와 그것이 쓰는 정의만 골라
+# 혼자 도는 JS 로 만들어 앱에 내준다(앱은 따로 떨어진 Worker 에서 돌린다). 같은 NAI 빌드면 data/cache 에 둔 것을 쓴다.
+_nai_rp = {"t": 0.0, "build": "", "code": "", "err": ""}
+_nai_rp_lock = threading.Lock()
+_JS_IDENT = re.compile(r"[A-Za-z_$][\w$]*")
+_JS_KW = set("break case catch class const continue debugger default delete do else export extends finally for "
+             "function if import in instanceof let new return super switch this throw try typeof var void while with "
+             "yield await async of null true false undefined".split())
+
+
+def _js_skip_str(s, i):
+    q, j, n = s[i], i + 1, len(s)
+    while j < n and s[j] != q:
+        if s[j] == "\\":
+            j += 2
+            continue
+        if s[j] == "\n":
+            break
+        j += 1
+    return j + 1
+
+
+def _js_skip_tpl(s, i):
+    j, n = i + 1, len(s)
+    while j < n:
+        c = s[j]
+        if c == "\\":
+            j += 2
+        elif c == "`":
+            return j + 1
+        elif c == "$" and s[j + 1:j + 2] == "{":
+            j = _js_skip_code(s, j + 2, "}")
+        else:
+            j += 1
+    return n
+
+
+def _js_regex_ok(s, i):
+    k = i - 1
+    while k >= 0 and s[k] in " \t\r\n":
+        k -= 1
+    if k < 0 or s[k] in "(,=:[!&|?{};+-*%<>~^":
+        return True
+    w = re.search(r"([A-Za-z_$][\w$]*)$", s[max(0, k - 12):k + 1])
+    return bool(w and w.group(1) in ("return", "typeof", "case", "do", "else", "in", "of", "void", "delete", "new", "throw"))
+
+
+def _js_skip_regex(s, i):
+    j, n, cls = i + 1, len(s), False
+    while j < n and s[j] != "\n":
+        c = s[j]
+        if c == "\\":
+            j += 2
+            continue
+        if c == "[":
+            cls = True
+        elif c == "]":
+            cls = False
+        elif c == "/" and not cls:
+            j += 1
+            while j < n and (s[j].isalnum() or s[j] in "$_"):
+                j += 1
+            return j
+        j += 1
+    return j
+
+
+def _js_skip_code(s, i, close):
+    """i 부터 짝이 맞는 close 다음 자리까지 (문자열·템플릿·정규식·주석은 건너뛴다)."""
+    n, depth = len(s), 0
+    while i < n:
+        c = s[i]
+        if c in "'\"":
+            i = _js_skip_str(s, i)
+            continue
+        if c == "`":
+            i = _js_skip_tpl(s, i)
+            continue
+        if c == "/" and s[i + 1:i + 2] == "/":
+            k = s.find("\n", i)
+            i = n if k < 0 else k
+            continue
+        if c == "/" and s[i + 1:i + 2] == "*":
+            k = s.find("*/", i + 2)
+            i = n if k < 0 else k + 2
+            continue
+        if c == "/" and _js_regex_ok(s, i):
+            i = _js_skip_regex(s, i)
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0 and c == close:
+                return i + 1
+            depth -= 1
+        i += 1
+    return n
+
+
+def _js_expr_end(s, i):
+    """선언 값의 끝 — 깊이 0 의 , ; 또는 닫는 괄호."""
+    n, depth = len(s), 0
+    while i < n:
+        c = s[i]
+        if c in "'\"":
+            i = _js_skip_str(s, i)
+            continue
+        if c == "`":
+            i = _js_skip_tpl(s, i)
+            continue
+        if c == "/" and _js_regex_ok(s, i):
+            i = _js_skip_regex(s, i)
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                return i
+            depth -= 1
+        elif depth == 0 and c in ",;":
+            return i
+        i += 1
+    return n
+
+
+def _js_stmt_end(s, i):
+    n, depth = len(s), 0
+    while i < n:
+        c = s[i]
+        if c in "'\"":
+            i = _js_skip_str(s, i)
+            continue
+        if c == "`":
+            i = _js_skip_tpl(s, i)
+            continue
+        if c == "/" and _js_regex_ok(s, i):
+            i = _js_skip_regex(s, i)
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0 and c == "}":
+                k = i + 1
+                while k < n and s[k] in " \t":
+                    k += 1
+                if k >= n or s[k] not in ".,([?:+-*/%&|=<>":
+                    return i + 1
+        elif depth == 0 and c == ";":
+            return i + 1
+        i += 1
+    return n
+
+
+def _js_top_decls(s):
+    """모듈 몸의 맨 위 선언 → {이름: (시작, 끝, 'function'|'let')}. let/var/const 는 항목마다 나눈다."""
+    decls, i, n = {}, 0, len(s)
+    while i < n:
+        while i < n and s[i] in " \t\r\n;":
+            i += 1
+        if i >= n:
+            break
+        mm = re.match(r"(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(", s[i:i + 200])
+        if mm:
+            j = _js_skip_code(s, i + mm.end(), ")")
+            k = s.find("{", j)
+            e = _js_skip_code(s, k + 1, "}")
+            decls[mm.group(1)] = (i, e, "function")
+            i = e
+            continue
+        mm = re.match(r"(let|var|const)\s+", s[i:i + 10])
+        if mm:
+            j = i + mm.end()
+            while True:
+                nm = _JS_IDENT.match(s, j)
+                if not nm:
+                    j = _js_stmt_end(s, j)
+                    break
+                k = nm.end()
+                while k < n and s[k] in " \t\r\n":
+                    k += 1
+                e = _js_expr_end(s, k + 1) if (k < n and s[k] == "=") else k
+                decls[nm.group(0)] = (nm.start(), e, "let")
+                j = e
+                if j < n and s[j] == ",":
+                    j += 1
+                    while j < n and s[j] in " \t\r\n":
+                        j += 1
+                    continue
+                break
+            i = j
+            continue
+        i = _js_stmt_end(s, i)
+    return decls
+
+
+def _js_idents(text, props=False):
+    """글 안의 이름. props=False 면 속성 이름(.x)은 뺀다. 문자열·템플릿 글은 건너뛰되 템플릿의 ${…} 안은 본다."""
+    names, i, n = set(), 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in "'\"":
+            i = _js_skip_str(text, i)
+            continue
+        if c == "`":
+            e = _js_skip_tpl(text, i)
+            j = i + 1
+            while j < e:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == "$" and text[j + 1:j + 2] == "{":
+                    k = _js_skip_code(text, j + 2, "}")
+                    names |= _js_idents(text[j + 2:k - 1], props)
+                    j = k
+                    continue
+                j += 1
+            i = e
+            continue
+        if c == "/" and text[i + 1:i + 2] not in ("/", "*") and _js_regex_ok(text, i):
+            i = _js_skip_regex(text, i)
+            continue
+        mm = _JS_IDENT.match(text, i)
+        if mm and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] in "$_")):
+            k = i - 1
+            while k >= 0 and text[k] in " \t\r\n":
+                k -= 1
+            is_prop = k >= 0 and text[k] == "." and not (k >= 2 and text[k - 2:k + 1] == "...")
+            if props or not is_prop:
+                names.add(mm.group(0))
+            i = mm.end()
+            continue
+        i += 1
+    return names - _JS_KW
+
+
+# 뽑은 코드에 있으면 안 되는 이름(글자 밖) — 생성기는 Math·Set·배열만 쓴다
+_RP_DENY = {"fetch", "XMLHttpRequest", "importScripts", "import", "eval", "Function", "document", "window", "self",
+            "globalThis", "localStorage", "sessionStorage", "indexedDB", "navigator", "postMessage", "WebSocket",
+            "require", "process", "location", "caches", "Worker", "SharedWorker", "open", "setTimeout", "setInterval",
+            "Blob", "URL", "crypto", "performance", "top", "parent", "frames", "opener", "Reflect", "Proxy"}
+
+
+def nai_rp_extract(src):
+    """NAI 웹앱 스크립트에서 무작위 프롬프트 생성기 세 개(V4 이상·퍼리 V3·V3)를 골라 혼자 도는 JS 로 만든다.
+    고르기 코드 `getModelSupportInfo)(X).characterPrompts?A:X===…naiDiffusionFurryV3?B:C` 로 이름을 얻고,
+    그 모듈의 맨 위 선언 가운데 쓰이는 것만 따라가 모은다. 못 찾거나 위험한 이름이 섞이면 RuntimeError."""
+    m = re.search(r"getModelSupportInfo\)\((\w+)\)\.characterPrompts\?([\w$]+):\1===[\w$]+\.ImageGenerationModels\."
+                  r"naiDiffusionFurryV3\?([\w$]+):([\w$]+)", src)
+    if not m:
+        raise RuntimeError("NAI 스크립트에서 무작위 프롬프트를 고르는 코드를 찾지 못했습니다 (NAI 사이트가 바뀐 것 같습니다)")
+    targets = [m.group(2), m.group(3), m.group(4)]
+    start = src.rfind('"use strict";', 0, m.start())
+    if start < 0:
+        raise RuntimeError("무작위 프롬프트 코드가 든 모듈의 시작을 찾지 못했습니다")
+    b0 = start + len('"use strict";')
+    body = src[b0:_js_skip_code(src, b0, "}") - 1]
+    decls = _js_top_decls(body)
+    miss = [t for t in targets if t not in decls]
+    if miss:
+        raise RuntimeError("무작위 프롬프트 생성기 정의를 찾지 못했습니다: %s" % ", ".join(miss))
+    need, todo = set(), list(targets)
+    while todo:
+        nm = todo.pop()
+        if nm in need:
+            continue
+        need.add(nm)
+        a, e, _k = decls[nm]
+        todo += [w for w in _js_idents(body[a:e]) if w in decls and w not in need]
+    parts = []
+    for nm in sorted(need, key=lambda x: decls[x][0]):
+        a, e, k = decls[nm]
+        parts.append(body[a:e] if k == "function" else "let " + body[a:e] + ";")
+    code = '"use strict";\n' + "\n".join(parts) + "\nreturn {v4: %s, furryV3: %s, v3: %s};\n" % tuple(targets)
+    bad = sorted((_js_idents(code) & _RP_DENY) | {w for w in ("constructor", "prototype", "__proto__") if w in code})
+    if bad:
+        raise RuntimeError("무작위 프롬프트 코드에 쓰면 안 되는 이름이 섞여 쓰지 않습니다: %s" % ", ".join(bad[:6]))
+    return code
+
+
+def nai_random_prompt(force=False):
+    """🎲 생성기 코드를 돌려준다 → {"ok", "build", "code", "err"}. 받아 둔 것이 하루 안이면 그대로 쓴다.
+    실패하면 까닭을 그대로 돌려줘 앱이 크게 알린다(조용히 넘기지 않는다)."""
+    with _nai_rp_lock:
+        now = time.time()
+        if _nai_rp["code"] and not force and now - _nai_rp["t"] < 86400:
+            return {"ok": True, "build": _nai_rp["build"], "code": _nai_rp["code"], "err": ""}
+        try:
+            req = urllib.request.Request("https://novelai.net/image", headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                html = r.read(2 * 1024 * 1024).decode("utf-8", "replace")
+            b = re.search(r'"buildId":"([^"]+)"', html)
+            d = re.search(r'data-dpl-id="([^"]+)"', html)
+            build = (d.group(1) if d else "") or (b.group(1) if b else "") or "unknown"
+            cdir = DATA / "cache"
+            cfile = cdir / ("nai_randprompt_%s.js" % re.sub(r"[^\w.-]", "_", build)[:80])
+            if not force and cfile.exists():
+                code = cfile.read_text(encoding="utf-8")
+                _nai_rp.update(t=now, build=build, code=code, err="")
+                return {"ok": True, "build": build, "code": code, "err": ""}
+            paths = []
+            for p in re.findall(r'(/_next/static/[^"\'?\s]+\.js)', html):
+                if p not in paths:
+                    paths.append(p)
+            if not paths:
+                raise RuntimeError("NAI 페이지에서 스크립트 주소를 하나도 찾지 못했습니다 (사이트 구조가 바뀐 것 같습니다)")
+            pat = re.compile(r"\.characterPrompts\?[\w$]+:[\w$]+===[\w$]+\.ImageGenerationModels\.naiDiffusionFurryV3\?")
+
+            def one(p):
+                try:
+                    rq = urllib.request.Request("https://novelai.net" + p, headers={"User-Agent": UA})
+                    with urllib.request.urlopen(rq, timeout=40) as rr:
+                        return rr.read(16 * 1024 * 1024).decode("utf-8", "replace")
+                except Exception:
+                    return None
+            import concurrent.futures as _cf
+            hit, fails, seen = None, 0, 0
+            with _cf.ThreadPoolExecutor(6) as ex:
+                for k in range(0, len(paths), 6):
+                    for t in ex.map(one, paths[k:k + 6]):
+                        if t is None:
+                            fails += 1
+                            continue
+                        seen += 1
+                        if hit is None and pat.search(t):
+                            hit = t
+                    if hit is not None:
+                        break
+            if hit is None:
+                raise RuntimeError("NAI 스크립트 %d개를 받았지만 무작위 프롬프트 코드를 찾지 못했습니다%s"
+                                   % (seen, " (받기 실패 %d개)" % fails if fails else ""))
+            code = nai_rp_extract(hit)
+            try:
+                cdir.mkdir(parents=True, exist_ok=True)
+                for old in cdir.glob("nai_randprompt_*.js"):     # 옛 빌드 것은 지운다
+                    if old != cfile:
+                        old.unlink()
+                cfile.write_text(code, encoding="utf-8")
+            except Exception as e:
+                err_add({"msg": "무작위 프롬프트 캐시 저장 실패: %s" % e, "where": "nai_random_prompt"})
+            _nai_rp.update(t=now, build=build, code=code, err="")
+            return {"ok": True, "build": build, "code": code, "err": ""}
+        except Exception as e:
+            _nai_rp["err"] = str(e)[:200]
+            return {"ok": False, "build": _nai_rp["build"], "code": "", "err": _nai_rp["err"]}
 
 
 def _dan_img_trim(cap=80 * 1024 * 1024):
@@ -2023,6 +2372,9 @@ class Handler(BaseHTTPRequestHandler):
                                          + [{"name": p["name"], "detail": p["detail"]} for p in (_health_last.get("problems") or []) if p["name"] != "앱 파일"],
                              "hasGhToken": bool(cfg.get("ghToken")),
                              "updateRepo": cfg.get("updateRepo") or UPDATE_REPO or ""})
+            return True
+        if path == "/nai-randprompt":   # NAI 무작위 프롬프트(🎲) 생성기 — 사용자 PC 에서 NAI 웹앱 스크립트로 만든다
+            self._json(200, nai_random_prompt(bool((qs.get("force") or [""])[0])))
             return True
         if path == "/errors":     # 오류 기록 — 앱이 오류를 만나면 여기로 보낸다
             if self.command == "POST":

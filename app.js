@@ -273,6 +273,7 @@ const DEFAULTS = {
   theme: 'violet', lastDark: 'violet', lastLight: 'light', ov: {}, tagUnderscore: false,
   histFavOnly: false, transparent: false,   // V5 전용 — 투명 배경(straight_alpha)
   histScrollLock: false,   // NAI «Lock scroll position» (imagegen-history-scroll-lock, 기본 꺼짐)
+  randomPrompt: '', randomChars: null,   // NAI 🎲 무작위 프롬프트(imagegen-randomprompt)·무작위 캐릭터(imagegen-random-character-prompts, 없으면 null)
   furryMode: false,   // NAI 의 Furry mode — 프롬프트 맨 앞에 'fur dataset,' 을 붙인다 (V4 이상)
   /* 채점(🔬) 관련.
      judgeAuto: 0 = 끔. N = 생성 N장마다 1회 자동 채점. 기본이 0 인 이유는
@@ -654,7 +655,7 @@ const R = {
 };
 /* 바이브는 NAI 처럼 모델마다 따로 둔다 (NAI ReferenceImages(모델)). R.vibes 는 늘 '지금 모델의 목록' 을 가리킨다.
    예전엔 목록 하나를 모든 모델이 같이 써서, 모델을 바꾸면 같은 바이브를 그 모델용으로 다시 인코딩했다(장당 2 Anlas).
-   (2026-10-16 사용자가 「NAI 처럼 따로」를 고름) 생성 모드 「절약」은 바탕 모델(V5 Full)과 같은 목록이다. */
+   (2026-10-16 결정: NAI 처럼 모델마다 따로) 생성 모드 「절약」은 바탕 모델(V5 Full)과 같은 목록이다. */
 R.vibesBy = {};
 const vibeKey = m => (MODELS[m] && MODELS[m].effortOf) || m;
 Object.defineProperty(R, 'vibes', {
@@ -1021,7 +1022,7 @@ function dupTags(text) {
 function previewFinal() {
   const st = getStyle(S.activeStyle);
   // peek=true — 미리보기는 <*조각> 순차 카운터를 소모하지 않는다 (실제 생성 때 밀리면 안 됨)
-  let p = expandAll(joinParts(st && st.prefix, getMainPrompt(), st && st.suffix), true);
+  let p = expandAll(joinParts(st && st.prefix, genPrompt(), st && st.suffix), true);
   /* Furry 모드 — NAI 는 프롬프트를 'fur dataset,' 으로 **시작**하게 한다 */
   p = addFurry(p, S.model);
   {
@@ -1036,10 +1037,10 @@ function previewFinal() {
   /* V5 는 따옴표로 감싼 글자를 모아 "teXt: ..." 를 자동으로 붙인다 —
      미리보기에도 보여야 사용자가 무엇이 나가는지 안다. */
   if (capsOf(S.model).autoText && S.autoText !== false) {
-    const cs = (S.chars || []).filter(c => (c.prompt || '').trim() && !c.off)   // 꺼 둔 캐릭터는 뺀다
+    const cs = (curChars() || []).filter(c => (c.prompt || '').trim() && !c.off)   // 꺼 둔 캐릭터는 뺀다
       .map(c => ({ prompt: expandAll(c.prompt.trim(), true), enabled: true,
                    center: { x: c.x != null ? c.x : 0.5, y: c.y != null ? c.y : 0.5 } }));
-    p = autoTextV5(p, cs, !S.aiChoice && (S.chars || []).some(c => c.x != null));
+    p = autoTextV5(p, cs, !S.aiChoice && (curChars() || []).some(c => c.x != null));
   }
   /* buildPayload 와 같은 조건이어야 한다. 예전엔 '프리셋이 없음(onlyIfEmpty 포함)' 조건이 여기만 빠져서
      V3 의 '없음' 을 고르면 미리보기에는 nsfw 가 붙고 실제 요청에는 안 붙었다. */
@@ -1067,8 +1068,8 @@ function updatePreview() {
   const open = !wrap || wrap.open;
   const { p, uc } = previewFinal();
   if (open) { $('#pvPrompt').textContent = p; $('#pvUc').textContent = uc; }
-  const nChunks = (getMainPrompt().match(/[^,\n{}\[\]<>|]+/g) || []).filter(t => isChunkToken(t)).length;
-  const nFrag = (getMainPrompt().match(/<[^<>]+>/g) || []).length;
+  const nChunks = (genPrompt().match(/[^,\n{}\[\]<>|]+/g) || []).filter(t => isChunkToken(t)).length;
+  const nFrag = (genPrompt().match(/<[^<>]+>/g) || []).length;
   // 토큰 수 — 한도는 모델마다 다르다 (V4/4.5 512 · V5 Curated 703 · V5 Full 1471)
   const tok = typeof countTokens === 'function' ? countTokens(p) : null;
   const lim = typeof tokenLimit === 'function' ? tokenLimit(S.model) : 512;
@@ -1412,7 +1413,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.15';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.16';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -2021,7 +2022,7 @@ function buildPayload(ov) {
   const seed = ov.seed != null ? ov.seed : (S.randomSeed || S.seed === '' ? randSeed() : (parseInt(S.seed, 10) || 0));
   R.lastSeed = seed;
   const style = ov.style !== undefined ? ov.style : getStyle(S.activeStyle);
-  let prompt = ov.prompt != null ? ov.prompt : expandAll(joinParts(style && style.prefix, getMainPrompt(), style && style.suffix));
+  let prompt = ov.prompt != null ? ov.prompt : expandAll(joinParts(style && style.prefix, genPrompt(), style && style.suffix));
   /* Furry 모드는 맨 앞에 붙는다. ov.prompt 로 프롬프트를 직접 넘긴 경우(그림체 튜닝 등)는
      부르는 쪽이 이미 완성한 문자열이므로 건드리지 않는다. */
   if (ov.prompt == null) prompt = addFurry(prompt, m);
@@ -2084,7 +2085,7 @@ function buildPayload(ov) {
   }
   const caps = capsOf(m);
   /* 꺼 둔 캐릭터(c.off)는 생성에서 뺀다 — 지운 게 아니라 잠시 끈 것이라 프롬프트는 남는다 */
-  let chars = (ov.chars || S.chars.filter(c => c.prompt.trim() && !c.off)).map(c => ({ ...c }));
+  let chars = (ov.chars || curChars().filter(c => (c.prompt || '').trim() && !c.off)).map(c => ({ ...c }));   // NAI: 무작위 캐릭터가 있으면 그것 (RandomCharacterPrompts || CharacterPrompts)
   /* 캐릭터를 아예 안 받는 모델(V3 계열)로 바꿔 놓고 캐릭터 칸을 채워 두면, 예전엔 말없이 통째로 빠졌다.
      인원 초과는 알려 주면서 '전부 빠짐' 만 조용했다 — 결과가 왜 다른지 알 길이 없다. */
   if (!caps.maxChars && chars.length && typeof toast === 'function' && !ov.quiet) {
@@ -2573,7 +2574,7 @@ function hashStr(s) { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h
    같은 값이 연달아 뽑혀 막히는 일이 없게 예전처럼 막기에서 뺀다.
    (12.12 까지는 «|» 하나만 있어도 무작위로 봐서, 프롬프트 믹싱 «|» 가 든 같은 설정을 NAI 와 달리 막지 않았다) */
 function promptHasRandom() {
-  const all = [S.prompt, S.uc, ...(S.chars || []).map(c => (c.prompt || '') + ' ' + (c.uc || ''))].join(' ');
+  const all = [S.randomPrompt || S.prompt, S.uc, ...(curChars() || []).map(c => (c.prompt || '') + ' ' + (c.uc || ''))].join(' ');
   return /<|\|\|/.test(all) || (S.slashWild && /\//.test(all));
 }
 /* NAI carryRandomizedChoices (빌드 78a367e) 그대로.
@@ -2757,7 +2758,7 @@ async function doGenerate(ov, label) {
 /* NAI 생성 단추(빌드 78a367e): 캐릭터 프롬프트 가운데 «1girl»·«1boy» 가 든 것이 있으면, 캐릭터마다 첫 «1girl»→«girl»·«1boy»→«boy» 로 바꾸고
    화면 글도 그렇게 바꾼다 (캐릭터 칸은 한 사람이므로 숫자 태그를 빼는 NAI 규칙) */
 function fixCharOneGirl() {
-  const cs = S.chars || [];
+  const cs = curChars() || [];   // NAI: 무작위 캐릭터가 있으면 그 목록을 바꾼다
   if (!cs.some(c => (c.prompt || '').includes('1girl') || (c.prompt || '').includes('1boy'))) return;
   cs.forEach(c => { if (typeof c.prompt === 'string') c.prompt = c.prompt.replace(/1girl/, 'girl').replace(/1boy/, 'boy'); });
   save(); if (typeof renderChars === 'function') renderChars();
@@ -2951,7 +2952,7 @@ async function addToHistory(blob, meta, label, opt) {
   R.hist.push(item);
   if (typeof noteMushLater === 'function') noteMushLater(item);   // 뭉갬 '평소' 기록 (한가할 때)
   /* 새 카드 한 장만 맨 앞에 붙인다. 예전엔 여기서 renderHist() 로 400장을 통째로 다시 만들어,
-     뽑을 때마다 화면이 멈췄다(2026-10). 지운 옛 카드는 pruneHistory 가 뗀다. */
+     뽑을 때마다 화면이 멈췄다(2026-10, 뽑을 때 렉이 걸린다는 보고). 지운 옛 카드는 pruneHistory 가 뗀다. */
   await pruneHistory(item); histAddCard(item); showImage(R.hist.length - 1);
   return item;
 }
@@ -3071,7 +3072,7 @@ function openFullView(it) {
 function visibleHist() { const idx = []; R.hist.forEach((h, i) => { if (!S.histFavOnly || h.fav) idx.push(i); }); return idx; }
 /* ── 히스토리 칸 작은 그림 ──────────────────────────────────────────────────
    원본(1216×832 등)을 칸에 그대로 쓰면 400장이 각각 4MB 짜리 그림으로 풀려 메모리를 크게 차지하고,
-   다른 창에 갔다 오면 크롬이 그걸 다시 풀어야 해서 화면이 멈췄다(2026-10).
+   다른 창에 갔다 오면 크롬이 그걸 다시 풀어야 해서 화면이 멈췄다(2026-10, 다른 창에 갔다 오면 렉이 걸린다는 보고).
    짧은 변 192px 로 줄인 그림을 쓴다. NAI 웹도 히스토리 칸에는 128px 그림을 쓴다.
    칸이 화면에 보일 때만 만들고(IntersectionObserver), 만든 것은 메모리에만 둔다(저장소에는 원본만).
    그림 풀기·줄이기는 createImageBitmap 이 화면 일과 따로 처리한다. */
@@ -3843,7 +3844,7 @@ function charsOverlap(list, m) {
 const CHAR_OVERLAP_MSG = '캐릭터 자리가 겹치면 그림 품질이 떨어질 수 있습니다. 캐릭터 위치를 고치거나 «AI 자동 배치»를 켜 주세요.';
 function paintCharWarn() {
   const w = $('#charWarn'); if (!w) return;
-  const show = !S.aiChoice && !!capsOf(S.model).maxChars && charsOverlap(S.chars, S.model) && !$('#modalBody .pos-stage');
+  const show = !S.aiChoice && !!capsOf(S.model).maxChars && charsOverlap(curChars(), S.model) && !$('#modalBody .pos-stage');
   w.hidden = !show; w.textContent = show ? '⚠ ' + CHAR_OVERLAP_MSG : '';
 }
 function posName(c) {
@@ -3857,8 +3858,11 @@ function renderChars() {
   /* 카드를 통째로 다시 만들면 R.lastTA 가 사라진 노드를 가리킨다 —
      그 상태에서 태그를 넣으면 캐릭터 칸이 아니라 1번 칸으로 들어갔다. */
   if (R.lastTA && !document.contains(R.lastTA)) R.lastTA = null;
-  S.chars.forEach((c, i) => list.appendChild(charCard(c, i, () => { S.chars.splice(i, 1); save(); renderChars(); }, () => save(),
-    { list: S.chars, redraw: renderChars })));
+  const cs = curChars(), rnd = Array.isArray(S.randomChars);
+  cs.forEach((c, i) => list.appendChild(charCard(c, i, () => { cs.splice(i, 1); save(); renderChars(); }, () => save(),
+    { list: cs, redraw: renderChars, random: rnd })));
+  // NAI «Clear Random Prompt Characters»: 무작위 캐릭터가 한 명이라도 있으면 보인다 (빈 목록이면 숨는다 — NAI 와 같음)
+  { const b = $('#btnRandCharsClear'); if (b) b.hidden = !((S.randomChars || []).length > 0); }
   $('#aiChoiceBtn').classList.toggle('on', !!S.aiChoice);
   $('#aiChoiceBtn').textContent = S.aiChoice ? '✔ AI 자동 배치' : '☐ 좌표 지정 사용';
   paintCharWarn();
@@ -3871,7 +3875,7 @@ function charCard(c, i, onDel, onChange, opts) { // 메인·씬 공용 카드
      안 넘기면 메인(S.chars)으로 본다. */
   opts = opts || {};
   const card = document.createElement('div'); card.className = 'char-card';
-  card.innerHTML = `<div class="ch-top"><button class="ic ch-off" title="이 캐릭터를 생성에서 빼기 (지우지 않음)">⏻</button><span class="ch-name">캐릭터 ${i + 1}</span>
+  card.innerHTML = `<div class="ch-top"><button class="ic ch-off" title="이 캐릭터를 생성에서 빼기 (지우지 않음)">⏻</button><span class="ch-name">${opts.random ? '무작위 캐릭터' : '캐릭터'} ${i + 1}</span>
       <button class="ic ch-up" title="위로">▲</button><button class="ic ch-dn" title="아래로">▼</button>
       <select class="ch-lib" title="캐릭터 라이브러리에서 불러오기"><option value="">라이브러리…</option></select>
       <button class="btn xs pos">위치: ${posName(c)}</button><button class="btn xs ghost savelib" title="이 캐릭터를 라이브러리에 저장">저장</button><button class="ic del" title="삭제">✕</button></div>
@@ -3890,7 +3894,7 @@ function charCard(c, i, onDel, onChange, opts) { // 메인·씬 공용 카드
   /* 순서 바꾸기 — NAI 도 캐릭터 줄에 ▲▼ 를 둔다.
      V4+ 는 캐릭터 순서가 결과에 영향을 준다(use_order). 지웠다 다시 만들 필요가 없어야 한다. */
   const move = d => {
-    const arr = opts.list || S.chars;
+    const arr = opts.list || curChars();
     const j = i + d;
     if (j < 0 || j >= arr.length) return;
     const [x] = arr.splice(i, 1); arr.splice(j, 0, x);
@@ -3900,7 +3904,7 @@ function charCard(c, i, onDel, onChange, opts) { // 메인·씬 공용 카드
   const up = card.querySelector('.ch-up'), dn = card.querySelector('.ch-dn');
   up.onclick = () => move(-1); dn.onclick = () => move(1);
   up.disabled = i === 0;
-  dn.disabled = i === ((opts.list || S.chars).length - 1);
+  dn.disabled = i === ((opts.list || curChars()).length - 1);
   paintOff();
   tp.value = c.prompt || ''; tu.value = c.uc || '';
   // 생성 모드 「절약」은 캐릭터 네거티브를 보내지 않는다 — 글은 남기고 잠근다 (syncUI 와 같은 규칙)
@@ -3917,7 +3921,7 @@ function charCard(c, i, onDel, onChange, opts) { // 메인·씬 공용 카드
   tp.addEventListener('input', () => { c.prompt = tp.value; markUserEdit(); onChange(); });
   tu.addEventListener('input', () => { c.uc = tu.value; markUserEdit(); onChange(); });
   card.querySelector('.del').onclick = onDel;
-  { const pb = card.querySelector('.pos'), arr = opts.list || S.chars;
+  { const pb = card.querySelector('.pos'), arr = opts.list || curChars();
     /* NAI: V4·V4.5 는 캐릭터가 두 명부터 자리를 정할 수 있다(V5 는 한 명도) — 못 정할 때는 단추를 잠그고 까닭을 적는다 */
     const can = arr.length >= 2 || canPosOne(S.model);
     pb.disabled = !can; if (!can) pb.title = 'V4·V4.5 는 캐릭터가 두 명 이상일 때 자리를 정할 수 있습니다 (NAI 와 같음 · V5 는 한 명도 됩니다)';
@@ -3929,7 +3933,8 @@ function charCard(c, i, onDel, onChange, opts) { // 메인·씬 공용 카드
    새 캐릭터는 빈자리를 받고, 네거티브는 V4 모델이면 «lowres, aliasing, »·나머지는 빈 글 — characterPromptDefaultUcForModel) */
 const charDefaultUc = m => ((MODELS[modelOf(m)] || {}).ver === 40 ? 'lowres, aliasing, ' : '');
 function addCharWith(prefix) {
-  S.chars.push({ prompt: prefix, uc: charDefaultUc(S.model), ...nextCharPos(S.chars, S.model) });
+  const cs = curChars();   // NAI: 무작위 캐릭터가 있으면 그 목록에 더한다
+  cs.push({ prompt: prefix, uc: charDefaultUc(S.model), ...nextCharPos(cs, S.model) });
   // 접혀 있으면 펴 준다 — 숨은 목록에 추가되면 화면엔 아무 변화가 없어 '안 눌린다' 로 보인다
   if (S.charsOpen === false) S.charsOpen = true;
   save(); renderChars();
@@ -3963,7 +3968,7 @@ function posGridLines(g) {
   return { v: [], h: [] };
 }
 function openPosPicker(c, after, list) {
-  list = list || S.chars;
+  list = list || curChars();
   const m = S.model, ff = freePos(m);
   let cur = c;
   openModal('캐릭터 위치', body => {
@@ -4025,13 +4030,13 @@ function openPosPicker(c, after, list) {
       ev.preventDefault(); place(ev);
     });
     stage.addEventListener('pointermove', ev => { if (drag) place(ev); });
-    const end = () => { if (!drag) return; drag = false; after(); if (list === S.chars) { save(); const b = $('#aiChoiceBtn'); if (b) { b.classList.toggle('on', !!S.aiChoice); b.textContent = S.aiChoice ? '✔ AI 자동 배치' : '☐ 좌표 지정 사용'; } } };
+    const end = () => { if (!drag) return; drag = false; after(); if (list === curChars()) { save(); const b = $('#aiChoiceBtn'); if (b) { b.classList.toggle('on', !!S.aiChoice); b.textContent = S.aiChoice ? '✔ AI 자동 배치' : '☐ 좌표 지정 사용'; } } };
     stage.addEventListener('pointerup', end); stage.addEventListener('pointercancel', end);
-    body.querySelector('#ppAuto').onclick = () => { S.aiChoice = true; save(); after(); if (list === S.chars) renderChars(); closeModal(); };
+    body.querySelector('#ppAuto').onclick = () => { S.aiChoice = true; save(); after(); if (list === curChars()) renderChars(); closeModal(); };
     // 자리가 없는(예전 «자동») 캐릭터는 NAI 처럼 빈자리를 하나 준다 — 판에 점이 있어야 끌 수 있다
     for (const ch of list) if (ch.x == null) { const p = nextCharPos(list.filter(o => o !== ch), m); ch.x = p.x; ch.y = p.y; }
     drawLines(); paint();
-  }, false, () => { if (list === S.chars) renderChars(); });
+  }, false, () => { if (list === curChars()) renderChars(); });
 }
 
 /* ─────────────── i2i / 마스크 / 바이브 / 정밀 레퍼런스 ─────────────── */
@@ -4704,6 +4709,62 @@ function getMainPrompt() {
   if (S.singleBox) return (S.prompt || '').trim();
   return joinParts(...(S.sections || []).map(s => (S.secText || {})[s.id] || ''));
 }
+/* 생성에 쓰는 프롬프트 — NAI(빌드 78a367e Eh): 무작위 프롬프트가 있으면 그것, 없으면 원래 프롬프트 (RandomPrompt || Prompt) */
+function genPrompt() { return S.randomPrompt ? String(S.randomPrompt) : getMainPrompt(); }
+/* 지금 보이는 캐릭터 목록 — NAI `RandomCharacterPrompts || CharacterPrompts`: 🎲 가 만든 무작위 캐릭터가 있으면(빈 목록 [] 도)
+   그 목록이 원래 캐릭터 대신 보이고, 생성·인핸스·더하기·순서·위치도 그 목록으로 한다. 지우거나 그림 설정을 가져오면 null 로 돌아간다. */
+function curChars() { return Array.isArray(S.randomChars) ? S.randomChars : S.chars; }
+
+/* ── NAI 무작위 프롬프트(🎲) ──
+   생성기는 NAI 웹앱 코드에서 서버가 골라 만든 것(/nai-randprompt — NAI 코드·태그표는 이 저장소에 없다)을
+   따로 떨어진 Worker 에서 돌린다(앱 설정·토큰에 닿지 못한다). NAI 와 같게 고른다:
+   캐릭터 칸이 있는 모델(V4 이상)은 [기본 프롬프트, 캐릭터…], 퍼리 V3·V3 는 프롬프트 한 줄. */
+let RP_WORKER = null, RP_SEQ = 0;
+const RP_WAIT = new Map();
+async function rpWorker() {
+  if (RP_WORKER) return RP_WORKER;
+  const r = await fetch('/nai-randprompt', { cache: 'no-store' });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok || !j.code) throw new Error(j.err || ('생성기를 받지 못했습니다 (HTTP ' + r.status + ')'));
+  const src = 'const G=(function(){' + j.code + '\n})();\n'
+    + 'onmessage=e=>{const{id,kind}=e.data;try{postMessage({id,ok:true,r:G[kind]()})}catch(err){postMessage({id,ok:false,err:String(err&&err.message||err)})}};';
+  const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+  const w = new Worker(url);
+  URL.revokeObjectURL(url);
+  w.onmessage = e => { const p = RP_WAIT.get(e.data && e.data.id); if (!p) return; RP_WAIT.delete(e.data.id); clearTimeout(p.to); e.data.ok ? p.res(e.data.r) : p.rej(new Error(e.data.err)); };
+  w.onerror = e => { logErr('무작위 프롬프트 생성기 오류: ' + (e.message || '알 수 없음')); for (const [id, p] of RP_WAIT) { clearTimeout(p.to); p.rej(new Error(e.message || '생성기 오류')); RP_WAIT.delete(id); } RP_WORKER = null; };
+  RP_WORKER = w; R.rpBuild = j.build || '';
+  return w;
+}
+function rpRun(kind) {
+  return rpWorker().then(w => new Promise((res, rej) => {
+    const id = ++RP_SEQ;
+    const to = setTimeout(() => { if (RP_WAIT.delete(id)) rej(new Error('생성기가 10초 안에 답하지 않았습니다')); }, 10000);
+    RP_WAIT.set(id, { res, rej, to });
+    w.postMessage({ id, kind });
+  }));
+}
+function rpKind(m) { return capsOf(m).maxChars ? 'v4' : (modelOf(m) === 'nai-diffusion-furry-3' ? 'furryV3' : 'v3'); }
+async function randomizePrompt() {
+  let r;
+  if (!RP_WORKER) toast('NAI 에서 무작위 프롬프트 생성기를 받는 중입니다 (처음 한 번만, 몇 초 걸릴 수 있습니다)');
+  try { r = await rpRun(rpKind(S.model)); }
+  catch (e) { logErr('무작위 프롬프트: ' + e.message); toast('무작위 프롬프트를 만들지 못했습니다 — ' + e.message, 'err'); return; }
+  if (typeof r === 'string') S.randomPrompt = r;   // V3·퍼리 V3: 한 줄만 (NAI 와 같게 무작위 캐릭터는 건드리지 않는다)
+  else if (Array.isArray(r)) {
+    S.randomPrompt = String(r[0] || '');
+    // NAI: 캐릭터는 네거티브 «lowres, aliasing, »·자리 (0, 0)·켬. 캐릭터가 없는 결과(no humans)면 빈 목록 [] 이 된다
+    S.randomChars = r.slice(1).map(p => ({ prompt: String(p), uc: 'lowres, aliasing, ', x: 0, y: 0 }));
+  } else { toast('무작위 프롬프트 생성기가 알 수 없는 값을 돌려줬습니다', 'err'); logErr('무작위 프롬프트: 결과 꼴 ' + typeof r); return; }
+  markUserEdit(); save(); renderRandPrompt(); renderChars(); updateCostHint();
+}
+/* 무작위 프롬프트가 있으면 원래 프롬프트 칸 대신 «무작위 프롬프트» 칸이 보인다 (NAI 와 같음) */
+function renderRandPrompt() {
+  const box = $('#randBox'), ta = $('#randPrompt'), secs = $('#secList'); if (!box || !ta) return;
+  const on = !!S.randomPrompt;
+  box.hidden = !on; if (secs) secs.hidden = on;
+  if (on && ta.value !== S.randomPrompt) { ta.value = S.randomPrompt; if (ta._hlSync) ta._hlSync(true); }
+}
 function syncPromptFromSections() { if (!S.singleBox) S.prompt = getMainPrompt(); }
 function setPromptText(text) { // 불러오기(PNG/메타)용: 한 칸 모드면 그대로, 칸 모드면 "캐릭터" 칸(없으면 첫 칸)에 넣고 나머지 비움
   S.prompt = text || '';
@@ -4854,7 +4915,7 @@ function hlSeg(text, br) {
     : /(?<wild><[^<>\n]*\|[^<>\n]*>)|(?<tok>[^,\n{}\[\]<>|]+)/g;
   let last = 0, m;
   while ((m = re.exec(text))) {
-    out += escHtml(text.slice(last, m.index));
+    out += hlBars(text.slice(last, m.index));
     const g = m.groups;
     if (g.wild) out += '<mark class="hl-wild">' + escHtml(g.wild) + '</mark>';
     else if (g.cur || g.sq) {
@@ -4873,7 +4934,14 @@ function hlSeg(text, br) {
     }
     last = m.index + m[0].length;
   }
-  return out + escHtml(text.slice(last));
+  return out + hlBars(text.slice(last));
+}
+/* NAI 프롬프트 칸의 «|»(섞기)·«||»(무작위 고르기) 색칠 (빌드 78a367e): 글자마다 «|» 를 찾아 다음 글자도 «|» 면 둘을 묶어
+   image-prompt-double-bar-highlight, 아니면 image-prompt-bar-highlight 를 붙인다. 강조 색칠을 꺼도 늘 칠한다.
+   NAI 는 글자 자체를 굵게(800)·제목 색으로 칠하지만, 우리 칸은 글 칸 뒤 층에 바탕만 칠한다(굵기·여백을 바꾸면 글자 자리가 어긋난다). */
+function hlBars(s) {
+  if (s.indexOf('|') < 0) return escHtml(s);
+  return s.split(/(\|\|?)/).map((p, i) => i % 2 ? '<mark class="' + (p.length === 2 ? 'hl-bar2' : 'hl-bar') + '">' + p + '</mark>' : escHtml(p)).join('');
 }
 function chunkColorOf(tok) {
   const c = chunkByName().get(chunkKeyOf(tok));
@@ -5255,7 +5323,7 @@ function openSettings() {
     { // 파일 이름 틀 — 미리 보기는 지금 보는 그림(없으면 지금 설정으로 만든 보기 그림)으로
       const on = body.querySelector('#mFnOn'), inp = body.querySelector('#mFnTpl'), row = body.querySelector('#mFnRow'), pv = body.querySelector('#mFnPrev');
       const sample = () => curItem() || { seed: 1234567890, model: S.model, w: S.w, h: S.h, t: Date.now(), label: '생성',
-        meta: { input: S.prompt || '', uprompt: S.prompt || '', action: 'generate', parameters: { characterPrompts: (S.chars || []).filter(c => !c.off).map(c => ({ prompt: c.prompt || '', enabled: true })) } } };
+        meta: { input: genPrompt() || '', uprompt: genPrompt() || '', action: 'generate', parameters: { characterPrompts: (curChars() || []).filter(c => !c.off).map(c => ({ prompt: c.prompt || '', enabled: true })) } } };
       const paint = () => {
         row.hidden = pv.hidden = !on.checked; inp.value = S.fnTpl || FN_TPL_DEFAULT;
         body.querySelector('#mFnReset').disabled = (S.fnTpl || FN_TPL_DEFAULT) === FN_TPL_DEFAULT;
@@ -5348,6 +5416,7 @@ function syncUI() {
   $('#autoNsfw').checked = S.autoNsfw !== false;
   $('#prompt').value = S.prompt; $('#uc').value = S.uc;
   renderSections();
+  renderRandPrompt();
   $('#autoCount').value = S.autoCount; $('#autoDelay').value = S.autoDelay;
   $$('#autoModeSeg button').forEach(b => b.classList.toggle('on', b.dataset.m === (S.autoMode || 'random')));
   $('#autoModeHint').textContent = S.autoMode === 'fixed' ? '지금 조합(랜덤·청크 치환 결과)을 고정하고 시드만 바꿔 뽑습니다' : '<a|b|c>·청크가 매번 새로 뽑힙니다';
@@ -5731,7 +5800,7 @@ function init() {
     const list = $('#charList'), btn = $('#btnCharFold');
     if (list) list.hidden = !on;
     if (btn) { btn.textContent = on ? '▾' : '▸'; btn.title = on ? '캐릭터 프롬프트 접기' : '캐릭터 프롬프트 펴기'; }
-    const n = (S.chars || []).length, off = (S.chars || []).filter(x => x && x.off).length;
+    const n = (curChars() || []).length, off = (curChars() || []).filter(x => x && x.off).length;
     const cc = $('#charCount');
     if (cc) cc.textContent = n ? (off ? `${n}명 중 ${n - off}명 사용` : `${n}명`) : '';
   }
@@ -5835,6 +5904,13 @@ function init() {
   $('#tApply').onclick = () => { const it = curItem(); if (it) applyMeta(it.meta); };
   $('#histFavOnly').onclick = () => { S.histFavOnly = !S.histFavOnly; save(); renderHist(); };
   $('#histLock').onclick = () => { S.histScrollLock = !S.histScrollLock; save(); paintHistLock(); histFollowCur(); };
+  /* NAI 🎲 무작위 프롬프트 — 만들기·새로 뽑기·지우기·고치기, 무작위 캐릭터 지우기 */
+  $('#btnRandPrompt').onclick = () => randomizePrompt();
+  $('#btnRandAgain').onclick = () => randomizePrompt();
+  $('#btnRandClear').onclick = () => { S.randomPrompt = ''; markUserEdit(); save(); renderRandPrompt(); updateCostHint(); };
+  { const rt = $('#randPrompt'); attachHighlight(rt);
+    rt.addEventListener('input', () => { S.randomPrompt = rt.value; markUserEdit(); save(); if (!rt.value) renderRandPrompt(); updateCostHint(); }); }
+  $('#btnRandCharsClear').onclick = () => { S.randomChars = null; markUserEdit(); save(); renderChars(); updateCostHint(); };
   paintHistLock();
   /* NAI «Back to top»: 히스토리를 400px 넘게 내리면 맨 위로 가는 단추가 생긴다 */
   $('#histGrid').addEventListener('scroll', e => { $('#histTop').hidden = !(e.target.scrollTop > 400); }, { passive: true });

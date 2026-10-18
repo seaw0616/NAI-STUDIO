@@ -1547,7 +1547,7 @@ const enhLabel = v => (v === 'max' ? 'Max' : v + '×');
    · 배율: 그 그림에서 쓸 수 있는 것만 작은 것부터(1×·1.5×·2×·Max). 그림 넓이마다 마지막으로 고른 배율을 기억한다
      (S.enhSizeCache — NAI 「image-enhance-size-cache」). 기억이 없으면 목록의 첫째(NAI 처음 값).
    · 세기: Magnitude 1~5(NAI EffectMagnitudes .2/0 · .4/0 · .5/0 · .6/0 · .7/.1). «고급 보기»면 세기·노이즈를 직접(S.enhAdvanced — NAI 「enhancedSettings」).
-     Magnitude 눈금은 NAI 처럼 켤 때마다 2 에서 시작하고, 쓰는 세기·노이즈는 저장된 값(S.enhStr·S.enhNoise)이다. */
+     Magnitude 눈금은 NAI 처럼 켤 때마다 2 에서 시작하고, 쓰는 세기·노이즈는 저장된 값(S.enhStr·S.enhNoise)이다 — 10-17 결정(저장된 값을 그대로 쓴다). */
 const EFFECT_MAG = [{ s: 0.2, n: 0 }, { s: 0.4, n: 0 }, { s: 0.5, n: 0 }, { s: 0.6, n: 0 }, { s: 0.7, n: 0.1 }];
 function enhPick(it) {   // NAI: 기억한 배율이 'max' 면 Max 가 있을 때만, 숫자면 그대로, 없으면 목록의 첫째
   const opts = enhanceOptions(it, S.model), c = (S.enhSizeCache || {})[it.w * it.h];
@@ -1781,7 +1781,7 @@ async function runDirector(req, label, srcItem) {
     /* 배경 제거는 세 장이 온다. NAI 번들(빌드 78a367e) toolVariationNames {"bg-removal":["masked","generated","blend"]} 대로
        ZIP 안 순서가 곧 마스크·생성·혼합이다. NAI 는 이 세 장을 «그림 한 장의 세 변형»으로 넣고, 지금 고른 변형 번호
        (새로 뽑은 뒤면 0 = Masked)로 보여 주며 아래 단추로 바꿔 본다. 12.11 까지는 세 장을 따로 넣고 마지막(Blend)을
-       화면·스마트 툴에 올려서, 인물 가장자리가 섞인 Blend 가 먼저 보였다. */
+       화면·스마트 툴에 올려서, 인물 가장자리가 섞인 Blend 가 먼저 보였다(깨져 보이고 이상하게 지워진다는 보고). */
     const VAR_TAGS = { 'bg-removal': ['masked', 'generated', 'blend'] };
     const tags = VAR_TAGS[req.req_type];
     const imgs = await respImages(res);
@@ -1945,7 +1945,7 @@ function applyMeta(meta, o) {
     if (!isCustom) { S.ov[S.model] = S.ov[S.model] || {}; if (cm.qid === 3) S.ov[S.model].q = info.quality2; else delete S.ov[S.model].q; }
     else toast('이 모델의 퀄리티 태그는 직접 고쳐 두신 것이라 그대로 두었습니다');
   }
-  if (want('prompt')) { setPromptText(prompt); S.activeStyle = null; }
+  if (want('prompt')) { setPromptText(prompt); S.activeStyle = null; S.randomPrompt = ''; }   // NAI: 프롬프트를 가져오면 무작위 프롬프트는 지운다
   let uc = p.negative_prompt != null ? p.negative_prompt : (p.v4_negative_prompt ? p.v4_negative_prompt.caption.base_caption : '');
   /* NAI 웹이 자동으로 붙인 "nsfw, " 는 떼어내고(앱이 같은 규칙으로 다시 붙임),
      사용자가 직접 쓴 경우(프롬프트에 nsfw 있음)는 유지.
@@ -1994,6 +1994,7 @@ function applyMeta(meta, o) {
     const mx = capsOf(S.model).maxChars || 0;
     if (mx && next.length > mx) { toast(`캐릭터는 최대 ${mx}명이라 ${Math.max(0, mx - (o && o.appendChars ? (S.chars || []).length : 0))}명만 가져왔습니다 (NAI 와 같음)`, 'err'); next = next.slice(0, mx); }
     S.chars = next;
+    S.randomChars = null;   // NAI: 캐릭터를 가져오면 무작위 캐릭터는 지운다 (RandomCharacterPrompts → null)
   }
   /* 바이브 (NAI importVibeTransfer): 그림에 든 인코딩(reference_image_multiple)을 인코딩만 있는 바이브로 넣는다 — 인코딩을 쓰는 모델(V4 이상)일 때만 */
   if (o && o.vibes && Array.isArray(p.reference_image_multiple) && p.reference_image_multiple.length && (MODELS[S.model] || {}).ver >= 40) {
@@ -2370,12 +2371,13 @@ async function openImageMeta(src, opts) {
       d.querySelector('[data-a=add]').onclick = () => {
         const mx = capsOf(S.model).maxChars || 0;
         if (!mx) { toast(MODELS[modelOf(S.model)].name + ' 은 캐릭터 프롬프트를 받지 않습니다', 'err'); return; }
-        if (S.chars.length >= mx) { toast('이 모델은 캐릭터를 최대 ' + mx + '명까지 받습니다', 'err'); return; }
-        S.chars.push({ prompt: c.prompt, uc: c.uc || '', x: c.x, y: c.y });
+        const cs = curChars();   // 지금 보이는 목록(무작위 캐릭터가 있으면 그 목록 — NAI 와 같음)
+        if (cs.length >= mx) { toast('이 모델은 캐릭터를 최대 ' + mx + '명까지 받습니다', 'err'); return; }
+        cs.push({ prompt: c.prompt, uc: c.uc || '', x: c.x, y: c.y });
         /* 좌표가 있는데 'AI 자동 배치' 가 켜져 있으면 그 좌표는 생성에서 버려진다 — 같이 꺼 준다 */
         if (c.x != null && S.aiChoice) { S.aiChoice = false; toast('좌표가 있어 \'AI 자동 배치\' 를 껐습니다'); }
         save(); renderChars();
-        toast('캐릭터 ' + S.chars.length + '번에 넣었습니다');
+        toast((Array.isArray(S.randomChars) ? '무작위 캐릭터 ' : '캐릭터 ') + cs.length + '번에 넣었습니다');
       };
       d.querySelector('[data-a=ins]').onclick = () => { closeModal(); insertIntoPrompt(c.prompt); };
       d.querySelector('[data-a=chunk]').onclick = () => saveTextAsChunk(c.prompt, '', '캐릭터');
@@ -3186,7 +3188,7 @@ function stSet(blob, meta) {
   if (!img) return;
   /* 그림이 들어 있을 때만 '빼기 · 다른 그림 · 현재 그림으로' 줄을 보인다.
      예전엔 「이미지 열기」·「현재 이미지 가져오기」가 빈 화면 안에만 있어서, 그림을 한 번 넣으면
-     그 단추까지 같이 사라져 뺄 방법이 없었다(2026-10). */
+     그 단추까지 같이 사라져 뺄 방법이 없었다(2026-10, 한 번 넣으면 뺄 방법이 없다는 보고). */
   const bar = $('#stBar'); if (bar) bar.hidden = !blob;
   if (!blob) { img.hidden = true; img.removeAttribute('src'); em.hidden = false; $('#stMeta').textContent = ''; renderSmartTools(); return; }
   img.src = ST.url; img.hidden = false; em.hidden = true;

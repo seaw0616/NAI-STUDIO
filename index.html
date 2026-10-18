@@ -163,10 +163,17 @@ try {
           <span class="ptitle">프롬프트</span>
           <div class="ptool-r">
             <select id="mainStyle" class="style-sel sm" title="고정 프롬프트(스타일)"></select>
+            <button id="btnRandPrompt" class="btn xs ghost" title="무작위 프롬프트 만들기 (NAI 🎲 — 모델에 맞는 NAI 생성기로 만듭니다)">🎲</button>
             <button id="btnSecEdit" class="btn xs ghost" title="프롬프트 칸 편집 (추가·이름·순서·한 칸 모드)">⚙ 칸</button>
             <button id="btnPromptClear" class="btn xs ghost">지우기</button>
             <button id="btnSaveChunkSel" class="btn xs ghost" title="선택한 텍스트(없으면 현재 칸 전체)를 청크로 저장">＋청크</button>
           </div>
+        </div>
+        <!-- NAI 🎲 무작위 프롬프트: 있으면 원래 프롬프트 칸 대신 보인다 -->
+        <div id="randBox" class="rand-box" hidden>
+          <div class="rand-head"><span class="rand-title">무작위 프롬프트</span>
+            <span class="row"><button id="btnRandClear" class="btn xs ghost" title="무작위 프롬프트 지우기 (원래 프롬프트로 돌아갑니다)">✕</button><button id="btnRandAgain" class="btn xs ghost" title="새로 뽑기">↻</button></span></div>
+          <textarea id="randPrompt" class="ta ac big" rows="4" spellcheck="false"></textarea>
         </div>
         <div id="secList"></div>
         <textarea id="prompt" class="ta ac big" rows="4" spellcheck="false" placeholder="1girl, ..." hidden></textarea>
@@ -180,7 +187,7 @@ try {
         </details>
         <div class="chead">
           <span class="ptitle"><button id="btnCharFold" class="ic xs" title="캐릭터 프롬프트 접기/펴기">▾</button> 캐릭터 프롬프트 <span class="hint">V4+</span> <span class="hint" id="charCount"></span></span>
-          <div class="row"><button id="aiChoiceBtn" class="btn xs" title="캐릭터 위치: AI 자동 배치 / 좌표 지정">✔ AI 자동 배치</button><button id="btnAddChar" class="btn xs">＋ 캐릭터</button></div>
+          <div class="row"><button id="btnRandCharsClear" class="btn xs ghost" title="🎲 가 만든 무작위 캐릭터를 지우고 원래 캐릭터로 돌아갑니다" hidden>무작위 캐릭터 지우기</button><button id="aiChoiceBtn" class="btn xs" title="캐릭터 위치: AI 자동 배치 / 좌표 지정">✔ AI 자동 배치</button><button id="btnAddChar" class="btn xs">＋ 캐릭터</button></div>
         </div>
         <div id="charList"></div>
         <!-- NAI 캐릭터 겹침 경고 (좌표를 쓸 때 캐릭터 자리가 겹치면) -->
