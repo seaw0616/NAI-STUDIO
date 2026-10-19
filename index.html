@@ -307,6 +307,8 @@ try {
         <img id="viewerImg" alt="" hidden>
         <!-- 원본과 비교(NAI OLD 단추)를 누르고 있는 동안 인페인트 마스크를 옅게 겹쳐 보인다 -->
         <img id="viewerOldMask" alt="" hidden>
+        <!-- 변형 결과 묶음 맨 앞의 원본 (NAI «ORIGINAL») -->
+        <span id="viewerOrigTag" class="orig-tag" hidden>ORIGINAL</span>
         <button id="btnPrev" class="vnav l" title="이전">‹</button>
         <button id="btnNext" class="vnav r" title="다음">›</button>
         <!-- 결과 변형 단추 (배경 제거 Masked·Generated·Blend) — NAI 처럼 그림 아래 가운데 -->
@@ -340,6 +342,7 @@ try {
           <button id="tCopy" class="tb" title="설정 복사">📋</button>
           <button id="tApply" class="tb" title="이 이미지의 프롬프트·설정 불러오기">⤴</button>
           <button id="tSeed" class="tb" title="이 시드 재사용">🌱<span id="tSeedV"></span></button>
+          <button id="tPin" class="tb" title="핀 꽂기 (NAI Pin Image)">📌</button>
           <button id="tSave" class="tb" title="저장">💾</button>
           <button id="tSaveClean" class="tb" title="메타데이터 제거 후 저장">🧹</button>
           <button id="tCopyImg" class="tb" title="그림을 클립보드에 복사합니다 — 다른 프로그램에 바로 붙여 넣을 수 있습니다 (NAI Copy to Clipboard)">🖼</button>

@@ -276,6 +276,7 @@ const DEFAULTS = {
   /* NAI 설정 «Simple Output Viewer»(simpleOutputViewer)·«Reduced Motion»(canvasReducedMotion)·«Lock Output Viewer Camera»(canvasLockCamera).
      NAI 의 «단순 결과 화면» 기본값은 꺼짐(= 캔버스 결과 화면)이다. 이 앱은 주 화면이 크게 바뀌므로 사용자가 고를 때까지 지금 화면(켜짐)으로 둔다 — ⚙ 에서 끈다. */
   simpleOutputViewer: true, canvasReducedMotion: false, canvasLockCamera: false,
+  pinBoards: null,   // 핀 보드 { boards: [{ id, name, items, size? }], activeBoardId } — NAI emptyBoardsState 와 같은 모양, 처음 쓸 때 만든다 (pbState)
   // NAI 설정 «Custom File Name Template»(imageFilenameTemplateEnabled 끔 · imageFilenameTemplate «{prompt} s-{seed}»)
   fnTplOn: false, fnTpl: '{prompt} s-{seed}',
   // 캐릭터 위치 격자 (NAI imagegen-position-grid-type «none» · columns 3 · rows 3)
@@ -1471,7 +1472,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.20';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.21';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -2942,6 +2943,14 @@ async function doGenerate(ov, label) {
         }
       }
     }
+    const gid = 'g' + Date.now().toString(36) + uid();   // 한 번에 뽑은 그림 묶음 (NAI 결과 묶음 — 캔버스 결과 화면이 묶음째로 늘어놓는다)
+    /* NAI generateVariations: 원본을 «ORIGINAL» 표시로 결과 묶음 맨 앞에 넣은 뒤 요청을 보낸다(insertedImages: [{...원본, isVariationOriginal: true}]).
+       NAI 는 변형이 실패해도 원본이 든 묶음을 남긴다 — 실패 처리(Eb)가 «다 된 그림»만 남기는데 원본은 다 된 그림이다. */
+    if (ov.varOrigOf && ov.varOrigOf.blob) {
+      const o = ov.varOrigOf;
+      try { await addToHistory(o.blob, o.meta || { parameters: {} }, o.label || '', { vars: o.vars, gid, varOrig: true, ...(o.tool ? { tool: o.tool } : {}) }); }
+      catch (e) { logErr('변형 원본을 결과 묶음에 넣지 못함: ' + e.message); toast('변형 결과 묶음에 원본을 넣지 못했습니다: ' + e.message, 'err'); }
+    }
     R.abort = new AbortController();
     let blobs;
     if (S.stream !== false && !ov.noStream) {
@@ -2998,7 +3007,6 @@ async function doGenerate(ov, label) {
     R.varSel = 0;                         // NAI: 새로 뽑으면 결과 변형 번호를 0 으로 돌린다
     let item = null; const meta = metaOf(body, ov);
     const nWant = (body.parameters && body.parameters.n_samples) || 1;
-    const gid = 'g' + Date.now().toString(36) + uid();   // 한 번에 뽑은 그림 묶음 (NAI 결과 묶음 — 캔버스 결과 화면이 묶음째로 늘어놓는다)
     for (let k = 0; k < blobs.length; k++) {
       // 배치(장수 2~4)는 장마다 meta 를 복제하고 시드를 보정 — 같은 객체 공유·같은 파일명으로 덮어쓰기 방지.
       // 시드는 받은 순서가 아니라 장 번호로 붙인다(한 장만 받았어도 그 장 번호의 시드).
@@ -3225,8 +3233,10 @@ async function addToHistory(blob, meta, label, opt) {
   if (opt && opt.orig) { item.orig = opt.orig; if (opt.origMask) item.origMask = opt.origMask; }
   if (opt && opt.tool) item.tool = opt.tool;   // 디렉터 툴·업스케일 결과 (파일 이름 틀 {type} — NAI 는 툴 이름 그대로)
   if (opt && opt.gid) item.gid = String(opt.gid);   // 같은 요청으로 받은 그림 묶음 (캔버스 결과 화면)
+  if (opt && opt.varOrig) item.varOrig = true;       // 변형 결과 묶음 맨 앞의 원본 (NAI isVariationOriginal — «ORIGINAL» 표시, 저장·ZIP 에서 뺌)
   try { item.id = await histPut({ blob, meta, seed: item.seed, model: item.model, w, h, fav: false, t: item.t, name: item.name, label: item.label, sceneId: item.sceneId,
-    ...(vars ? { vars } : {}), ...(item.orig ? { orig: item.orig } : {}), ...(item.origMask ? { origMask: item.origMask } : {}), ...(item.tool ? { tool: item.tool } : {}), ...(item.gid ? { gid: item.gid } : {}) }); }
+    ...(vars ? { vars } : {}), ...(item.orig ? { orig: item.orig } : {}), ...(item.origMask ? { origMask: item.origMask } : {}), ...(item.tool ? { tool: item.tool } : {}), ...(item.gid ? { gid: item.gid } : {}),
+    ...(item.varOrig ? { varOrig: true } : {}) }); }
   catch (e) { item.unsaved = true; logErr('히스토리 저장 실패: ' + e.message); toast('이미지를 브라우저 저장소에 못 넣었습니다 (공간 부족?) — 새로고침하면 사라집니다', 'err'); }
   item.url = URL.createObjectURL(blob);
   R.hist.push(item);
@@ -3385,6 +3395,7 @@ function paintHistSel() {
 /* NAI 히스토리 ZIP 받기: 250장마다 ZIP 하나(이름 NAI-images_(날짜_시각)_k-of-n.zip), 그림 이름은 저장할 때와 같은 이름(파일 이름 틀),
    같은 이름은 _1·_2 를 붙이고, 변형이 여럿인 그림(배경 제거 세 가지 등)은 _masked 꼴로 모두 담는다. */
 async function histZipDownload(items) {
+  items = items.filter(it => !it.varOrig);   // NAI: 변형 묶음의 원본(ORIGINAL)은 ZIP 에 넣지 않는다
   if (!items.length) { toast('받을 그림이 없습니다', 'err'); return; }
   const pad = v => String(v).padStart(2, '0'), d = new Date();
   const stamp = `NAI-images_(${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())})`;
@@ -3497,6 +3508,7 @@ function histCardEl(i) {
     setCardImage(img, it);
     if (it.tool === 'pixel-snap') img.classList.add('pixelated');   // NAI: Pixel Snap 결과는 점이 번지지 않게 그린다 (imageRendering pixelated)
     d.appendChild(img);
+    if (it.varOrig) { const o = document.createElement('span'); o.className = 'orig-tag'; o.textContent = 'ORIGINAL'; d.appendChild(o); }   // NAI: 변형 묶음의 원본
     if (it.fav) { const f = document.createElement('span'); f.className = 'fav'; f.textContent = '★'; d.appendChild(f); }
     if (it.saved) { const s = document.createElement('span'); s.className = 'svd'; s.textContent = '💾'; s.title = it.saved.how === 'download' ? '다운로드로 넘김 (받았는지는 확인 불가)' : '저장됨'; d.appendChild(s); }
     // 채점해 둔 점수를 카드에도 — 어떤 그림이 문제였는지 목록에서 바로 보이게
@@ -3629,13 +3641,18 @@ function viewUrlOf(it) {   // 지금 큰 그림에 띄울 주소 (변형 자리 
   return (v && VAR_DISP.get(v)) || it.url;
 }
 /* 원본과 비교 (NAI display.old-compare): 단추를 누르고 있는 동안만 고치기 전 그림을 보여 주고, 인페인트면 마스크를 30% 로 겹친다 */
+function origUrlsOf(it) {
+  let u = ORIG_URL.get(it);
+  if (!u) { u = { orig: URL.createObjectURL(it.orig), mask: it.origMask ? URL.createObjectURL(it.origMask) : null }; ORIG_URL.set(it, u); }
+  return u;
+}
 function paintOld(it) {
   const img = $('#viewerImg'), mk = $('#viewerOldMask'), btn = $('#tOld');
   if (btn) { btn.classList.toggle('on', !!R.showOld); btn.firstChild.textContent = R.showOld ? '✧' : '✦'; }
+  if (ovwVisible()) ovwRender();   // 캔버스 결과 화면: 고른 그림 위에 원본·마스크를 겹친다 (NAI UN)
   if (!img || !mk) return;
   if (R.showOld && it && it.orig) {
-    let u = ORIG_URL.get(it);
-    if (!u) { u = { orig: URL.createObjectURL(it.orig), mask: it.origMask ? URL.createObjectURL(it.origMask) : null }; ORIG_URL.set(it, u); }
+    const u = origUrlsOf(it);
     img.src = u.orig;
     if (u.mask) { mk.src = u.mask; mk.hidden = false; } else mk.hidden = true;
   } else {
@@ -3652,6 +3669,8 @@ function paintViewTools(it) {
   const ci = $('#tCopyImg'); if (ci) ci.hidden = !(it && typeof ClipboardItem === 'function' && navigator.clipboard && navigator.clipboard.write);
   const iv = $('#viewerImg'); if (iv) iv.classList.toggle('noscale', S.scaleUp === false);
   $$('.vtools .vgroup.act').forEach(g => { g.hidden = !it; });   // NAI: 그림에 쓰는 단추 줄은 보고 있는 그림이 없으면 숨긴다
+  paintPinBtn();
+  const ot = $('#viewerOrigTag'); if (ot) ot.hidden = !(it && it.varOrig);   // 변형 묶음의 원본 (NAI «ORIGINAL»)
 }
 function itemVarIdx(it) { return it && Array.isArray(it.vars) && it.vars.length ? Math.min(R.varSel || 0, it.vars.length - 1) : -1; }
 function syncItemVar(it) {   // it.blob·it.url 을 지금 고른 변형으로 맞춘다 (저장·i2i·스마트 툴이 모두 이 blob 을 쓴다)
@@ -3819,7 +3838,8 @@ function clearViewer() {
    · 설정 «움직임 줄이기»면 바로 옮겨 가고, «카메라 잠그기»면 손으로 옮기거나 확대하지 못한다(고르면 맞추는 것은 그대로)
    화면 폭 900 이하(휴대폰)는 NAI 처럼 늘 단순 결과 화면이다. 장식 그림(NAI 별자리 무늬)은 넣지 않았다. */
 const OVW = { cam: { x: 0, y: 0, scale: 1 }, tgt: null, k: 11, raf: 0, shown: 8, lay: null, tiles: new Map(), pan: null, ptrs: new Map(), pinch: null,
-  inertia: 0, settleT: 0, idleT: 0, rq: 0, keys: new Set(), keyRaf: 0, groupOnly: false, keepGroup: false, quiet: false, wasDrag: false, size: null, newest: '', lastSel: null };
+  inertia: 0, settleT: 0, idleT: 0, rq: 0, keys: new Set(), keyRaf: 0, groupOnly: false, keepGroup: false, quiet: false, wasDrag: false, size: null, newest: '', lastSel: null,
+  board: null, wall: null, prev: null, _pinShow: false };   // board: 핀 보드 배치(pbLayout) · wall: 핀 보드를 고름(NAI 묶음 «pin-wall») · prev: 그 전 선택(Q 로 돌아감)
 function ovwOn() {
   return S.mode === 'main' && S.simpleOutputViewer === false && window.innerWidth > 900 && R.hist.length > 0 && (!!curItem() || !!S.hideQuickstart);
 }
@@ -3871,6 +3891,7 @@ function ovwLayout() {
     y += size.height + 340;
   }
   OVW.lay = { all, groups, place, bounds, height: Math.max(0, y - 340) };
+  OVW.board = pbLayout(OVW.lay);   // 핀 보드 (최신 묶음 왼쪽)
   return OVW.lay;
 }
 const ovwGroupOf = it => OVW.lay && OVW.lay.groups.find(g => g.items.includes(it));
@@ -3887,35 +3908,60 @@ function ovwEl() {
   ovwBind(st);
   return st;
 }
+/* 결과 그림 한 칸 (NAI Uu): 그림 · 마우스를 올리면 아래 가운데 «핀·복사·내려받기» 줄과 오른쪽 위 시드 단추(고른 그림에는 안 뜸)
+   · 변형 묶음의 원본이면 왼쪽 위 «ORIGINAL» · 고른 그림에서 «원본» 단추를 누르는 동안 원본·마스크 · 투명한 곳은 «투명 부분 보이기» 무늬 */
+function ovwTileEl() {
+  const el = document.createElement('div'); el.className = 'ovw-tile';
+  const im = document.createElement('img'); im.alt = ''; im.decoding = 'async'; im.draggable = true; el.appendChild(im);
+  im.addEventListener('dragstart', e => { const it = el._it; if (!it) return; try { e.dataTransfer.setData('text/nai-hist', String(it.id != null ? it.id : it.t)); e.dataTransfer.effectAllowed = 'copy'; } catch (er) { logErr('결과 끌기 시작 실패: ' + er.message); } });
+  el.insertAdjacentHTML('beforeend', '<img class="ovw-old" alt="" hidden><img class="ovw-oldmask" alt="" hidden><span class="orig-tag" hidden>ORIGINAL</span>'
+    + '<div class="ovw-hov"><button type="button" data-a="pin">📌</button><button type="button" data-a="copy" title="그림을 클립보드에 복사 (NAI Copy to Clipboard)">🖼</button><button type="button" data-a="dl" title="그림 내려받기 (NAI Download Image)">💾</button></div>'
+    + '<button type="button" class="ovw-seed" data-a="seed" title="이 시드 쓰기 (NAI Copy to Seed)"><span></span>🌱</button>');
+  return el;
+}
 /* 화면에 보이는 그림만 그린다 (NAI 처럼 보이는 곳 둘레 400 까지) */
 function ovwRender() {
   const w = $('#ovwWorld'); if (!w || !OVW.lay) return;
-  const vis = ovwPad(ovwViewRect(), 400 / OVW.cam.scale), cur = curItem(), want = new Set();
+  const vis = ovwPad(ovwViewRect(), 400 / OVW.cam.scale), cur = curItem(), want = new Set(), pinned = pbPinnedKeys();
+  const canCopy = typeof ClipboardItem === 'function' && !!(navigator.clipboard && navigator.clipboard.write);
   for (const p of OVW.lay.place) {
     if (!ovwHit(p.rect, vis)) continue;
     const key = p.it.id != null ? 'i' + p.it.id : 't' + p.it.t; want.add(key);
     let el = OVW.tiles.get(key);
-    if (!el) {
-      el = document.createElement('div'); el.className = 'ovw-tile';
-      const im = document.createElement('img'); im.alt = ''; im.decoding = 'async'; im.draggable = true; el.appendChild(im);
-      im.addEventListener('dragstart', e => { const it = el._it; if (!it) return; try { e.dataTransfer.setData('text/nai-hist', String(it.id != null ? it.id : it.t)); e.dataTransfer.effectAllowed = 'copy'; } catch (er) { logErr('결과 끌기 시작 실패: ' + er.message); } });
-      w.appendChild(el); OVW.tiles.set(key, el);
-    }
+    if (!el) { el = ovwTileEl(); w.appendChild(el); OVW.tiles.set(key, el); }
     const src = viewUrlOf(p.it);
     if (el._src !== src) { el.firstChild.src = src; el._src = src; }
     el._it = p.it; el._p = p;
     const s = el.style; s.left = p.rect.x + 'px'; s.top = p.rect.y + 'px'; s.width = p.rect.width + 'px'; s.height = p.rect.height + 'px';
-    // NAI: 고른 그림(묶음 전체를 고른 때는 한 장짜리 묶음일 때만)에 테두리
-    el.classList.toggle('sel', p.it === cur && (!OVW.groupOnly || p.g.items.length === 1));
+    // NAI: 고른 그림(묶음 전체를 고른 때는 한 장짜리 묶음일 때만)에 테두리 — 핀 보드를 고른 동안은 결과 묶음에 테두리가 없다
+    const sel = !OVW.wall && p.it === cur && (!OVW.groupOnly || p.g.items.length === 1);
+    el.classList.toggle('sel', sel);
     el.firstChild.classList.toggle('pixelated', p.it.tool === 'pixel-snap');
+    el.querySelector('.orig-tag').hidden = !p.it.varOrig;
+    const pb = el.querySelector('[data-a="pin"]'), on = pinned.has(key);
+    pb.classList.toggle('on', on); pb.title = on ? '핀 빼기 (NAI Remove Pinned Image)' : '핀 꽂기 (NAI Pin Image)';
+    el.querySelector('[data-a="copy"]').hidden = !canCopy;
+    const sd = el.querySelector('.ovw-seed'); sd.hidden = p.it.seed == null; sd.firstChild.textContent = p.it.seed != null ? String(p.it.seed) : '';
+    pbOldOverlay(el, p.it, sel);
   }
   for (const [k, el] of OVW.tiles) if (!want.has(k)) { el.remove(); OVW.tiles.delete(k); }
+  pbRender(vis);
+}
+/* 결과 그림 위 단추 (NAI Ui·시드) */
+function ovwTileAction(a, it) {
+  if (a === 'pin') pbTogglePin(it);
+  else if (a === 'copy') copyImageToClipboard(it.blob);
+  else if (a === 'dl') saveItem(it, !!S.stripOnSave);
+  else if (a === 'seed') { if (it.seed != null) { fixSeed(it.seed); toast('시드 고정: ' + it.seed); } }
 }
 function ovwApply() {
   const w = $('#ovwWorld'), st = $('#ovwStage'); if (!w || !st) return;
   const c = OVW.cam;
   w.style.transform = `translate(${c.x}px, ${c.y}px) scale(${c.scale})`;
   st.style.setProperty('--ovw-ring', Math.max(2, 3 / c.scale) + 'px');
+  // NAI: 판 위 단추·글은 확대해도 화면 크기로 보이게 (--canvas-ui-scale = min(2.5, 1/배율)) · 보드 칸 선은 배율 0.35 아래에서 흐려진다
+  st.style.setProperty('--ovw-ui', String(Math.min(2.5, 1 / c.scale)));
+  st.style.setProperty('--ovw-scale', String(c.scale));
   // 날아가는 동안에는 한 장면에 한 번만, 그 밖(바로 옮기기·끌기·휠)에는 바로 그린다 — 화면에 들어온 그림이 늦게 뜨지 않게
   if (OVW.raf) { if (!OVW.rq) OVW.rq = requestAnimationFrame(() => { OVW.rq = 0; ovwRender(); }); }
   else ovwRender();
@@ -3960,9 +4006,14 @@ function ovwFlyRect(rect, animate, px) {
 }
 function ovwPxOf(it) { return it && it.tool === 'pixel-snap' ? 1 : undefined; }
 function ovwFitCur(animate) {
+  if (OVW.wall) {   // 핀 보드를 골랐으면 그 핀, 아니면 보드 전체 (NAI eJ «pin-wall»)
+    const q = OVW.wall.pin && pbPinPlace(OVW.wall.pin);
+    if (q) ovwFlyRect(q.rect, animate, pbPx(q)); else if (OVW.board) ovwFlyRect(OVW.board.bounds, animate);
+    return;
+  }
   const it = curItem(); if (!it || !OVW.lay) return;
   const g = ovwGroupOf(it);
-  if (g && (OVW.groupOnly || g.items.length === 1)) { const b = OVW.lay.bounds.get(g.key); if (b) ovwFlyRect(b, animate, g.items.every(x => x.tool === 'pixel-snap') ? 1 : undefined); return; }
+  if (g && (OVW.groupOnly || g.items.length === 1)) { const b = ovwGroupFit(g.key); if (b) ovwFlyRect(b, animate, g.items.every(x => x.tool === 'pixel-snap') ? 1 : undefined); return; }
   const r = ovwRectOf(it); if (r) ovwFlyRect(r, animate, ovwPxOf(it));
 }
 function ovwZoomBy(f) {   // NAI zoomBy: 화면 가운데를 두고 (잠그면 안 함)
@@ -3979,18 +4030,27 @@ function ovwSettleSoon() {
     if (!ovwVisible() || !OVW.lay || OVW.raf || OVW.pan) return;
     const v = ovwViewRect();
     if (OVW.shown < OVW.lay.all.length && v.y + v.height > OVW.lay.height - 800) { OVW.shown = Math.min(OVW.shown + 8, OVW.lay.all.length); ovwLayout(); ovwRender(); }
-    const cx = v.x + v.width / 2, cy = v.y + v.height / 2; let best = null, bd = Infinity;
-    for (const p of OVW.lay.place) { const dx = p.rect.x + p.rect.width / 2 - cx, dy = p.rect.y + p.rect.height / 2 - cy, d = dx * dx + dy * dy; if (d < bd) { bd = d; best = p; } }
+    const cx = v.x + v.width / 2, cy = v.y + v.height / 2; let best = null, bd = Infinity, wall = false;
+    const near = r => { const dx = r.x + r.width / 2 - cx, dy = r.y + r.height / 2 - cy; return dx * dx + dy * dy; };
+    for (const p of OVW.lay.place) { const d = near(p.rect); if (d < bd) { bd = d; best = p; wall = false; } }
+    // NAI: 핀(없으면 보이는 보드 틀)도 후보 — 가장 가까우면 핀 보드를 고른다
+    const B = OVW.board;
+    if (B) { for (const q of B.images) { const d = near(q.rect); if (d < bd) { bd = d; best = null; wall = true; } }
+      if (!B.images.length && ovwHit(B.frame, ovwPad(v, 400 / OVW.cam.scale))) { const d = near(B.frame); if (d < bd) { bd = d; best = null; wall = true; } } }
+    if (wall) { if (!OVW.wall) { OVW.prev = { it: curItem(), groupOnly: OVW.groupOnly }; OVW.wall = { pin: null }; ovwRender(); } return; }
     const cur = curItem();
-    if (best && (!cur || !best.g.items.includes(cur))) {
+    if (best && (OVW.wall || !cur || !best.g.items.includes(cur))) {
       const idx = R.hist.indexOf(best.g.items[0]);
-      if (idx >= 0) { OVW.quiet = true; OVW.groupOnly = true; try { showImage(idx); } finally { OVW.quiet = false; } }
+      OVW.wall = null; OVW.prev = null;
+      if (idx >= 0) { OVW.quiet = true; OVW.groupOnly = true; try { if (!best.g.items.includes(cur)) showImage(idx); else ovwRender(); } finally { OVW.quiet = false; } }
     }
   }, 120);
   OVW.idleT = setTimeout(() => {
     if (!ovwVisible() || !OVW.lay || OVW.raf || OVW.pan) return;
-    const v = ovwViewRect();
-    if (OVW.lay.place.some(p => ovwHit(p.rect, v))) return;
+    const v = ovwViewRect(), vp = ovwPad(v, 400 / OVW.cam.scale);   // NAI eL: 보이는 곳 둘레 400 까지 본다
+    if (OVW.lay.place.some(p => ovwHit(p.rect, vp))) return;
+    const B = OVW.board;   // NAI: 핀·보드 틀이 보이면 날아가지 않는다
+    if (B && (B.images.some(q => ovwHit(q.rect, vp)) || ovwHit(B.frame, vp))) return;
     const cx = v.x + v.width / 2, cy = v.y + v.height / 2; let best = null, bd = Infinity;
     for (const b of OVW.lay.bounds.values()) { const dx = b.x + b.width / 2 - cx, dy = b.y + b.height / 2 - cy, d = dx * dx + dy * dy; if (d < bd) { bd = d; best = b; } }
     if (best) ovwFlyRect(best, true);
@@ -4007,6 +4067,9 @@ function ovwSync() {
   const lay = ovwLayout(), newest = lay.groups[0] ? lay.groups[0].key : '';
   const it = curItem();
   if (!it) { OVW.lastSel = null; ovwRender(); if (first) { const b = lay.bounds.get(newest); if (b) ovwFlyRect(b, false); } return; }
+  if (OVW._pinShow) { OVW.lastSel = it; ovwRender(); return; }   // 핀 보드의 핀을 골랐다 — 날아가는 것은 pbSelectWall 이 한다
+  // 다른 곳(히스토리·생성·키)에서 그림을 고르면 핀 보드 선택은 풀린다
+  if (OVW.wall && (it !== OVW.lastSel || R._ovwNew)) { OVW.wall = null; OVW.prev = null; }
   if (OVW.quiet) { OVW.lastSel = it; ovwRender(); return; }   // 가운데 묶음 자동 고르기 — 날아가지 않는다
   // NAI 는 고른 그림이 바뀔 때만 날아간다 (즐겨찾기·변형 바꾸기처럼 같은 그림을 다시 그릴 때는 그대로)
   if (it === OVW.lastSel && !R._ovwNew && !first) { ovwRender(); return; }
@@ -4092,18 +4155,24 @@ function ovwBind(st) {
   st.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });
   // 그림 누르기 (NAI 타일 클릭): Ctrl/Shift = 히스토리처럼 설정 복사 · 한 장짜리 고른 묶음·이미 고른 그림 = 묶음 전체에 맞춤 · 아니면 그 그림 고르고 날아가기
   st.addEventListener('click', e => {
+    if (e.target.closest && e.target.closest('#pbWrap')) return;   // 핀 보드는 따로 받는다 (pbBind·pbBindItem)
     const tile = e.target.closest && e.target.closest('.ovw-tile'); if (!tile || !tile._p) return;
     if (OVW.wasDrag) { OVW.wasDrag = false; return; }
+    const btn = e.target.closest('button[data-a]');
+    if (btn) { ovwTileAction(btn.dataset.a, tile._p.it); return; }   // 마우스를 올리면 뜨는 단추 (NAI Ui·시드)
     const { it, g } = tile._p, cur = curItem();
     if (e.ctrlKey || e.metaKey || e.shiftKey) { histCopyClick(it, e); return; }
-    const inGroup = !!cur && g.items.includes(cur);
-    if ((g.items.length === 1 && inGroup) || (cur === it && !OVW.groupOnly)) {
+    // 핀 보드를 고른 동안에는 어느 묶음도 고른 것이 아니다 (NAI: 묶음 «pin-wall») — 누른 그림을 바로 고른다
+    const wasWall = !!OVW.wall; OVW.wall = null; OVW.prev = null;
+    const inGroup = !wasWall && !!cur && g.items.includes(cur);
+    if (!wasWall && ((g.items.length === 1 && inGroup) || (cur === it && !OVW.groupOnly))) {
       OVW.groupOnly = true; ovwRender();
-      const b = OVW.lay.bounds.get(g.key); if (b) ovwFlyRect(b, true, g.items.every(x => x.tool === 'pixel-snap') ? 1 : undefined);
+      const b = ovwGroupFit(g.key); if (b) ovwFlyRect(b, true, g.items.every(x => x.tool === 'pixel-snap') ? 1 : undefined);
       return;
     }
     const idx = R.hist.indexOf(it); if (idx < 0) return;
-    OVW.groupOnly = false; OVW.keepGroup = false; showImage(idx);
+    OVW.groupOnly = false; OVW.keepGroup = false;
+    if (cur === it) { ovwRender(); ovwFitCur(true); } else showImage(idx);
   });
   // 창 크기가 바뀌면 바뀐 만큼의 반을 옮겨 가운데를 지킨다 (NAI)
   new ResizeObserver(() => {
@@ -4118,9 +4187,21 @@ function ovwBind(st) {
     if (k === 'f' || k === 'F') { e.preventDefault(); e.stopImmediatePropagation(); ovwFitCur(true); return; }
     if (k === '+' || k === '=') { e.preventDefault(); ovwZoomBy(1.3); return; }
     if (k === '-' || k === '_') { e.preventDefault(); ovwZoomBy(1 / 1.3); return; }
-    if (k === '1') { const it = curItem(), r = it && ovwRectOf(it); if (!r || S.canvasLockCamera) return; e.preventDefault();
-      const { w, h } = ovwSize(), s = ovwPxOf(it) ? ovwSnapPx(1, 1) : 1; ovwFlyTo({ x: w / 2 - (r.x + r.width / 2) * s, y: h / 2 - (r.y + r.height / 2) * s, scale: s }, true); return; }
-    if (k === 'Escape') { const it = curItem(); if (!it || OVW.groupOnly) return; e.preventDefault(); OVW.groupOnly = true; ovwRender(); ovwFitCur(true); return; }
+    if (k === '1') {   // NAI: 고른 것(묶음이면 묶음 맞춤 네모, 그림이면 그 그림, 핀 보드면 보드·핀)의 가운데를 실제 크기로
+      if (S.canvasLockCamera) return;
+      let r = null, px;
+      if (OVW.wall) { const q = OVW.wall.pin && pbPinPlace(OVW.wall.pin); r = q ? q.rect : (OVW.board && OVW.board.bounds); px = q ? pbPx(q) : undefined; }
+      else { const it = curItem(), g = it && ovwGroupOf(it); if (!it) return;
+        if (g && OVW.groupOnly) { r = ovwGroupFit(g.key); px = g.items.every(x => x.tool === 'pixel-snap') ? 1 : undefined; } else { r = ovwRectOf(it); px = ovwPxOf(it); } }
+      if (!r) return; e.preventDefault();
+      const { w, h } = ovwSize(), s = px ? ovwSnapPx(1, px) : 1; ovwFlyTo({ x: w / 2 - (r.x + r.width / 2) * s, y: h / 2 - (r.y + r.height / 2) * s, scale: s }, true); return; }
+    if (k === 'Escape') {
+      if (OVW.wall) { if (!OVW.wall.pin) return; e.preventDefault(); OVW.wall = { pin: null }; ovwRender(); ovwFitCur(true); return; }   // 핀 → 보드 전체
+      const it = curItem(); if (!it || OVW.groupOnly) return; e.preventDefault(); OVW.groupOnly = true; ovwRender(); ovwFitCur(true); return; }
+    if (k === 'q' || k === 'Q') {   // NAI: 핀 보드와 그 전 선택 사이를 오간다
+      e.preventDefault();
+      if (OVW.wall) pbLeaveWall(); else if (OVW.board) pbSelectWall(null, true);
+      return; }
     const lk = k.toLowerCase();
     if ('wasd'.includes(lk) && lk.length === 1 && !S.canvasLockCamera) {
       e.preventDefault(); OVW.keys.add(lk);
@@ -4133,6 +4214,577 @@ function ovwBind(st) {
   }, true);
   document.addEventListener('keyup', e => { OVW.keys.delete(String(e.key).toLowerCase()); });
   window.addEventListener('blur', () => { OVW.keys.clear(); });
+}
+
+/* ── NAI 핀 보드 (빌드 b50892a: 자료 모듈 836168 · 화면 UV·UK·U9·ze·zt·zr·zs·zI · 결과 화면 BO 의 eK·BV · 아톰 Boards·ResolvedPinnedImages) ──
+   결과 그림을 핀으로 꽂아 캔버스 결과 화면 왼쪽의 판(보드)에 모으고, 메모와 화살표를 같이 놓는다. NAI 와 같은 셈:
+   · 보드 기본 1680×920(화면 비율에 맞춰 넓이 1,545,600 안에서 0.55~1680/920 비율), 가장 작게 480×320 · 핀은 보드마다 50장까지
+   · 핀 그림 폭 416 · 새 핀은 보드 오른쪽 아래부터 왼쪽으로 빈자리를 찾는다(간격 48) · 메모 460×300(가장 작게 120×80)
+   · 보드 자리 = 맨 위(최신) 결과 묶음의 왼쪽 2000 떨어진 곳, 아래쪽 맞춤 · 보드 틀 = 정한 크기와 놓인 것을 다 감싸는 네모(+여백)
+   · 끌기·크기 바꾸기는 다른 것의 가장자리·가운데(화면 8px)와 64 칸(화면 4px)에 붙는다(Alt 면 안 붙음) · 잠근 것은 옮기지 못한다
+   · 보드 여러 개(이름 바꾸기·지우기·«보드 N») · Q 키 = 핀 보드와 지난 선택 사이 오가기
+   NAI 는 보드를 그림 기록과 함께 IndexedDB(history-boards)에 두는데, 우리 그림 기록은 늘 남으므로 보드는 설정(S.pinBoards)에 둔다.
+   우리 «단순 결과 화면»은 NAI 와 달리 캔버스가 아닌 예전 화면이라, 거기서는 핀을 꽂기만 하고 보드는 캔버스 결과 화면에서 본다. */
+const PB = { cap: 50, imgW: 416, defW: 1680, defH: 920, minW: 480, minH: 320, aspMax: 1680 / 920, aspMin: .55, area: 1545600, gap: 48, noteW: 460, noteH: 300, noteMinW: 120, noteMinH: 80 };
+const PBU = { menu: false, menuT: 0, menuSig: '', renaming: null, renameText: '', arrowMode: false, draft: null, selArrow: null, guides: [], active: null, resizeFrame: null, rz: null, pins: new Map(), notes: new Map(), hinted: false };
+function pbEmpty() { return { boards: [{ id: 'default', name: '', items: [] }], activeBoardId: 'default' }; }
+function pbState() {
+  const s = S.pinBoards;
+  if (!s || typeof s !== 'object' || !Array.isArray(s.boards) || !s.boards.length) S.pinBoards = pbEmpty();
+  for (const b of S.pinBoards.boards) if (!Array.isArray(b.items)) b.items = [];
+  return S.pinBoards;
+}
+function pbActive() { const s = pbState(); return s.boards.find(b => b.id === s.activeBoardId) || s.boards[0]; }
+function pbAnyItems() { return pbState().boards.some(b => b.items.length > 0); }
+const pbKeyOf = it => (it.id != null ? 'i' + it.id : 't' + it.t);
+const pbTopZ = xs => xs.reduce((m, x) => Math.max(m, x.z || 0), 0);
+const pbRatio = it => ((it && it.h) || 1216) / Math.max(1, (it && it.w) || 832);
+function pbUuid() {
+  try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (e) { logErr('보드 id 만들기 실패: ' + e.message); }
+  return 'pb' + Date.now().toString(36) + uid() + uid();
+}
+function pbChanged() { if (OVW.lay) { ovwLayout(); ovwRender(); } paintPinBtn(); }
+function pbItemsSet(fn) { const b = pbActive(); b.items = fn(b.items); save(); pbChanged(); }
+function pbItemUpdate(id, patch) { pbItemsSet(xs => xs.map(x => (x.id === id ? { ...x, ...patch } : x))); }
+function pbFront(id) { pbItemsSet(xs => { const z = pbTopZ(xs) + 1; return xs.map(x => (x.id === id ? { ...x, z } : x)); }); }
+function pbToggleLock(id) { pbItemsSet(xs => xs.map(x => (x.id === id && x.kind !== 'arrow' ? { ...x, locked: !x.locked } : x))); }
+/* 지우면 그것에 붙은 화살표도 같이 지운다 (NAI removeItem + anchorReferences) */
+function pbRemove(id) {
+  const ref = a => a && a.itemId === id;
+  if (PBU.selArrow === id) PBU.selArrow = null;
+  pbItemsSet(xs => xs.filter(x => x.id !== id && !(x.kind === 'arrow' && (ref(x.from) || ref(x.to)))));
+}
+/* NAI eF boardDefaultSize */
+function pbBoardSize(asp) { const X = Math.min(PB.aspMax, Math.max(PB.aspMin, asp || PB.aspMax)), Z = Math.round(Math.sqrt(PB.area * X)); return { width: Z, height: Math.round(Z / X) }; }
+/* NAI eR: 새 핀 자리 — 기본 보드(1680×920)의 오른쪽 아래부터, 겹치면 위로, 위에 자리가 없으면 왼쪽 줄로 옮겨 간다 */
+function pbPlace(W, X, Z, asp) {
+  const ee = PB.defW, et = PB.defH, er = pbBoardSize(asp); let en = ee - er.width;
+  for (const r of W) en = Math.min(en, r.x);
+  let ei = ee;
+  for (let k = 0; k < 500; k++) {
+    const x = ei - X, ea = ee - Math.min(en, x), eo = et - Math.max(er.height, ea * er.height / er.width);
+    const es = W.filter(r => r.x < x + X && r.x + r.width > x);
+    let el = et - Z, again = true;
+    while (again) { again = false; for (const r of es) if (el < r.y + r.height && el + Z > r.y) { el = r.y - PB.gap - Z; again = true; } }
+    if (es.length === 0 || el >= eo) return { x, y: el };
+    ei = Math.min(ei - (X + PB.gap), Math.min(...es.map(r => r.x)) - PB.gap);
+  }
+  return { x: ee - X, y: et - Z };
+}
+function pbMakeImage(key, z, rects, ratio, asp) { const w = PB.imgW, h = Math.max(1, Math.round(w * Math.max(1e-4, ratio))), p = pbPlace(rects, w, h, asp); return { kind: 'image', id: pbUuid(), key, x: p.x, y: p.y, width: w, z, locked: false }; }
+function pbMakeNote(x, y, z) { return { kind: 'note', id: pbUuid(), x: Math.round(x - PB.noteW / 2), y: Math.round(y - PB.noteH / 2), width: PB.noteW, height: PB.noteH, text: '', z, locked: false }; }
+function pbMakeArrow(from, to, z) { return { kind: 'arrow', id: pbUuid(), from, to, z }; }
+/* NAI ResolvedPinnedImages: 보드의 핀 가운데 지금 히스토리에 있는 그림만 (지운 그림의 핀은 남지만 보이지 않는다) */
+function pbResolved() {
+  const b = pbActive(), out = []; let by = null;
+  for (const x of b.items) {
+    if (x.kind !== 'image') continue;
+    if (!by) by = new Map(R.hist.map(it => [pbKeyOf(it), it]));
+    const it = by.get(x.key); if (it) out.push({ item: x, key: x.key, index: out.length, it });
+  }
+  return out;
+}
+function pbPinnedKeys() { return new Set(pbActive().items.filter(x => x.kind === 'image').map(x => x.key)); }
+function pbIsPinned(it) { return !!it && pbPinnedKeys().has(pbKeyOf(it)); }
+/* NAI togglePin: 꽂혀 있으면 빼고, 아니면 보드에 더한다(보드마다 50장 — 넘으면 오류 알림) */
+function pbTogglePin(it) {
+  if (!it) return;
+  const k = pbKeyOf(it), b = pbActive(), keys = pbPinnedKeys();
+  if (!keys.has(k) && keys.size >= PB.cap) { toast('이 보드는 핀이 가득 찼습니다(50장) — 그림 하나의 핀을 빼거나 새 보드를 만드세요', 'err'); return; }
+  if (keys.has(k)) { pbItemsSet(xs => xs.filter(x => x.kind !== 'image' || x.key !== k)); return; }
+  const rects = pbResolved().map(p => ({ x: p.item.x, y: p.item.y, width: p.item.width, height: Math.max(1, Math.round(p.item.width * pbRatio(p.it))) }));
+  for (const x of b.items) if (x.kind === 'note') rects.push({ x: x.x, y: x.y, width: x.width, height: x.height });
+  pbItemsSet(xs => [...xs, pbMakeImage(k, pbTopZ(xs) + 1, rects, pbRatio(it), ovwStageAspect())]);
+  // 우리 단순 결과 화면에는 보드가 없다(NAI 는 단순 화면도 캔버스라 보드가 보인다) — 어디서 보는지 한 번 알린다
+  if (!ovwOn() && !PBU.hinted) { PBU.hinted = true; toast('핀 보드에 꽂았습니다 — 핀 보드는 캔버스 결과 화면(⚙ «단순 결과 화면» 끄기) 왼쪽에 있습니다'); }
+}
+function paintPinBtn() {
+  const b = $('#tPin'); if (!b) return;
+  const on = pbIsPinned(curItem());
+  b.classList.toggle('on', on);
+  b.title = on ? '핀 빼기 — 이 그림을 핀 보드에서 뺍니다 (NAI Remove Pinned Image)' : '핀 꽂기 — 이 그림을 핀 보드에 모읍니다(보드마다 50장 · 캔버스 결과 화면 왼쪽 판, Q 키) (NAI Pin Image)';
+}
+function pbAddBoard(name) { const s = pbState(), b = { id: pbUuid(), name, items: [] }; s.boards.push(b); s.activeBoardId = b.id; save(); }
+function pbRenameBoard(id, name) { const b = pbState().boards.find(x => x.id === id); if (b) { b.name = name; save(); } }
+function pbDeleteBoard(id) { const s = pbState(); if (s.boards.length <= 1) return; s.boards = s.boards.filter(b => b.id !== id); if (s.activeBoardId === id) s.activeBoardId = s.boards[0].id; save(); }
+function pbSetActive(id) { const s = pbState(); if (s.activeBoardId !== id) { s.activeBoardId = id; save(); } }
+function pbSetSize(sz) { const b = pbActive(); if (sz) b.size = sz; else delete b.size; save(); }
+function ovwStageAspect() { const { w, h } = ovwSize(); return w > 0 && h > 0 ? w / h : undefined; }
+function ovwTopExit() { const { w, h } = ovwSize(); return w > 0 && w < .8 * h; }   // NAI ez: 세로로 긴 화면이면 드나드는 단추를 위에 둔다
+/* NAI eK: 보드 자리·틀·핀·메모·화살표 */
+function pbLayout(lay) {
+  const r = lay.groups[0] ? lay.bounds.get(lay.groups[0].key) : null;
+  if (!r || !pbAnyItems()) return null;
+  const b = pbActive(), o = { x: r.x - 2000 - PB.defW, y: r.y + r.height - PB.defH };
+  const images = pbResolved().sort((a, c) => a.item.z - c.item.z).map(p => ({ pin: p, rect: { x: o.x + p.item.x, y: o.y + p.item.y, width: p.item.width, height: Math.max(1, Math.round(p.item.width * pbRatio(p.it))) } }));
+  const notes = b.items.filter(x => x.kind === 'note').sort((a, c) => a.z - c.z).map(n => ({ item: n, rect: { x: o.x + n.x, y: o.y + n.y, width: n.width, height: n.height } }));
+  const u = pbBoardSize(ovwStageAspect());
+  let h = o.x + PB.defW - u.width, p = o.y + PB.defH - u.height, m = o.x + PB.defW, g = o.y + PB.defH;
+  for (const q of [...images, ...notes]) { h = Math.min(h, q.rect.x); p = Math.min(p, q.rect.y); m = Math.max(m, q.rect.x + q.rect.width); g = Math.max(g, q.rect.y + q.rect.height); }
+  const f = { x: h - 56, y: p - 20, width: m - h + 112, height: g - p + 20 + 56 };
+  const fr = b.size ? { x: o.x + b.size.x, y: o.y + b.size.y, width: b.size.width, height: b.size.height } : f;
+  const top = ovwTopExit(), x0 = Math.min(fr.x, f.x), y0 = Math.min(fr.y, f.y), x1 = Math.max(fr.x + fr.width, f.x + f.width), y1 = Math.max(fr.y + fr.height, f.y + f.height), w = top ? 280 : 60;
+  const rectOf = new Map(); for (const q of images) rectOf.set(q.pin.item.id, q.rect); for (const q of notes) rectOf.set(q.item.id, q.rect);
+  const anchor = a => {
+    if (a && typeof a === 'object' && 'itemId' in a) { const t = rectOf.get(a.itemId); return t ? { rect: t, point: { x: t.x + t.width / 2, y: t.y + t.height / 2 } } : null; }
+    return a && typeof a.x === 'number' ? { point: { x: o.x + a.x, y: o.y + a.y } } : null;
+  };
+  const arrows = [];
+  for (const e of b.items.filter(x => x.kind === 'arrow').sort((a, c) => a.z - c.z)) { const t = anchor(e.from), i = anchor(e.to); if (t && i) arrows.push({ item: e, from: t, to: i }); }
+  return { origin: o, frame: fr, bounds: { x: x0, y: y0 - w, width: x1 - x0 + (top ? 0 : 140), height: y1 - y0 + w }, images, notes, arrows, rectOf, anchorKey: lay.groups[0].key, topExit: top };
+}
+/* NAI e$: 최신 묶음에 맞출 때, 보드가 있으면 «핀 보드로» 단추 자리(왼쪽 70, 세로 화면이면 위 150)까지 넣는다 */
+function ovwGroupFit(key) {
+  const t = OVW.lay && OVW.lay.bounds.get(key); if (!t) return null;
+  const top = ovwTopExit(), r = pbAnyItems() && OVW.lay.groups[0] && key === OVW.lay.groups[0].key ? (top ? 150 : 70) : 0;
+  if (!r) return t;
+  return top ? { x: t.x, y: t.y - r, width: t.width, height: t.height + r } : { x: t.x - r, y: t.y, width: t.width + r, height: t.height };
+}
+function pbPx(q) { return q && q.pin.it.tool === 'pixel-snap' ? q.rect.width / Math.max(1, q.pin.it.w || q.rect.width) : undefined; }   // NAI e0: 도트 그림 핀은 화면 점에 맞춘다
+function pbPinPlace(id) { return OVW.board ? OVW.board.images.find(q => q.pin.item.id === id) || null : null; }
+/* 핀 보드 고르기 (NAI 묶음 «pin-wall»): pin = null 이면 보드 전체, 아니면 그 핀. 들어가기 전 선택을 기억해 Q 로 돌아간다(NAI e6) */
+function pbSelectWall(pinId, fly) {
+  if (!OVW.wall) OVW.prev = { it: curItem(), groupOnly: OVW.groupOnly };
+  OVW.wall = { pin: pinId || null };
+  const q = pinId ? pbPinPlace(pinId) : null;
+  if (q && curItem() !== q.pin.it) { const idx = R.hist.indexOf(q.pin.it); if (idx >= 0) { OVW._pinShow = true; try { showImage(idx); } finally { OVW._pinShow = false; } } }
+  ovwRender();
+  if (fly) { if (q) ovwFlyRect(q.rect, true, pbPx(q)); else if (OVW.board) ovwFlyRect(OVW.board.bounds, true); }
+}
+function pbLeaveWall() {
+  const p = OVW.prev; OVW.wall = null; OVW.prev = null;
+  if (p && p.it && R.hist.includes(p.it)) {
+    OVW.groupOnly = !!p.groupOnly; OVW.keepGroup = true;
+    try { if (curItem() !== p.it) showImage(R.hist.indexOf(p.it)); } finally { OVW.keepGroup = false; }
+  }
+  ovwRender(); ovwFitCur(true);
+}
+/* «생성 결과로» (NAI jumpToGeneration): 최신 묶음을 고르고 그 묶음에 맞춘다 */
+function pbJumpToGen() {
+  const L = OVW.lay; if (!L || !L.groups[0]) return;
+  const g = L.groups[0]; OVW.wall = null; OVW.prev = null; OVW.groupOnly = true; OVW.keepGroup = true;
+  try { if (!g.items.includes(curItem())) showImage(R.hist.indexOf(g.items[0])); } finally { OVW.keepGroup = false; }
+  ovwRender(); const b = ovwGroupFit(g.key); if (b) ovwFlyRect(b, true);
+}
+function pbReveal() { if (OVW.board) ovwFlyRect(OVW.board.bounds, true); }   // NAI PinRevealRequest
+function pbClientToWorld(x, y) { const st = $('#ovwStage'), b = st.getBoundingClientRect(), c = OVW.cam; return { x: (x - b.left - c.x) / c.scale, y: (y - b.top - c.y) / c.scale }; }
+/* 붙기 (NAI UO·UF·UU·Uz·UB 와 크기 바꾸기용 두 가지) — 다른 것의 왼쪽·가운데·오른쪽(위·가운데·아래) 선에 먼저, 없으면 보드 오른쪽·아래 끝을 기준으로 한 64 칸에 */
+function pbLinesX(rs) { const t = []; for (const i of rs) { const a = i.y, b = i.y + i.height; t.push({ pos: i.x, c0: a, c1: b }, { pos: i.x + i.width / 2, c0: a, c1: b }, { pos: i.x + i.width, c0: a, c1: b }); } return t; }
+function pbLinesY(rs) { const t = []; for (const i of rs) { const a = i.x, b = i.x + i.width; t.push({ pos: i.y, c0: a, c1: b }, { pos: i.y + i.height / 2, c0: a, c1: b }, { pos: i.y + i.height, c0: a, c1: b }); } return t; }
+function pbSnap1(cands, lines, gridPos, edge, cell, thr, gthr) {
+  let best = null;
+  for (const n of cands) for (const e of lines) { const t = e.pos - n.pos, a = Math.abs(t); if (a <= thr && (!best || a < best.abs)) best = { abs: a, snap: { delta: t, pos: e.pos, cross: [e.c0, e.c1] } }; }
+  if (best) return best.snap;
+  let g = null;
+  for (const a of gridPos) { const e = edge - Math.round((edge - a) / cell) * cell, o = e - a, s = Math.abs(o); if (s <= gthr && (!g || s < g.abs)) g = { abs: s, snap: { delta: o, pos: e, cross: null } }; }
+  return g ? g.snap : null;
+}
+function pbGuide(axis, t, i, r) { return { axis, pos: t.pos, start: t.cross ? Math.min(i, t.cross[0]) : i, end: t.cross ? Math.max(r, t.cross[1]) : r }; }
+function pbSnapMove(rect, targets, frame, thr, gthr) {
+  const s = rect.x, l = rect.x + rect.width, c = rect.x + rect.width / 2, d = rect.y, u = rect.y + rect.height, h = rect.y + rect.height / 2, p = frame.x + frame.width, m = frame.y + frame.height;
+  const g = pbSnap1([{ pos: s }, { pos: c }, { pos: l }], pbLinesX(targets), [s, l], p, 64, thr, gthr);
+  const f = pbSnap1([{ pos: d }, { pos: h }, { pos: u }], pbLinesY(targets), [d, u], m, 64, thr, gthr);
+  const x = rect.x + (g ? g.delta : 0), y = rect.y + (f ? f.delta : 0), v = [];
+  if (g) v.push(pbGuide('x', g, y, y + rect.height));
+  if (f) v.push(pbGuide('y', f, x, x + rect.width));
+  return { x, y, guides: v };
+}
+function pbSnapResizeAspect(rect, ratio, targets, frame, thr, gthr) {   // 핀: 비율을 지키며 오른쪽 아래 모서리
+  const l = rect.x + rect.width, c = rect.y + rect.height;
+  const h = pbSnap1([{ pos: l }], pbLinesX(targets), [l], frame.x + frame.width, 64, thr, gthr);
+  const p = pbSnap1([{ pos: c }], pbLinesY(targets), [c], frame.y + frame.height, 64, thr, gthr);
+  const m = h ? Math.abs(h.delta) : Infinity, g = p ? Math.abs(p.delta) : Infinity;
+  if (h && m <= g) { const e = l + h.delta - rect.x; return { width: e, guides: [pbGuide('x', h, rect.y, rect.y + e * ratio)] }; }
+  if (p) { const e = (c + p.delta - rect.y) / Math.max(1e-4, ratio); return { width: e, guides: [pbGuide('y', p, rect.x, rect.x + e)] }; }
+  return { width: rect.width, guides: [] };
+}
+function pbSnapResizeFree(rect, targets, frame, thr, gthr) {   // 메모: 가로·세로 따로
+  const s = rect.x + rect.width, l = rect.y + rect.height;
+  const u = pbSnap1([{ pos: s }], pbLinesX(targets), [s], frame.x + frame.width, 64, thr, gthr);
+  const h = pbSnap1([{ pos: l }], pbLinesY(targets), [l], frame.y + frame.height, 64, thr, gthr);
+  const p = s + (u ? u.delta : 0) - rect.x, m = l + (h ? h.delta : 0) - rect.y, g = [];
+  if (u) g.push(pbGuide('x', u, rect.y, rect.y + m));
+  if (h) g.push(pbGuide('y', h, rect.x, rect.x + p));
+  return { width: p, height: m, guides: g };
+}
+/* 화살표 모양 (NAI zo·zc·zs) */
+function pbEdgePt(e, t) {
+  const i = e.width / 2, r = e.height / 2, n = e.x + i, a = e.y + r, o = t.x - n, s = t.y - a;
+  if (o === 0 && s === 0) return { x: n, y: a };
+  const l = o !== 0 ? i / Math.abs(o) : Infinity, c = s !== 0 ? r / Math.abs(s) : Infinity, d = (v, lo, hi) => Math.max(lo, Math.min(hi, v)), u = d((Math.hypot(o, s) - 200) / 200, 0, 1);
+  if (l <= c) { const sx = Math.sign(o) || 1, k = Math.min(70, r) * u; return { x: n + sx * i + 14 * sx, y: d(a + s * l, a - r + k, a + r - k) }; }
+  const sy = Math.sign(s) || 1, k = Math.min(70, i) * u; return { x: d(n + o * c, n - i + k, n + i - k), y: a + sy * r + 14 * sy };
+}
+function pbDir(e, t, i) {
+  if (!t) { const dx = i.x - e.x, dy = i.y - e.y, n = Math.hypot(dx, dy) || 1; return { x: dx / n, y: dy / n }; }
+  const r = (e.x - (t.x + t.width / 2)) / (t.width / 2), n = (e.y - (t.y + t.height / 2)) / (t.height / 2);
+  return Math.abs(r) >= Math.abs(n) ? { x: Math.sign(r) || 1, y: 0 } : { x: 0, y: Math.sign(n) || 1 };
+}
+function pbArrowGeom(e, t, i, r, fr) {
+  const n = Math.hypot(t.x - e.x, t.y - e.y) || 1, a = Math.max(0, Math.min(1, (n - 70) / 110)), o = Math.min(240, .42 * n) * a, s = pbDir(e, i, t), l = pbDir(t, r, e);
+  const c = { x: e.x + s.x * o, y: e.y + s.y * o }, d = { x: t.x + l.x * o, y: t.y + l.y * o };
+  let u = t.x - d.x, h = t.y - d.y, p = Math.hypot(u, h);
+  if (p < .001) { u = t.x - e.x; h = t.y - e.y; p = Math.hypot(u, h) || 1; }
+  u /= p; h /= p;
+  const m = { x: t.x - 30 * u, y: t.y - 30 * h }, gx = -h, gy = u, X = fr.x, Y = fr.y;
+  return {
+    path: `M ${e.x - X} ${e.y - Y} C ${c.x - X} ${c.y - Y} ${d.x - X} ${d.y - Y} ${t.x - X} ${t.y - Y}`,
+    head: `${m.x + 27 * gx - X},${m.y + 27 * gy - Y} ${t.x - X},${t.y - Y} ${m.x - 27 * gx - X},${m.y - 27 * gy - Y}`,
+    mid: { x: .125 * e.x + .375 * c.x + .375 * d.x + .125 * t.x, y: .125 * e.y + .375 * c.y + .375 * d.y + .125 * t.y }
+  };
+}
+/* 보드 그리기 — 틀·머리 줄·끝 손잡이·드나드는 단추는 늘, 핀·메모는 보이는 곳 둘레만 (NAI 처럼) */
+function pbWrapEl() {
+  let wrap = $('#pbWrap'); if (wrap) return wrap;
+  const w = $('#ovwWorld'); if (!w) return null;
+  wrap = document.createElement('div'); wrap.id = 'pbWrap'; wrap.className = 'pb-wrap';
+  wrap.innerHTML = '<div class="pb-frame" id="pbFrame"></div><div class="pb-headbg" id="pbHeadBg"></div>'
+    + '<div class="pb-head" id="pbHead"><div class="pb-namewrap"><button type="button" class="pb-name" id="pbName"><span class="pb-pinico">📌</span><span class="pb-nm"></span><span class="pb-chev">⌄</span></button><div class="pb-menu" id="pbMenu" hidden></div></div>'
+    + '<div class="pb-tools"><button type="button" class="pb-tool" id="pbAddNote" title="메모 더하기" aria-label="add note">📝</button><button type="button" class="pb-tool" id="pbArrowMode" title="화살표 그리기 (그림·메모 사이를 끄세요)" aria-label="draw arrow">↗</button></div></div>'
+    + '<div class="pb-items" id="pbItems"></div><svg class="pb-arrows" id="pbArrows"></svg>'
+    + '<button type="button" class="pb-adel" id="pbArrowDel" title="화살표 지우기" aria-label="delete arrow" hidden>🗑</button><div class="pb-guides" id="pbGuides"></div>'
+    + '<button type="button" class="pb-exit" id="pbExit" title="생성 결과로 가기" aria-label="go to generation"><span>»</span><span>🖼</span><span>»</span></button>'
+    + '<button type="button" class="pb-enter" id="pbEnter" title="핀 보드로 가기 (Q)" aria-label="go to pin board"><span>«</span><span>📌</span><span>«</span></button>';
+  for (const k of ['left', 'top', 'bottom', 'top-left', 'bottom-left']) { const d = document.createElement('div'); d.className = 'pb-edge'; d.dataset.k = k; d.dataset.corner = String(k.includes('-')); d.title = '끌어서 크기 바꾸기 · 두 번 누르면 저절로 맞춤'; wrap.appendChild(d); }
+  w.appendChild(wrap);
+  pbBind(wrap); PBU.arrKey = null;
+  return wrap;
+}
+function pbRender(vis) {
+  const L = OVW.board;
+  if (!L) { const old = $('#pbWrap'); if (old) old.hidden = true; return; }
+  const wrap = pbWrapEl(); if (!wrap) return;
+  wrap.hidden = false;
+  const fr = PBU.resizeFrame || L.frame, px = v => v + 'px';
+  const put = (el, st) => { if (el) for (const k in st) el.style[k] = st[k]; };
+  put($('#pbFrame'), { left: px(fr.x), top: px(fr.y), width: px(fr.width), height: px(fr.height) });
+  put($('#pbHeadBg'), { left: px(fr.x), top: px(fr.y), width: px(fr.width) });
+  put($('#pbHead'), { left: px(fr.x), top: px(fr.y), width: px(fr.width) });
+  const b = pbActive(); $('#pbName .pb-nm').textContent = b.name || '핀';
+  $('#pbArrowMode').dataset.active = PBU.arrowMode ? 'true' : 'false';
+  pbMenuRender();
+  const U = 'var(--ovw-ui, 1)', edge = {
+    'left': { left: px(fr.x), top: px(fr.y), width: `calc(14px * ${U})`, height: `calc(${fr.height}px + 60px * ${U})`, transform: `translate(-50%, calc(0px - 60px * ${U}))`, cursor: 'ew-resize' },
+    'top': { left: px(fr.x), top: px(fr.y), width: px(fr.width), height: `calc(14px * ${U})`, transform: `translateY(calc(-50% - 60px * ${U}))`, cursor: 'ns-resize' },
+    'bottom': { left: px(fr.x), top: px(fr.y + fr.height), width: px(fr.width), height: `calc(14px * ${U})`, transform: 'translateY(-50%)', cursor: 'ns-resize' },
+    'top-left': { left: px(fr.x), top: px(fr.y), width: `calc(22px * ${U})`, height: `calc(22px * ${U})`, transform: `translate(-50%, calc(-50% - 60px * ${U}))`, cursor: 'nwse-resize' },
+    'bottom-left': { left: px(fr.x), top: px(fr.y + fr.height), width: `calc(22px * ${U})`, height: `calc(22px * ${U})`, transform: 'translate(-50%, -50%)', cursor: 'nesw-resize' } };
+  for (const d of wrap.querySelectorAll('.pb-edge')) put(d, edge[d.dataset.k]);
+  const top = L.topExit, ex = $('#pbExit'), en = $('#pbEnter');
+  ex.classList.toggle('top', top); put(ex, top ? { left: px(fr.x + fr.width / 2), top: px(fr.y) } : { left: px(fr.x + fr.width), top: px(fr.y + fr.height / 2) });
+  const eY = OVW.lay.bounds.get(L.anchorKey);
+  en.hidden = !eY; en.classList.toggle('top', top);
+  if (eY) put(en, top ? { left: px(eY.x + eY.width / 2), top: px(eY.y) } : { left: px(eY.x), top: px(eY.y + eY.height / 2) });
+  // 핀·메모 — NAI 처럼 z 차례로 겹친다(보드 안 쌓임 순서만 바꾸고 요소는 옮기지 않는다: 끄는 중의 포인터 잡기가 풀리지 않게)
+  const items = $('#pbItems'), order = [...L.images.map(q => ({ z: q.pin.item.z, id: q.pin.item.id })), ...L.notes.map(q => ({ z: q.item.z, id: q.item.id }))].sort((a, c) => a.z - c.z);
+  const rank = new Map(order.map((o, i) => [o.id, i + 1])), seenP = new Set(), seenN = new Set();
+  const wallPin = OVW.wall && OVW.wall.pin;
+  for (const q of L.images) {
+    if (!ovwHit(q.rect, vis)) continue;
+    const id = q.pin.item.id; seenP.add(id);
+    let el = PBU.pins.get(id);
+    if (!el) { el = pbPinEl(); items.appendChild(el); PBU.pins.set(id, el); }
+    el._q = q; el.dataset.boardItemId = id;
+    const t = el._tmp, ratio = pbRatio(q.pin.it), X = Math.max(120, Math.min(2400, q.pin.item.width + (t ? t.dw : 0)));
+    put(el, { left: px(q.rect.x), top: px(q.rect.y), width: px(X), height: px(Math.max(1, Math.round(X * ratio))), transform: t ? `translate(${t.dx}px, ${t.dy}px)` : '', cursor: q.pin.item.locked ? 'default' : 'grab', zIndex: String(rank.get(id) || 1) });
+    const img = el.firstChild, src = viewUrlOf(q.pin.it); if (el._src !== src) { img.src = src; el._src = src; }
+    img.classList.toggle('pixelated', q.pin.it.tool === 'pixel-snap');
+    const sel = wallPin === id; el.classList.toggle('sel', sel); el.classList.toggle('locked', !!q.pin.item.locked);
+    el.querySelector('.pb-ring').style.display = sel ? '' : 'none';
+    pbOldOverlay(el, q.pin.it, sel);
+    const lk = el.querySelector('[data-a="lock"]'); lk.dataset.active = q.pin.item.locked ? 'true' : 'false'; lk.title = q.pin.item.locked ? '잠금 풀기' : '잠그기'; lk.setAttribute('aria-label', q.pin.item.locked ? 'unlock' : 'lock');
+    el.querySelector('.pb-ah').hidden = !PBU.arrowMode;
+  }
+  for (const [id, el] of PBU.pins) if (!seenP.has(id)) { el.remove(); PBU.pins.delete(id); }
+  for (const q of L.notes) {
+    if (!ovwHit(q.rect, vis)) continue;
+    const id = q.item.id; seenN.add(id);
+    let el = PBU.notes.get(id);
+    if (!el) { el = pbNoteEl(); items.appendChild(el); PBU.notes.set(id, el); }
+    el._q = q; el.dataset.boardItemId = id;
+    const t = el._tmp, W = Math.max(PB.noteMinW, q.item.width + (t ? t.dw : 0)), H = Math.max(PB.noteMinH, q.item.height + (t ? t.dh : 0));
+    put(el, { left: px(q.rect.x), top: px(q.rect.y), width: px(W), height: px(H), transform: t ? `translate(${t.dx}px, ${t.dy}px)` : '', zIndex: String(rank.get(id) || 1) });
+    el.classList.toggle('locked', !!q.item.locked);
+    el.querySelector('.pb-nhead').style.cursor = q.item.locked ? 'default' : 'grab';
+    const ta = el.querySelector('textarea'); if (document.activeElement !== ta && ta.value !== (q.item.text || '')) ta.value = q.item.text || ''; ta.readOnly = !!q.item.locked;
+    const lk = el.querySelector('[data-a="lock"]'); lk.dataset.active = q.item.locked ? 'true' : 'false'; lk.title = q.item.locked ? '잠금 풀기' : '잠그기'; lk.setAttribute('aria-label', q.item.locked ? 'unlock' : 'lock');
+    el.querySelector('.pb-ah').hidden = !PBU.arrowMode;
+  }
+  for (const [id, el] of PBU.notes) if (!seenN.has(id)) { el.remove(); PBU.notes.delete(id); }
+  pbArrowsRender();
+  pbGuidesRender();
+}
+function pbOldOverlay(el, it, sel) {   // NAI UN: 고른 그림에서 «원본» 단추를 누르는 동안 원본과 마스크(30%)
+  const old = el.querySelector('.ovw-old'), om = el.querySelector('.ovw-oldmask'); if (!old || !om) return;
+  if (sel && R.showOld && it && it.orig) { const u = origUrlsOf(it); if (old.src !== u.orig) old.src = u.orig; old.hidden = false; if (u.mask) { if (om.src !== u.mask) om.src = u.mask; om.hidden = false; } else om.hidden = true; }
+  else { old.hidden = true; om.hidden = true; }
+}
+function pbArrowsRender() {
+  const L = OVW.board, svg = $('#pbArrows'), del = $('#pbArrowDel'); if (!L || !svg || !del) return;
+  const fr = L.frame, act = PBU.active;
+  // 판을 옮길 때마다(한 장면에 한 번) 다시 만들지 않는다 — 배치·끄는 것·그리는 화살표·고른 화살표가 바뀔 때만
+  const k = PBU.arrKey; if (k && k.b === L && k.a === act && k.d === PBU.draft && k.s === PBU.selArrow) return;
+  PBU.arrKey = { b: L, a: act, d: PBU.draft, s: PBU.selArrow };
+  svg.style.left = fr.x + 'px'; svg.style.top = fr.y + 'px'; svg.style.width = Math.max(1, fr.width) + 'px'; svg.style.height = Math.max(1, fr.height) + 'px';
+  const ov = (anc, ref) => (act && ref && ref.itemId === act.id ? { rect: act.rect, point: { x: act.rect.x + act.rect.width / 2, y: act.rect.y + act.rect.height / 2 } } : anc);
+  let html = '', mid = null;
+  for (const a of L.arrows) {
+    const n = ov(a.from, a.item.from), b = ov(a.to, a.item.to);
+    const g = pbArrowGeom(n.rect ? pbEdgePt(n.rect, b.point) : n.point, b.rect ? pbEdgePt(b.rect, n.point) : b.point, n.rect, b.rect, fr);
+    const sel = a.item.id === PBU.selArrow; if (sel) mid = g.mid;
+    html += `<g><path class="pb-ahit" data-id="${a.item.id}" d="${g.path}"/><path class="pb-aline${sel ? ' sel' : ''}" d="${g.path}"/><polyline class="pb-ahead${sel ? ' sel' : ''}" points="${g.head}"/></g>`;
+  }
+  const dr = PBU.draft;
+  if (dr) {
+    const fRect = L.rectOf.get(dr.fromId), e = dr.end;
+    if (fRect && !(e.x >= fRect.x && e.x <= fRect.x + fRect.width && e.y >= fRect.y && e.y <= fRect.y + fRect.height)) {
+      const g = pbArrowGeom(pbEdgePt(fRect, e), e, fRect, undefined, fr);
+      html += `<g class="pb-draft"><path class="pb-aline" d="${g.path}"/><polyline class="pb-ahead" points="${g.head}"/></g>`;
+    }
+  }
+  svg.innerHTML = html;
+  del.hidden = !mid; if (mid) { del.style.left = mid.x + 'px'; del.style.top = mid.y + 'px'; }
+}
+function pbGuidesRender() {
+  const box = $('#pbGuides'); if (!box || box._g === PBU.guides) return;
+  box._g = PBU.guides;
+  box.innerHTML = PBU.guides.map(g => (g.axis === 'x'
+    ? `<div class="pb-guide" style="left:${g.pos}px;top:${g.start}px;height:${g.end - g.start}px;width:calc(1px * var(--ovw-ui, 1));transform:translateX(-50%)"></div>`
+    : `<div class="pb-guide" style="top:${g.pos}px;left:${g.start}px;width:${g.end - g.start}px;height:calc(1px * var(--ovw-ui, 1));transform:translateY(-50%)"></div>`)).join('');
+}
+function pbMenuRender() {
+  const m = $('#pbMenu'); if (!m) return;
+  const s = pbState(), sig = JSON.stringify([PBU.menu, PBU.renaming, s.activeBoardId, s.boards.map(b => [b.id, b.name])]);
+  if (sig === PBU.menuSig) return;
+  PBU.menuSig = sig; m.hidden = !PBU.menu;
+  if (!PBU.menu) { m.innerHTML = ''; return; }
+  const E = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  m.innerHTML = s.boards.map(b => `<div class="pb-mrow" data-id="${E(b.id)}" data-active="${b.id === s.activeBoardId}">`
+    + (PBU.renaming === b.id ? `<input class="pb-mren" value="${E(PBU.renameText)}" spellcheck="false">` : `<button type="button" class="pb-mname">${E(b.name || '핀')}</button>`)
+    + `<div class="pb-mbtns"><button type="button" data-a="ren" title="이름 바꾸기" aria-label="rename board">✏</button>${s.boards.length > 1 ? '<button type="button" data-a="del" title="보드 지우기" aria-label="delete board">🗑</button>' : ''}</div></div>`).join('')
+    + '<button type="button" class="pb-mnew">+ 새 보드</button>';
+  const inp = m.querySelector('.pb-mren');
+  if (inp) {
+    const id = PBU.renaming, done = keep => { if (PBU.renaming !== id) return; if (keep) pbRenameBoard(id, inp.value.trim()); PBU.renaming = null; pbMenuRender(); pbRender(ovwPad(ovwViewRect(), 400 / OVW.cam.scale)); };
+    inp.oninput = () => { PBU.renameText = inp.value; };
+    inp.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter') done(true); else if (e.key === 'Escape') done(false); };
+    inp.onblur = () => done(true);
+    setTimeout(() => { try { inp.focus(); inp.select(); } catch (e) { logErr('보드 이름 칸 초점 실패: ' + e.message); } }, 0);
+  }
+}
+function pbPinEl() {
+  const el = document.createElement('div'); el.className = 'pb-pin';
+  el.innerHTML = '<img alt="" draggable="false"><img class="ovw-old" alt="" hidden><img class="ovw-oldmask" alt="" hidden>'
+    + '<svg class="pb-ring" style="display:none"><rect x="0" y="0" width="100%" height="100%" rx="8"/></svg>'
+    + '<div class="pb-ov"><button type="button" data-a="orig" title="원래 그림으로 가기" aria-label="go to pinned image">↗</button><button type="button" data-a="lock" title="잠그기" aria-label="lock">🔒</button><button type="button" data-a="del" title="보드에서 빼기" aria-label="remove from board">🗑</button></div>'
+    + '<button type="button" class="pb-rs" aria-label="resize"></button><button type="button" class="pb-ah" aria-label="draw arrow from this item" hidden></button>';
+  pbBindItem(el, 'image');
+  return el;
+}
+function pbNoteEl() {
+  const el = document.createElement('div'); el.className = 'pb-note';
+  el.innerHTML = '<div class="pb-nhead"><div class="pb-nbtns"><button type="button" data-a="lock" title="잠그기" aria-label="lock">🔒</button><button type="button" data-a="del" title="메모 지우기" aria-label="remove note">🗑</button></div></div>'
+    + '<textarea class="pb-ntext" spellcheck="false" placeholder="메모"></textarea><button type="button" class="pb-rs" aria-label="resize"></button><button type="button" class="pb-ah" aria-label="draw arrow from this item" hidden></button>';
+  pbBindItem(el, 'note');
+  return el;
+}
+/* 핀(U9)·메모(ze) 끌기·크기 바꾸기·누르기 */
+function pbBindItem(el, kind) {
+  const vis = () => ovwPad(ovwViewRect(), 400 / OVW.cam.scale);
+  el.addEventListener('pointerdown', e => {
+    const q = el._q; if (!q) return;
+    if (e.target.closest('.pb-ah') || e.target.closest('textarea')) return;
+    const isRs = !!e.target.closest('.pb-rs');
+    if (e.pointerType === 'mouse' && e.button !== 0) return;   // 가운데 단추 등은 판으로 넘겨 옮기기 (NAI 와 같음)
+    if (!isRs && e.target.closest('button')) return;
+    if (kind === 'note' && !isRs && !e.target.closest('.pb-nhead')) return;   // 메모는 머리 줄로만 끈다
+    e.stopPropagation(); if (isRs) e.preventDefault();
+    try { el.setPointerCapture(e.pointerId); } catch (er) { logErr('보드 끌기 잡기 실패: ' + er.message); }
+    el._g = { mode: isRs ? 'resize' : 'drag', sx: e.clientX, sy: e.clientY, moved: false };
+    const it = kind === 'image' ? q.pin.item : q.item;
+    if (!it.locked) pbFront(it.id);
+  });
+  el.addEventListener('pointermove', e => {
+    const g = el._g, q = el._q, L = OVW.board; if (!g || !q || !L) return;
+    const i = OVW.cam.scale || 1, r = e.clientX - g.sx, n = e.clientY - g.sy;
+    if (!g.moved && Math.hypot(r, n) > 5) g.moved = true;
+    if (!g.moved) return;
+    const snap = !e.altKey, thr = 8 / i, gthr = 4 / i, B = q.rect;
+    if (kind === 'image') {
+      const V = q.pin.item, ratio = pbRatio(q.pin.it);
+      const tg = snap ? [...L.images.filter(x => x.pin.item.id !== V.id).map(x => x.rect), ...L.notes.map(x => x.rect)] : [];
+      if (g.mode === 'drag') {
+        if (V.locked) return;
+        const lim = L.origin.x + PB.defW - V.width; let t = Math.min(lim, B.x + r / i), c = B.y + n / i;
+        if (snap) { const s = pbSnapMove({ x: t, y: c, width: B.width, height: B.height }, tg, L.frame, thr, gthr); t = Math.min(lim, s.x); c = s.y; PBU.guides = s.guides; } else PBU.guides = [];
+        el._tmp = { dx: t - B.x, dy: c - B.y, dw: 0 }; PBU.active = { id: V.id, rect: { x: t, y: c, width: B.width, height: B.height } };
+      } else {
+        const lim = PB.defW - V.x; let t = Math.max(120, Math.min(2400, lim, V.width + r / i));
+        if (snap) { const s = pbSnapResizeAspect({ x: B.x, y: B.y, width: t, height: t * ratio }, ratio, tg, L.frame, thr, gthr); t = Math.max(120, Math.min(2400, lim, s.width)); PBU.guides = s.guides; } else PBU.guides = [];
+        el._tmp = { dx: 0, dy: 0, dw: t - V.width }; PBU.active = { id: V.id, rect: { x: B.x, y: B.y, width: t, height: Math.round(t * ratio) } };
+      }
+    } else {
+      const N = q.item, tg = snap ? [...L.images.map(x => x.rect), ...L.notes.filter(x => x.item.id !== N.id).map(x => x.rect)] : [];
+      if (g.mode === 'drag') {
+        if (N.locked) return;
+        const lim = L.origin.x + PB.defW - N.width; let s = Math.min(lim, B.x + r / i), l = B.y + n / i;
+        if (snap) { const z = pbSnapMove({ x: s, y: l, width: B.width, height: B.height }, tg, L.frame, thr, gthr); s = Math.min(lim, z.x); l = z.y; PBU.guides = z.guides; } else PBU.guides = [];
+        el._tmp = { dx: s - B.x, dy: l - B.y, dw: 0, dh: 0 }; PBU.active = { id: N.id, rect: { x: s, y: l, width: B.width, height: B.height } };
+      } else {
+        const a = PB.defW - N.x; let o = Math.max(PB.noteMinW, Math.min(a, N.width + r / i)), s = Math.max(PB.noteMinH, N.height + n / i);
+        if (snap) { const z = pbSnapResizeFree({ x: B.x, y: B.y, width: o, height: s }, tg, L.frame, thr, gthr); o = Math.max(PB.noteMinW, Math.min(a, z.width)); s = Math.max(PB.noteMinH, z.height); PBU.guides = z.guides; } else PBU.guides = [];
+        el._tmp = { dx: 0, dy: 0, dw: o - N.width, dh: s - N.height }; PBU.active = { id: N.id, rect: { x: B.x, y: B.y, width: o, height: s } };
+      }
+    }
+    pbRender(vis());
+  });
+  const up = e => {
+    const g = el._g, q = el._q; el._g = null; PBU.guides = []; PBU.active = null;
+    try { if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId); } catch (er) { logErr('보드 끌기 놓기 실패: ' + er.message); }
+    const t = el._tmp; el._tmp = null;
+    if (!g || !q) return;
+    if (g.moved && t) {
+      if (kind === 'image') {
+        const V = q.pin.item;
+        if (g.mode === 'drag' && !V.locked) pbItemUpdate(V.id, { x: Math.min(PB.defW - V.width, V.x + t.dx), y: V.y + t.dy });
+        else if (g.mode === 'resize') pbItemUpdate(V.id, { width: Math.round(Math.max(120, Math.min(2400, PB.defW - V.x, V.width + t.dw))) });
+        else pbRender(vis());
+      } else {
+        const N = q.item;
+        if (g.mode === 'drag' && !N.locked) pbItemUpdate(N.id, { x: Math.min(PB.defW - N.width, N.x + t.dx), y: N.y + t.dy });
+        else if (g.mode === 'resize') pbItemUpdate(N.id, { width: Math.round(Math.max(PB.noteMinW, Math.min(PB.defW - N.x, N.width + t.dw))), height: Math.round(Math.max(PB.noteMinH, N.height + t.dh)) });
+        else pbRender(vis());
+      }
+      return;
+    }
+    pbRender(vis());
+    if (e.type === 'pointerup' && kind === 'image' && !g.moved && g.mode === 'drag') pbPinClick(q, e);
+  };
+  el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up);
+  el.addEventListener('click', e => {   // 단추 (NAI zt·zj) — 판의 누르기로 넘기지 않는다
+    e.stopPropagation();
+    const b = e.target.closest('button[data-a]'), q = el._q; if (!b || !q) return;
+    const it = kind === 'image' ? q.pin.item : q.item, a = b.dataset.a;
+    if (a === 'lock') pbToggleLock(it.id);
+    else if (a === 'del') pbRemove(it.id);
+    else if (a === 'orig' && kind === 'image') {   // NAI «go to pinned image»: 원래 묶음의 그 그림을 고르고 날아간다
+      OVW.wall = null; OVW.prev = null; OVW.groupOnly = false;
+      const idx = R.hist.indexOf(q.pin.it); if (idx >= 0) { if (curItem() !== q.pin.it) showImage(idx); ovwRender(); ovwFitCur(true); }
+    }
+  });
+  if (kind === 'note') {
+    const ta = el.querySelector('textarea');
+    ta.addEventListener('pointerdown', e => { e.stopPropagation(); const q = el._q; if (q) pbFront(q.item.id); });
+    ta.addEventListener('input', () => { const q = el._q; if (!q) return; const b = pbActive(), x = b.items.find(y => y.id === q.item.id); if (x) { x.text = ta.value; save(); } });
+    ta.addEventListener('wheel', e => e.stopPropagation(), { passive: true });
+  }
+  // 화살표 그리기 손잡이 (NAI zr): 그 것에서 끌어 다른 것 위에서 놓으면 화살표
+  const ah = el.querySelector('.pb-ah');
+  ah.addEventListener('click', e => e.stopPropagation());
+  ah.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const q = el._q; if (!q) return;
+    e.stopPropagation(); e.preventDefault();
+    ah._pid = e.pointerId;   // 잡은 포인터 (NAI 는 hasPointerCapture 로 본다 — 같은 뜻)
+    try { ah.setPointerCapture(e.pointerId); } catch (er) { logErr('화살표 잡기 실패: ' + er.message); }
+    PBU.draft = { fromId: kind === 'image' ? q.pin.item.id : q.item.id, end: pbClientToWorld(e.clientX, e.clientY) }; pbArrowsRender();
+  });
+  ah.addEventListener('pointermove', e => { if (!PBU.draft || ah._pid !== e.pointerId) return; PBU.draft = { ...PBU.draft, end: pbClientToWorld(e.clientX, e.clientY) }; pbArrowsRender(); });
+  ah.addEventListener('pointerup', e => {
+    if (ah._pid !== e.pointerId) return;
+    ah._pid = null;
+    try { if (ah.hasPointerCapture(e.pointerId)) ah.releasePointerCapture(e.pointerId); } catch (er) { logErr('화살표 놓기 실패: ' + er.message); }
+    const d = PBU.draft; PBU.draft = null;
+    const t = document.elementFromPoint(e.clientX, e.clientY), host = t && t.closest('[data-board-item-id]'), to = host && host.dataset.boardItemId;
+    if (d && to && to !== d.fromId && OVW.board && OVW.board.rectOf.has(to)) pbItemsSet(xs => [...xs, pbMakeArrow({ itemId: d.fromId }, { itemId: to }, pbTopZ(xs) + 1)]);
+    else pbArrowsRender();
+  });
+  ah.addEventListener('pointercancel', e => {
+    if (ah._pid !== e.pointerId) return; ah._pid = null;
+    try { if (ah.hasPointerCapture(e.pointerId)) ah.releasePointerCapture(e.pointerId); } catch (er) { logErr('화살표 놓기 실패: ' + er.message); }
+    PBU.draft = null; pbArrowsRender();
+  });
+}
+function pbPinClick(q, e) {   // NAI U9 누르기
+  if (e.ctrlKey || e.metaKey || e.shiftKey) { histCopyClick(q.pin.it, e); return; }
+  if (OVW.wall && OVW.wall.pin === q.pin.item.id) { OVW.wall = { pin: null }; ovwRender(); if (OVW.board) ovwFlyRect(OVW.board.bounds, true); }
+  else pbSelectWall(q.pin.item.id, true);
+}
+/* 보드 판·머리 줄·끝 손잡이·드나드는 단추 (NAI UK·zI) */
+function pbBind(wrap) {
+  const rerender = () => pbRender(ovwPad(ovwViewRect(), 400 / OVW.cam.scale));
+  wrap.querySelector('#pbFrame').addEventListener('click', e => {   // 판의 빈 곳 = 핀 보드 고르기
+    e.stopPropagation();
+    if (OVW.wasDrag) { OVW.wasDrag = false; return; }
+    PBU.selArrow = null;
+    if (performance.now() - PBU.menuT >= 350 && PBU.menu) { PBU.menu = false; PBU.renaming = null; }
+    pbSelectWall(null, true);
+  });
+  wrap.querySelector('#pbHead').addEventListener('click', e => e.stopPropagation());
+  wrap.querySelector('#pbHead').addEventListener('pointerdown', e => { if (e.target.closest('button,input,.pb-menu')) e.stopPropagation(); });
+  wrap.querySelector('#pbName').addEventListener('click', e => {
+    e.stopPropagation();
+    const now = performance.now(); if (now - PBU.menuT < 350) return;
+    PBU.menuT = now; PBU.renaming = null; PBU.menu = !PBU.menu; pbMenuRender();
+  });
+  wrap.querySelector('#pbMenu').addEventListener('click', e => {
+    e.stopPropagation();
+    const row = e.target.closest('.pb-mrow'), s = pbState();
+    if (e.target.closest('.pb-mnew')) { pbAddBoard(`보드 ${s.boards.length + 1}`); PBU.menu = false; pbChanged(); pbReveal(); return; }
+    if (!row) return;
+    const id = row.dataset.id, a = e.target.closest('button[data-a]');
+    if (a && a.dataset.a === 'ren') { const b = s.boards.find(x => x.id === id); PBU.renaming = id; PBU.renameText = b ? b.name : ''; pbMenuRender(); return; }
+    if (a && a.dataset.a === 'del') { pbDeleteBoard(id); pbChanged(); return; }
+    if (e.target.closest('.pb-mname')) { const was = s.activeBoardId; pbSetActive(id); PBU.menu = false; pbChanged(); if (id !== was) pbReveal(); }
+  });
+  wrap.querySelector('#pbAddNote').addEventListener('click', e => {   // NAI: 보이는 곳 가운데에 메모
+    e.stopPropagation(); const L = OVW.board; if (!L) return;
+    const v = ovwViewRect();
+    pbItemsSet(xs => [...xs, pbMakeNote(v.x + v.width / 2 - L.origin.x, v.y + v.height / 2 - L.origin.y, pbTopZ(xs) + 1)]);
+  });
+  wrap.querySelector('#pbArrowMode').addEventListener('click', e => { e.stopPropagation(); PBU.arrowMode = !PBU.arrowMode; rerender(); });
+  const svg = wrap.querySelector('#pbArrows');
+  svg.addEventListener('click', e => { const p = e.target.closest('.pb-ahit'); if (!p) return; e.stopPropagation(); PBU.selArrow = p.dataset.id; pbArrowsRender(); });
+  const del = wrap.querySelector('#pbArrowDel');
+  del.addEventListener('pointerdown', e => e.stopPropagation());
+  del.addEventListener('click', e => { e.stopPropagation(); const id = PBU.selArrow; PBU.selArrow = null; if (id) pbRemove(id); });
+  const ex = wrap.querySelector('#pbExit'), en = wrap.querySelector('#pbEnter');
+  for (const b of [ex, en]) b.addEventListener('pointerdown', e => e.stopPropagation());
+  ex.addEventListener('click', e => { e.stopPropagation(); pbJumpToGen(); });
+  en.addEventListener('click', e => { e.stopPropagation(); pbSelectWall(null, true); });
+  // 보드 크기 바꾸기 (왼쪽·위·아래·두 모서리, 오른쪽 끝은 결과 쪽이라 고정) · 두 번 누르면 저절로 맞춤
+  for (const d of wrap.querySelectorAll('.pb-edge')) {
+    const k = d.dataset.k, edges = { left: k.includes('left'), top: k.startsWith('top'), bottom: k.startsWith('bottom') };
+    d.addEventListener('pointerdown', e => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      const L = OVW.board; if (!L) return;
+      e.stopPropagation(); e.preventDefault();
+      try { d.setPointerCapture(e.pointerId); } catch (er) { logErr('보드 크기 잡기 실패: ' + er.message); }
+      PBU.rz = { sx: e.clientX, sy: e.clientY, frame: L.frame, edges, moved: false, latest: L.frame };
+    });
+    d.addEventListener('pointermove', e => {
+      const t = PBU.rz; if (!t) return;
+      const i = OVW.cam.scale || 1, r = e.clientX - t.sx, n = e.clientY - t.sy;
+      if (!t.moved && Math.hypot(r, n) > 5) t.moved = true;
+      if (!t.moved) return;
+      const a = n / i, o = t.frame.x + t.frame.width, s = t.frame.y + t.frame.height; let { x: l, y: u, width: p, height: m } = t.frame;
+      if (t.edges.left) { l = Math.min(t.frame.x + r / i, o - PB.minW); p = o - l; }
+      if (t.edges.top) { u = Math.min(t.frame.y + a, s - PB.minH); m = s - u; }
+      if (t.edges.bottom) m = Math.max(PB.minH, t.frame.height + a);
+      t.latest = { x: l, y: u, width: p, height: m }; PBU.resizeFrame = t.latest; rerender();
+    });
+    const up = e => {
+      const t = PBU.rz; PBU.rz = null;
+      try { if (d.hasPointerCapture(e.pointerId)) d.releasePointerCapture(e.pointerId); } catch (er) { logErr('보드 크기 놓기 실패: ' + er.message); }
+      PBU.resizeFrame = null;
+      if (!t || !t.moved || !OVW.board) { rerender(); return; }
+      const o = OVW.board.origin, L = t.latest;
+      pbSetSize({ x: Math.round(L.x - o.x), y: Math.round(L.y - o.y), width: Math.round(L.width), height: Math.round(L.height) }); pbChanged();
+    };
+    d.addEventListener('pointerup', up); d.addEventListener('pointercancel', up);
+    d.addEventListener('click', e => e.stopPropagation());
+    d.addEventListener('dblclick', e => { e.stopPropagation(); pbSetSize(undefined); pbChanged(); });
+  }
 }
 /* 필드를 손으로 나열하면, 목록에 없는 필드는 put 이 레코드를 통째로 갈아끼울 때
    조용히 지워진다. 예를 들어 채점 결과를 붙여 놓고 ★즐겨찾기를 누르면 그 순간
@@ -4410,6 +5062,7 @@ async function saveItem(item, strip, silent) {
   downloadBlob(blob, name); markSaved(item, 'download', silent);
 }
 async function bulkSave(items, strip) {   // 일괄 저장 — 진행 표시 + 마지막에 한 번만 갱신
+  items = items.filter(it => !it.varOrig);   // NAI: 변형 묶음의 원본(ORIGINAL)은 받지 않는다 (ZIP 과 같음)
   let n = 0;
   for (const it of items) { await saveItem(it, strip, true); n++; if (n % 5 === 0) $('#genStatus').textContent = `저장 중… ${n}/${items.length}`; }
   refreshAfterBulk(); $('#genStatus').textContent = ''; toast(`${n}장 저장됨`);
@@ -6038,9 +6691,11 @@ function openSettings() {
     stm.onchange = () => { S.stream = stm.checked; S.streamOffAuto = false; save(); toast(stm.checked ? '실시간 미리보기 켬' : '실시간 미리보기 끔 — 다 그려진 뒤 한 번에 받습니다'); };
     const sc = body.querySelector('#mShowChunks'); sc.checked = !!S.showChunkBars; sc.onchange = () => { S.showChunkBars = sc.checked; document.body.classList.toggle('show-chunks', sc.checked); save(); };
     const ri = body.querySelector('#mRawInter'); ri.checked = !!S.rawIntermediates; ri.onchange = () => { S.rawIntermediates = ri.checked; save(); };
-    { // 파일 이름 틀 — 미리 보기는 지금 보는 그림(없으면 지금 설정으로 만든 보기 그림)으로
+    { // 파일 이름 틀 — 미리 보기는 NAI 처럼 가장 최근 결과 묶음부터 차례로, 프롬프트나 시드가 있는 첫 그림(변형 묶음의 원본은 뺌).
+      //  없으면 지금 설정으로 만든 보기 그림 (12.20 까지는 지금 보는 그림이었다)
       const on = body.querySelector('#mFnOn'), inp = body.querySelector('#mFnTpl'), row = body.querySelector('#mFnRow'), pv = body.querySelector('#mFnPrev');
-      const sample = () => curItem() || { seed: 1234567890, model: S.model, w: S.w, h: S.h, t: Date.now(), label: '생성',
+      const newestSample = () => { for (const g of ovwGroups()) for (const it of g.items) { if (it.varOrig) continue; if ((it.meta && it.meta.input) || it.seed != null) return it; } return null; };
+      const sample = () => newestSample() || { seed: 1234567890, model: S.model, w: S.w, h: S.h, t: Date.now(), label: '생성',
         meta: { input: genPrompt() || '', uprompt: genPrompt() || '', action: 'generate', parameters: { characterPrompts: (curChars() || []).filter(c => !c.off).map(c => ({ prompt: c.prompt || '', enabled: true })) } } };
       const paint = () => {
         row.hidden = pv.hidden = !on.checked; inp.value = S.fnTpl || FN_TPL_DEFAULT;
@@ -6688,8 +7343,10 @@ function init() {
   });
   $('#btnPrev').onclick = () => stepImage(-1); $('#btnNext').onclick = () => stepImage(1);
   $('#tFav').onclick = () => toggleFav();
-  $('#tSave').onclick = () => { const it = curItem(); if (it) saveItem(it, !!S.stripOnSave); }; // 💾 = 설정("저장 시 메타데이터 제거")을 따름
-  $('#tSaveClean').onclick = () => { const it = curItem(); if (it) saveItem(it, true); };  // 🧹 = 항상 제거
+  // NAI: 변형 묶음의 원본(ORIGINAL)을 고른 채 내려받기를 누르면 아무것도 하지 않는다 — 우리는 까닭을 알린다
+  const saveCur = strip => { const it = curItem(); if (!it) return; if (it.varOrig) { toast('변형 묶음의 원본(ORIGINAL)은 내려받지 않습니다 (NAI 와 같음) — 원래 그림에서 저장하세요'); return; } saveItem(it, strip); };
+  $('#tSave').onclick = () => saveCur(!!S.stripOnSave); // 💾 = 설정("저장 시 메타데이터 제거")을 따름
+  $('#tSaveClean').onclick = () => saveCur(true);  // 🧹 = 항상 제거
   $('#tToI2i').onclick = () => { const it = curItem(); if (it) { setI2I(it.blob, it.meta, true); toast('i2i 소스로 설정됨'); } };   // NAI «바탕 그림으로»: 마스크를 지우고 생성 크기를 맞춘다
   $('#tToVibe').onclick = () => { const it = curItem(); if (it) addVibe(it.blob); };
   $('#tToPref').onclick = () => { const it = curItem(); if (it) addPref(it.blob); };
@@ -6708,6 +7365,7 @@ function init() {
   document.addEventListener('mousedown', e => { const pop = $('#viewPop'); if (pop && !pop.hidden && !(e.target.closest && e.target.closest('.viewpop-wrap'))) pop.hidden = true; });
   $('#tDelete').onclick = deleteCur;
   $('#tSeed').onclick = () => { const it = curItem(); if (it && it.seed != null) { fixSeed(it.seed); toast('시드 고정: ' + it.seed); } };
+  $('#tPin').onclick = () => { const it = curItem(); if (it) pbTogglePin(it); };   // NAI 결과 화면 단추 줄의 핀 (Pin Image / Remove Pinned Image)
   $('#tCopy').onclick = () => { const it = curItem(); if (!it) return;
     openModal('복사', body => {
       const m = it.meta || {};          // meta 없이 저장된 옛 항목도 있다

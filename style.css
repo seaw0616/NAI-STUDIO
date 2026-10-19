@@ -944,11 +944,131 @@ input.sc-name-in:hover, input.sc-name-in:focus { border-bottom-color: var(--acc)
 .ovw-stage.locked { touch-action: auto; }
 .ovw-stage.panning { cursor: grabbing; }
 .ovw-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
-.ovw-tile { position: absolute; cursor: pointer; }
+.ovw-tile { position: absolute; cursor: pointer; background: var(--tbg, transparent); }   /* NAI: 투명한 곳은 «투명 부분 보이기» 무늬 */
 .ovw-tile img { display: block; width: 100%; height: 100%; object-fit: contain; -webkit-user-drag: element; }
 .ovw-tile.sel { outline: var(--ovw-ring, 3px) solid var(--acc); outline-offset: 0; z-index: 1; }
-.vstage.ovw-on #viewerImg, .vstage.ovw-on #viewerBg, .vstage.ovw-on #viewerOldMask, .vstage.ovw-on .vnav { display: none !important; }
+.vstage.ovw-on #viewerImg, .vstage.ovw-on #viewerBg, .vstage.ovw-on #viewerOldMask, .vstage.ovw-on .vnav, .vstage.ovw-on #viewerOrigTag { display: none !important; }
 .vstage.ovw-on #varBar, .vstage.ovw-on #enhPanel, .vstage.ovw-on #genBar, .vstage.ovw-on #previewImg { z-index: 3; }
+/* 고른 그림에서 «원본»을 누르는 동안: 원본과 인페인트 마스크 30% (NAI UN) */
+.ovw-tile img.ovw-old, .pb-pin img.ovw-old, .ovw-tile img.ovw-oldmask, .pb-pin img.ovw-oldmask { position: absolute; inset: 0; pointer-events: none; }
+.ovw-tile img.ovw-oldmask, .pb-pin img.ovw-oldmask { opacity: .3; image-rendering: pixelated; }
+/* 변형 결과 묶음 맨 앞의 원본 «ORIGINAL» (NAI FakeOverLayButton — 그림 왼쪽 위 10px) */
+.orig-tag { position: absolute; top: 10px; left: 10px; z-index: 2; padding: 3px 8px; border-radius: 4px; background: #000a; color: #fff; font-size: 12px; font-weight: 700; letter-spacing: .04em; pointer-events: none; }
+.orig-tag[hidden] { display: none; }
+.hitem .orig-tag { top: 4px; left: 4px; padding: 1px 4px; font-size: 9px; }
+#viewerOrigTag { z-index: 2; }
+/* 마우스를 올리면 뜨는 단추: 아래 가운데 «핀·복사·내려받기», 오른쪽 위 시드 (NAI ImageGridHover·ImageGridHoverTopRight) — 고른 그림에는 안 뜬다 */
+.ovw-hov, .ovw-seed { position: absolute; z-index: 3; opacity: 0; transition: opacity .15s ease; }
+.ovw-tile:hover .ovw-hov, .ovw-tile:hover .ovw-seed { opacity: 1; }
+.ovw-tile.sel .ovw-hov, .ovw-tile.sel .ovw-seed { display: none; }
+.ovw-hov { left: 50%; bottom: 10px; display: flex; gap: 2px; padding: 3px; border-radius: 8px; background: color-mix(in srgb, var(--bg1) 85%, transparent); border: 1px solid var(--bg3);
+  transform: translateX(-50%) scale(var(--ovw-ui, 1)); transform-origin: bottom center; }
+.ovw-hov button, .ovw-seed { border: none; background: transparent; padding: 6px 8px; border-radius: 6px; font-size: 15px; line-height: 1; }
+.ovw-hov button:hover, .ovw-seed:hover { background: var(--bg3); }
+.ovw-hov button[hidden] { display: none; }
+.ovw-hov button[data-a="pin"] { filter: grayscale(1); opacity: .7; }
+.ovw-hov button[data-a="pin"].on { filter: none; opacity: 1; background: color-mix(in srgb, var(--acc) 30%, transparent); }
+.ovw-seed { top: 10px; right: 10px; display: flex; align-items: center; gap: 0; background: color-mix(in srgb, var(--bg1) 85%, transparent); border: 1px solid var(--bg3);
+  transform: scale(var(--ovw-ui, 1)); transform-origin: top right; color: var(--txt); }
+.ovw-seed[hidden] { display: none; }
+.ovw-seed span { display: inline-block; overflow: hidden; max-width: 0; opacity: 0; white-space: nowrap; font-size: 13px;
+  transition: max-width .3s cubic-bezier(.22, 1, .36, 1), opacity .2s ease, margin-right .3s cubic-bezier(.22, 1, .36, 1); }
+.ovw-seed:hover span { max-width: 140px; opacity: 1; margin-right: 6px; }
+#tPin { filter: grayscale(1); opacity: .75; }
+#tPin.on { filter: none; opacity: 1; background: var(--accT); }
+
+/* NAI 핀 보드 (빌드 b50892a UK·U9·ze·zs·zI — 모양·크기 값 그대로) — 판 위 글·단추는 --ovw-ui(= min(2.5, 1/배율))로 늘 화면 크기 */
+.pb-wrap { position: absolute; left: 0; top: 0; width: 0; height: 0; overflow: visible; }
+.pb-wrap[hidden] { display: none; }
+.pb-wrap button { background: none; border: none; color: inherit; padding: 0; }
+.pb-frame { position: absolute; border-radius: 0 0 18px 18px; background-color: var(--bg2); border: 1px solid var(--bg3); border-top: none;
+  box-shadow: 0 8px 40px color-mix(in srgb, var(--bg0) 50%, transparent); overflow: hidden; }
+.pb-frame::before, .pb-frame::after { content: ''; position: absolute; inset: 0; background-position: right bottom; pointer-events: none; }
+.pb-frame::before { background-image: linear-gradient(color-mix(in srgb, var(--txt) 7%, transparent) 1px, transparent 1px), linear-gradient(90deg, color-mix(in srgb, var(--txt) 7%, transparent) 1px, transparent 1px);
+  background-size: 64px 64px; opacity: clamp(0, calc((var(--ovw-scale, 1) - .35) * 3.5), 1); }
+.pb-frame::after { background-image: linear-gradient(color-mix(in srgb, var(--txt) 10%, transparent) 1.5px, transparent 1.5px), linear-gradient(90deg, color-mix(in srgb, var(--txt) 10%, transparent) 1.5px, transparent 1.5px);
+  background-size: 320px 320px; }
+.pb-headbg { position: absolute; z-index: 4; pointer-events: none; transform: translateY(-100%); height: calc(60px * var(--ovw-ui, 1)); background-color: var(--bg2);
+  border: 1px solid var(--bg3); border-bottom: none; border-radius: 18px 18px 0 0; box-shadow: 0 -4px 24px color-mix(in srgb, var(--bg0) 35%, transparent); }
+.pb-head { position: absolute; z-index: 25; pointer-events: none; transform: translateY(-100%); height: calc(60px * var(--ovw-ui, 1)); box-sizing: border-box;
+  display: flex; align-items: center; justify-content: space-between; padding: 0 calc(28px * var(--ovw-ui, 1)); gap: calc(16px * var(--ovw-ui, 1)); }
+.pb-namewrap { position: relative; pointer-events: auto; transform: scale(var(--ovw-ui, 1)); transform-origin: left center; }
+.pb-wrap .pb-name { display: flex; align-items: center; gap: 10px; padding: 4px 8px; border: 1px solid var(--bg3); background: color-mix(in srgb, var(--bg1) 70%, transparent);
+  border-radius: 6px; font-size: 24px; font-weight: 600; color: var(--acc); white-space: nowrap; }
+.pb-wrap .pb-name:hover { background: var(--bg3); }
+.pb-pinico { font-size: 20px; opacity: .7; }
+.pb-chev { font-size: 16px; }
+.pb-menu { position: absolute; top: calc(100% + 8px); left: 0; z-index: 30; min-width: 240px; padding: 6px; display: flex; flex-direction: column; gap: 2px; border-radius: 10px;
+  background: var(--bg1); border: 1px solid var(--bg3); box-shadow: 0 8px 30px color-mix(in srgb, var(--bg0) 50%, transparent); }
+.pb-menu[hidden] { display: none; }
+.pb-mrow { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; font-size: 18px; color: var(--txt); }
+.pb-mrow:hover { background: var(--bg2); }
+.pb-mrow[data-active="true"] { background: color-mix(in srgb, var(--acc) 25%, transparent); }
+.pb-wrap .pb-mname { flex: 1 1 auto; text-align: left; font: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pb-mren { flex: 1 1 auto; min-width: 0; border: 1px solid var(--bg3); border-radius: 4px; padding: 2px 6px; background: var(--bg2); color: var(--txt); font: inherit; user-select: text; }
+.pb-mbtns { display: flex; align-items: center; gap: 2px; opacity: 0; transition: opacity .12s ease; }
+.pb-mrow:hover .pb-mbtns { opacity: 1; }
+.pb-wrap .pb-mbtns button { display: flex; align-items: center; justify-content: center; padding: 5px; border-radius: 4px; font-size: 13px; }
+.pb-wrap .pb-mbtns button:hover { background: var(--bg3); }
+.pb-wrap .pb-mnew { margin-top: 2px; padding: 8px; border-top: 1px solid var(--bg3); color: var(--acc); font-size: 16px; font-weight: 600; text-align: left; border-radius: 0 0 6px 6px; }
+.pb-wrap .pb-mnew:hover { background: var(--bg2); }
+.pb-tools { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; pointer-events: auto; transform: scale(var(--ovw-ui, 1)); transform-origin: right center; }
+.pb-wrap .pb-tool { display: flex; align-items: center; justify-content: center; padding: 8px; border-radius: 6px; font-size: 20px; line-height: 1; color: var(--txt);
+  background: color-mix(in srgb, var(--bg1) 70%, transparent); border: 1px solid var(--bg3); }
+.pb-wrap .pb-tool:hover { background: var(--bg3); }
+.pb-wrap .pb-tool[data-active="true"] { color: var(--bg0); background: var(--acc); border-color: var(--acc); }
+.pb-items { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 10; }
+.pb-pin { position: absolute; touch-action: none; background: var(--tbg, transparent); }
+.pb-pin > img:first-child { display: block; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+.pb-ring { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; z-index: 2; }
+.pb-ring rect { fill: none; stroke: var(--acc); stroke-width: calc(2px * var(--ovw-ui, 1)); stroke-dasharray: 28 20; stroke-linecap: round; }
+.pb-ov { position: absolute; top: 0; left: 0; z-index: 3; display: flex; gap: 2px; padding: 3px; border-radius: calc(8px / var(--ovw-ui, 1)) 0 calc(6px / var(--ovw-ui, 1)) 0;
+  background: color-mix(in srgb, var(--bg2) 80%, transparent); transform: scale(var(--ovw-ui, 1)); transform-origin: top left; opacity: 0; transition: opacity .12s ease; }
+.pb-pin:hover .pb-ov { opacity: 1; }
+.pb-wrap .pb-ov button, .pb-wrap .pb-nbtns button { display: flex; align-items: center; justify-content: center; padding: 5px; border-radius: 3px; font-size: 13px; line-height: 1; }
+.pb-wrap .pb-ov button:hover, .pb-wrap .pb-nbtns button:hover { background: var(--bg3); }
+.pb-wrap .pb-ov button[data-active="true"], .pb-wrap .pb-nbtns button[data-active="true"] { background: color-mix(in srgb, var(--acc) 70%, transparent); }
+.pb-wrap .pb-rs { position: absolute; right: 0; bottom: 0; z-index: 3; width: 24px; height: 24px; cursor: nwse-resize; touch-action: none; transform: scale(var(--ovw-ui, 1));
+  transform-origin: bottom right; opacity: 0; transition: opacity .12s ease; }
+.pb-wrap .pb-rs::after { content: ''; position: absolute; right: 4px; bottom: 4px; width: 12px; height: 12px; border-right: 2px solid var(--txt); border-bottom: 2px solid var(--txt); border-bottom-right-radius: 3px; }
+.pb-pin:hover .pb-rs, .pb-note:hover .pb-rs { opacity: .85; }
+.pb-pin.locked .pb-rs, .pb-note.locked .pb-rs { display: none; }
+.pb-wrap .pb-ah { position: absolute; inset: 0; z-index: 6; cursor: crosshair; touch-action: none; }
+.pb-wrap .pb-ah[hidden] { display: none; }
+.pb-note { position: absolute; display: flex; flex-direction: column; border-radius: 10px; overflow: hidden; background: var(--bg1); border: 1px solid var(--bg3);
+  box-shadow: 0 4px 18px color-mix(in srgb, var(--bg0) 40%, transparent); touch-action: none; }
+.pb-nhead { position: relative; flex: 0 0 auto; height: 40px; background: var(--bg3); border-bottom: 1px solid color-mix(in srgb, var(--bg0) 50%, transparent); }
+.pb-nbtns { position: absolute; top: 0; right: 0; z-index: 3; display: flex; gap: 2px; padding: 3px; background: color-mix(in srgb, var(--bg2) 80%, transparent);
+  border-radius: 0 0 0 calc(6px / var(--ovw-ui, 1)); transform: scale(var(--ovw-ui, 1)); transform-origin: top right; opacity: 0; transition: opacity .12s ease; }
+.pb-note:hover .pb-nbtns { opacity: 1; }
+.pb-ntext { flex: 1 1 auto; width: 100%; min-height: 0; box-sizing: border-box; padding: 14px 16px; border: none; outline: none; resize: none; background: transparent; color: var(--txt);
+  font-family: inherit; font-size: 30px; line-height: 1.4; user-select: text; }
+.pb-ntext::placeholder { color: color-mix(in srgb, var(--txt) 45%, transparent); }
+.pb-arrows { position: absolute; overflow: visible; pointer-events: none; z-index: 12; }
+.pb-arrows .pb-ahit { fill: none; stroke: transparent; stroke-width: 24; stroke-linecap: round; pointer-events: stroke; cursor: pointer; }
+.pb-arrows .pb-aline, .pb-arrows .pb-ahead { fill: none; stroke: var(--acc); stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+.pb-arrows .pb-aline { stroke-dasharray: 27.5 20; }
+.pb-arrows .sel { stroke-width: 8; }
+.pb-arrows .pb-draft { opacity: .7; }
+.pb-wrap .pb-adel { position: absolute; z-index: 16; display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 50%; font-size: 14px;
+  color: var(--txt); background: color-mix(in srgb, var(--bg2) 90%, transparent); border: 1px solid var(--bg3); box-shadow: 0 2px 8px color-mix(in srgb, var(--bg0) 50%, transparent);
+  transform: translate(-50%, -50%) scale(var(--ovw-ui, 1)); }
+.pb-wrap .pb-adel[hidden] { display: none; }
+.pb-wrap .pb-adel:hover { background: var(--bg3); }
+.pb-guides { position: absolute; left: 0; top: 0; z-index: 20; pointer-events: none; }
+.pb-guide { position: absolute; pointer-events: none; background: color-mix(in srgb, var(--acc) 60%, transparent); }
+.pb-edge { position: absolute; z-index: 16; touch-action: none; }
+.pb-edge[data-corner="true"] { z-index: 17; }
+.pb-edge::before { content: ''; position: absolute; inset: 0; opacity: 0; background: color-mix(in srgb, var(--acc) 45%, transparent); transition: opacity .12s ease; }
+.pb-edge:hover::before { opacity: 1; }
+.pb-wrap .pb-exit, .pb-wrap .pb-enter { position: absolute; z-index: 15; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; width: 32px; height: 190px;
+  border-radius: 9px; background: color-mix(in srgb, var(--bg2) 85%, transparent); border: 1px solid var(--bg3); box-shadow: 0 2px 10px color-mix(in srgb, var(--bg0) 40%, transparent); font-size: 15px; }
+.pb-wrap .pb-exit { color: var(--txt); transform: translateY(-50%) scale(var(--ovw-ui, 1)) translateX(24px); transform-origin: left center; }
+.pb-wrap .pb-exit.top { flex-direction: row; width: 190px; height: 32px; transform: translate(-50%, -100%) scale(var(--ovw-ui, 1)) translateY(-76px); transform-origin: center bottom; }
+.pb-wrap .pb-enter { color: var(--acc); transform: translate(-100%, -50%) scale(var(--ovw-ui, 1)) translateX(-20px); transform-origin: right center; }
+.pb-wrap .pb-enter.top { flex-direction: row; width: 190px; height: 32px; transform: translate(-50%, -100%) scale(var(--ovw-ui, 1)) translateY(-20px); transform-origin: center bottom; }
+.pb-wrap .pb-enter[hidden] { display: none; }
+.pb-wrap .pb-exit:hover, .pb-wrap .pb-enter:hover { background: var(--bg3); }
 
 /* NAI 빠른 시작 그림 모음 (빌드 b50892a FI·FA·FD·FN·FO·FR 값 그대로: 위 여백 120 · 글 · 60 · 3열 엇갈림 격자 840 · 그림 832:1216 · 둥근 모서리 8) */
 .qs-gallery { position: absolute; inset: 0; z-index: 5; background: var(--bg0); overflow: hidden; }

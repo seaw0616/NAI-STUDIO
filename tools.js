@@ -1680,7 +1680,8 @@ async function toolVary() {
   const it = curItem(); if (!it) return;
   const w = snap64(it.w), h = snap64(it.h);
   const randFrom = await randInfoOf((it.vars && it.vars[0] && it.vars[0].blob) || it.blob, null);
-  await doGenerate({ ...ovFromMeta(it.meta), randFrom, image: it.blob, strength: S.varStr, noise: S.varNoise, w, h, n: Math.min(3, batchMax(w, h)), seed: randSeed() }, '변형').catch(() => {});
+  // varOrigOf: NAI 처럼 원본을 «ORIGINAL» 로 결과 묶음 맨 앞에 같이 넣는다 (대조표 A25)
+  await doGenerate({ ...ovFromMeta(it.meta), randFrom, image: it.blob, strength: S.varStr, noise: S.varNoise, w, h, n: Math.min(3, batchMax(w, h)), seed: randSeed(), varOrigOf: it }, '변형').catch(() => {});
 }
 /* ── 업스케일 (NAI 현재 방식) ────────────────────────────────────────────
    NAI 가 업스케일을 바꿨다. 예전: api.novelai.net/ai/upscale {image,width,height,scale:2|4}
@@ -3298,7 +3299,10 @@ function openBackup() {
             if (h.origMask) { origMask = fn.replace(/\.png$/i, '') + '_origmask.png'; files.push({ name: origMask, blob: h.origMask }); }
             /* judge 를 함께 담는다. 채점은 한 장에 Gemini 호출 1회 = 요금 1회다.
                여기서 빠뜨리면 복원한 사람은 돈을 다시 내고 채점해야 한다. */
-            idx.push({ file: fn, meta: h.meta, seed: h.seed, model: h.model, w: h.w, h: h.h, fav: !!h.fav, t: h.t, label: h.label, sceneId: h.sceneId || null, name: h.name, judge: h.judge || null, vars, orig, origMask });
+            /* tool(툴 결과 표시, 12.17)·gid(같은 요청 묶음, 12.20)·varOrig(변형 묶음의 원본, 12.21)도 담는다 — 12.20 까지는 빠져서
+               복원하면 툴 결과 표시와 캔버스 결과 화면의 묶음이 사라졌다 */
+            idx.push({ file: fn, meta: h.meta, seed: h.seed, model: h.model, w: h.w, h: h.h, fav: !!h.fav, t: h.t, label: h.label, sceneId: h.sceneId || null, name: h.name, judge: h.judge || null, vars, orig, origMask,
+              ...(h.tool ? { tool: h.tool } : {}), ...(h.gid ? { gid: h.gid } : {}), ...(h.varOrig ? { varOrig: true } : {}) });
             i++; if (i % 20 === 0) st.textContent = `이미지 담는 중… ${i}/${items.length}`;
           }
           files.push({ name: 'history/index.json', u8: new TextEncoder().encode(JSON.stringify(idx)) });
@@ -3431,6 +3435,10 @@ function openBackup() {
             // 원본과 비교(12.14 부터 담음)
             if (it.orig && histFiles[it.orig]) rec.orig = new Blob([histFiles[it.orig]], { type: 'image/png' });
             if (it.origMask && histFiles[it.origMask]) rec.origMask = new Blob([histFiles[it.origMask]], { type: 'image/png' });
+            // 툴 결과 표시·같은 요청 묶음·변형 묶음의 원본 (12.21 부터 담음)
+            if (typeof it.tool === 'string' && it.tool) rec.tool = it.tool;
+            if (typeof it.gid === 'string' && it.gid) rec.gid = it.gid;
+            if (it.varOrig === true) rec.varOrig = true;
             try { rec.id = await histPut({ ...rec }); } catch (e) { failed++; }
             rec.url = URL.createObjectURL(rec.blob); R.hist.push(rec); n++;
             if (n % 20 === 0) rst.textContent = `이미지 복원 중… ${n}/${histIdx.length}`;
