@@ -2018,7 +2018,14 @@ function applyMeta(meta, o) {
     S.quality = cm.quality;                 // 못 뗐으면 프롬프트에 이미 들어 있는 것 — 토글은 끈다 (두 벌 방지)
     S.transparent = cm.transparent;
   }
-  if (want('prompt') && cm.furry != null) S.furryMode = cm.furry;   // NAI 와 같다: 접두어가 있으면 켜고 없으면 끈다 (V4 이상에서만)
+  /* Furry 모드 — NAI 와 같다: 접두어 'fur dataset, ' 이 있으면 켜고 없으면 끈다 (Furry 모드가 있는 모델에서만).
+     그림에서 가져오기(빌드 b50892a doImportSettings)는 어떤 칸을 고르든 가져온 뒤 모델 기준으로 맞추고, 바뀌면 알린다(modelModeSwitched).
+     히스토리 Ctrl+클릭(NAI 히스토리 복사)은 모드를 알리지 않으므로 예전처럼 프롬프트를 가져올 때만 맞춘다. */
+  if (hist) { if (want('prompt') && cm.furry != null) S.furryMode = cm.furry; }
+  else {
+    const fz = stripFurry(rawInput, S.model);
+    if (fz.furry != null && !!S.furryMode !== fz.furry) { S.furryMode = fz.furry; toast(fz.furry ? '그림에 맞춰 Furry 모드를 켰습니다' : '그림에 맞춰 Furry 모드를 껐습니다'); }
+  }
   /* 이미지에 쓰인 프리셋(standard/light)에 맞춰 준다. 다만 사용자가 **직접 고쳐 둔 문구**는 지우지 않는다 —
      예전엔 이미지를 한 장 불러올 때마다 그 모델의 퀄리티 태그 편집본이 조용히 기본값으로 돌아갔다.
      (그 이미지가 실제로 편집본으로 만들어졌으면 cm.keep 이 서고, 이 분기 자체를 타지 않는다) */
@@ -2130,6 +2137,7 @@ function applyMeta(meta, o) {
   /* save() 가 아니라 savePrompt(). 불러온 프롬프트가 빈 이미지였을 때 save() 는
      서버의 빈-프롬프트 보호(409)에 걸리고, 그 되돌림이 방금 불러온 설정까지 통째로 지웠다. */
   savePrompt(); syncUI(); renderChars();
+  if (o && o.quiet) return;   // 빠른 시작 그림 모음: NAI 처럼 그 그림 위 «가져왔습니다!» 로만 알린다
   if (!o) toast('프롬프트·설정을 불러왔습니다 (시드 고정됨)');
   else {
     const what = [want('prompt') && '프롬프트', want('uc') && '네거티브', want('chars') && '캐릭터', want('settings') && '설정', want('seed') && '시드', o.vibes && '바이브'].filter(Boolean);
@@ -2164,6 +2172,11 @@ async function readImportInfo(blob) {
     const st = await readStealthMeta(blob).catch(e => { logErr('숨은 메타 읽기 실패: ' + e.message); return null; });
     if (st && st.Comment) { comment = String(st.Comment); src = String(st.Source || ''); soft = String(st.Software || ''); }
   }
+  return importInfoOf(comment, src, soft);
+}
+/* 그림 기록 글(Comment·Source·Software) → 가져오기 정보. 그림 파일에서도, 빠른 시작 그림의 기록 묶음(NAI metadataBundle)에서도 쓴다. */
+function importInfoOf(comment, src, soft) {
+  src = String(src || ''); soft = String(soft || '');
   if (!comment) return null;
   let j; try { j = JSON.parse(comment); } catch (e) { logErr('그림 메타 해석 실패: ' + e.message); return null; }
   // NAI: Software 에 «NovelAI» 가 있고, 디렉터 툴 결과(req_type)가 아니어야 설정을 가져올 수 있다
@@ -2259,6 +2272,129 @@ function initImportOverlay() {
     if (fs.some(f => /\.(naiv4vibe|naiv4vibebundle|json)$/i.test(f.name))) { importVibeFiles(fs); return; }
     if (fs.length > 1) importManyImages(fs); else openImportDialog(fs[0]);
   });
+}
+/* ── NAI 빠른 시작 그림 모음 (Quick Start Gallery, 빌드 b50892a FI·FP·Fj·Fb) ────────────────────────────
+   보고 있는 그림이 없으면 큰 그림 자리에 NAI 빠른 시작 그림을 NAI 와 같은 차례(빌드 해시를 씨앗으로 섞은 차례, 6의 배수만큼)로 펼친다.
+   그림을 누르면 그 그림의 프롬프트·네거티브·캐릭터·설정·바이브를 가져오고 시드는 두지 않는다(NAI 와 같음), 그림 위에 2초 동안 «가져왔습니다!».
+   그림 번호·그림마다 붙은 생성 기록은 서버가 사용자 PC 에서 NAI 웹앱 스크립트로 뽑아 준다(/nai-quickstart — 이 저장소에는 넣지 않는다).
+   그림 파일은 NAI 와 같은 주소(static.novelai.net)에서 바로 열고, NAI 처럼 화면 가까이 올 때만 작은 그림(1000px 앞)·큰 그림(100px 앞)을 받는다.
+   ⚙ «빠른 시작 그림 모음 숨기기»(NAI hideQuickstartGallery)를 켜면 보이지 않는다. 위 줄 «🖼 빠른 시작»은 보던 그림을 닫고 이 모음을 연다(NAI 메뉴). */
+const QS = { data: null, err: '', loading: null, built: '', io: [] };
+function cyrb53a(str, seed = 0) {   // NAI gg 그대로 (빌드 해시 → 53비트 수)
+  let t = 0xdeadbeef ^ seed, i = 0x41c6ce57 ^ seed;
+  for (let g = 0, e; g < str.length; g++) { e = str.charCodeAt(g); t = Math.imul(t ^ e, 0x85ebca77); i = Math.imul(i ^ e, 0xc2b2ae3d); }
+  t ^= Math.imul(t ^ (i >>> 15), 0x735a2d97); i ^= Math.imul(i ^ (t >>> 15), 0xcaf649a9); t ^= i >>> 16; i ^= t >>> 16;
+  return 2097152 * (i >>> 0) + (t >>> 11);
+}
+class QsSeededRandom {   // NAI SeededRandom 그대로 (Lehmer — 첫 곱은 53비트를 넘으므로 NAI 처럼 실수 곱 그대로 둔다)
+  constructor(s) { this.seed = s; }
+  next() { this.seed = 48271 * this.seed % 0x7fffffff; return this.seed / 0x7fffffff; }
+}
+function qsOrder(d) {
+  const rnd = new QsSeededRandom(cyrb53a(String(d.commit || ''))), ks = d.ids.map(() => rnd.next());
+  const name = n => String(n).padStart(4, '0');
+  return d.ids.map((n, k) => ({ file: name(n) + d.ext, src: d.base + name(n) + d.ext, tiny: d.base + name(n) + d.tiny, random: ks[k] }))
+    .sort((a, b) => a.random - b.random).slice(0, 6 * Math.floor(d.ids.length / 6));
+}
+function qsValid(d) {
+  return d && Array.isArray(d.ids) && d.ids.length > 0 && d.ids.every(n => Number.isInteger(n) && n >= 0 && n < 100000)
+    && d.meta && typeof d.meta === 'object' && typeof d.commit === 'string' && d.commit.length > 0
+    && /^https:\/\/static\.novelai\.net\/quickstart\/[\w./-]+\/$/.test(d.base || '') && /^\.\w+$/.test(d.ext || '') && /^_tiny\.\w+$/.test(d.tiny || '');
+}
+function qsLoad(force) {
+  if (QS.loading) return QS.loading;
+  QS.loading = (async () => {
+    try {
+      const r = await fetch('/nai-quickstart' + (force ? '?force=1' : ''), { cache: 'no-store' });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok || !j.data) throw new Error(j.err || ('HTTP ' + r.status));
+      if (!qsValid(j.data)) throw new Error('받은 그림 목록의 모양이 이상합니다');
+      if (j.data.orderOk === false) logErr('NAI 빠른 시작 그림 차례를 정하는 코드가 바뀌었습니다 — 차례가 NAI 와 다를 수 있습니다 (빌드 ' + (j.data.build || '?') + ')');
+      QS.data = j.data; QS.err = '';
+    } catch (e) { QS.err = e.message; logErr('빠른 시작 그림 모음을 불러오지 못함: ' + e.message); }
+    finally { QS.loading = null; }
+  })();
+  return QS.loading;
+}
+/* 보일 때: 메인 화면 · 숨기기 꺼짐 · 보고 있는 그림 없음 · 생성 중(미리보기 자리)이 아님 — NAI H1 과 같은 조건(캐릭터 위치 판은 우리 앱에선 창이라 가리지 않는다) */
+function qsWanted() {
+  const pv = $('#previewImg');
+  return S.mode === 'main' && !S.hideQuickstart && !curItem() && !R.gen && !(pv && !pv.hidden);
+}
+function qsSync() {
+  const btn = $('#btnQuickstart'); if (btn) btn.hidden = !!S.hideQuickstart || S.mode !== 'main';
+  let el = $('#qsGallery');
+  if (!qsWanted()) { if (el) el.hidden = true; return; }
+  if (!el) {
+    const st = $('#vstage'); if (!st) return;
+    el = document.createElement('div'); el.id = 'qsGallery'; el.className = 'qs-gallery';
+    st.appendChild(el);
+  }
+  el.hidden = false;
+  if (QS.data) { if (QS.built !== QS.data.commit + '|' + QS.data.build) qsRender(el); return; }
+  qsRenderStatus(el);
+  if (!QS.err) qsLoad(false).then(() => { if (!el.hidden) { if (QS.data) qsRender(el); else qsRenderStatus(el); } });
+}
+function qsRenderStatus(el) {
+  QS.built = ''; QS.io.forEach(o => o.disconnect()); QS.io = [];
+  el.innerHTML = '';
+  const box = document.createElement('div'); box.className = 'qs-status';
+  const msg = document.createElement('div');
+  if (QS.err) {
+    msg.textContent = 'NAI 빠른 시작 그림 모음을 불러오지 못했습니다: ' + QS.err;
+    const again = document.createElement('button'); again.className = 'btn sm'; again.textContent = '다시 받기';
+    again.onclick = () => { QS.err = ''; qsRenderStatus(el); qsLoad(true).then(() => { if (!el.hidden) { if (QS.data) qsRender(el); else qsRenderStatus(el); } }); };
+    box.append(msg, again);
+  } else { msg.textContent = 'NAI 에서 빠른 시작 그림 모음을 받는 중입니다… (처음 한 번은 10초쯤 걸립니다)'; box.appendChild(msg); }
+  el.appendChild(box);
+}
+function qsRender(el) {
+  const d = QS.data; QS.io.forEach(o => o.disconnect()); QS.io = [];
+  el.innerHTML = '';
+  const sc = document.createElement('div'); sc.className = 'qs-scroll';
+  sc.innerHTML = '<div class="qs-gap-top"></div><div class="qs-deco" aria-hidden="true"><span>✦</span><span>✧</span><span>✦</span></div>'
+    + '<div class="qs-title">시작하기</div><div class="qs-sub">빠른 시작 그림 모음에서 아이디어를 얻어 보세요!</div>'
+    + '<div class="qs-sub qs-sub2">그림을 누르면 그 그림의 프롬프트와 설정을 가져옵니다.</div><div class="qs-gap"></div>';
+  const grid = document.createElement('div'); grid.className = 'qs-grid';
+  // NAI Fb: 스크롤 칸 기준으로 아래 1000px 안에 오면 작은 그림(흐리게), 100px 안에 오면 큰 그림을 받는다
+  const ioFull = new IntersectionObserver(es => es.forEach(e => { if (!e.isIntersecting) return; ioFull.unobserve(e.target); const im = e.target.querySelector('.qs-full'); if (im && !im.src) im.src = im.dataset.src; }), { root: sc, rootMargin: '0px 0px 100px 0px', threshold: .1 });
+  const ioTiny = new IntersectionObserver(es => es.forEach(e => { if (!e.isIntersecting) return; ioTiny.unobserve(e.target); const im = e.target.querySelector('.qs-tiny'); if (im && !im.src) { im.src = im.dataset.src; im.hidden = false; e.target.querySelector('.qs-blur').hidden = false; } }), { root: sc, rootMargin: '0px 0px 1000px 0px', threshold: .1 });
+  QS.io = [ioFull, ioTiny];
+  const cells = [];
+  for (const it of qsOrder(d)) {
+    const cell = document.createElement('div'); cell.className = 'qs-cell';
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'qs-btn';
+    const tiny = document.createElement('img'); tiny.className = 'qs-tiny'; tiny.alt = ''; tiny.hidden = true; tiny.dataset.src = it.tiny; tiny.width = 832; tiny.height = 1216;
+    const blur = document.createElement('span'); blur.className = 'qs-blur'; blur.hidden = true;
+    const full = document.createElement('img'); full.className = 'qs-full'; full.alt = ''; full.dataset.src = it.src; full.width = 832; full.height = 1216; full.decoding = 'async';
+    full.onerror = () => logErr('빠른 시작 그림을 받지 못함: ' + it.file);
+    const cp = document.createElement('span'); cp.className = 'qs-copied'; cp.textContent = '가져왔습니다!';
+    b.append(tiny, blur, full, cp);
+    b.onclick = () => qsPick(cell, it.file);
+    cell.appendChild(b); grid.appendChild(cell); cells.push(cell);
+  }
+  sc.appendChild(grid);
+  const fade = document.createElement('div'); fade.className = 'qs-fade';
+  el.append(sc, fade);
+  cells.forEach(c => { ioFull.observe(c); ioTiny.observe(c); });   // 화면에 붙인 뒤에 지켜본다 (스크롤 칸 안에 있어야 셈이 맞다)
+  QS.built = d.commit + '|' + d.build;
+}
+function qsPick(cell, file) {
+  const b = QS.data && QS.data.meta ? QS.data.meta[file] : null;
+  // NAI Fj: 기록 묶음으로 doImportSettings(설정·프롬프트·네거티브·캐릭터·바이브, 시드 빼고). 기록이 없으면 NAI 처럼 실패 알림만 뜬다
+  const info = b ? importInfoOf(b.Comment, b.Source, b.Software) : null;
+  if (!b) toast('그림에서 설정을 가져오지 못했습니다 — 그림 기록이 없습니다', 'err');
+  else if (!info) toast('그림에서 설정을 가져오지 못했습니다 — 기록을 읽지 못했습니다', 'err');
+  else applyMeta(info.meta, { prompt: true, uc: true, chars: true, settings: true, seed: false, vibes: true, quiet: true });
+  const cp = cell.querySelector('.qs-copied');
+  if (cp) { cp.classList.add('on'); clearTimeout(cp._t); cp._t = setTimeout(() => cp.classList.remove('on'), 2000); }
+}
+/* NAI 메뉴 «Quick Start Gallery»: 보던 그림을 닫는다(고른 그림 없음) → 큰 그림 자리에 빠른 시작 그림 모음이 뜬다 */
+function openQuickstart() {
+  if (S.hideQuickstart) return;
+  if (S.mode !== 'main') setMode('main');
+  R.cur = -1; clearViewer(); histMarkCur(-1);
+  qsSync();
 }
 /* PNG 의 Source 문자열 → 모델 id.
    Source 에는 "curated" 라는 단어가 안 들어간다. 실제 형식은
@@ -3429,6 +3565,8 @@ function initTools() {
   $('#btnSaveChunkSel').onclick = saveSelectionAsChunk;
   $('#btnExif').onclick = openExifTool;
   $('#btnNaiImport').onclick = openNaiImport;
+  { const qb = $('#btnQuickstart'); if (qb) qb.onclick = openQuickstart; }
+  qsSync();
   $('#btnBackup').onclick = openBackup;
   { const hb = $('#btnHealth'); if (hb) hb.onclick = openHealth; }
   $('#tEnhance').onclick = () => enhPanelToggle(); $('#tUpscale').onclick = toolUpscale; $('#tVary').onclick = toolVary;   // ✨ = NAI 처럼 인핸스 창 열고 닫기

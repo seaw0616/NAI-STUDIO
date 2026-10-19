@@ -935,3 +935,33 @@ input.sc-name-in:hover, input.sc-name-in:focus { border-bottom-color: var(--acc)
 .cvr-grid input { width: 90px; text-align: center; }
 .cvr-grid canvas { width: 170px; height: 170px; border: 1px solid var(--line2); border-radius: 4px; }
 @media (max-width: 900px) { .cv-layers { width: 150px; flex-basis: 150px; } .cv-pop { right: 12px; } }
+
+/* NAI 빠른 시작 그림 모음 (빌드 b50892a FI·FA·FD·FN·FO·FR 값 그대로: 위 여백 120 · 글 · 60 · 3열 엇갈림 격자 840 · 그림 832:1216 · 둥근 모서리 8) */
+.qs-gallery { position: absolute; inset: 0; z-index: 5; background: var(--bg0); overflow: hidden; }
+.qs-scroll { width: 100%; height: 100%; padding: 20px 40px; text-align: center; overflow-y: auto; overflow-x: hidden; box-sizing: border-box; }
+.qs-gap-top { height: 120px; }
+.qs-gap { height: 60px; }
+.qs-deco { display: flex; justify-content: center; gap: 18px; color: var(--acc); opacity: .55; font-size: 20px; margin-bottom: 10px; user-select: none; }
+.qs-deco span:nth-child(2) { font-size: 14px; align-self: flex-end; }
+.qs-title { font-size: 1.25rem; font-weight: bold; color: var(--txt); }
+.qs-sub { opacity: .7; }
+.qs-sub2 { margin-top: 35px; }
+.qs-grid { margin: 20px auto 0; max-width: 840px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; padding: 10px; width: 100%; box-sizing: border-box; }
+.qs-grid .qs-cell:nth-child(3n + 2) { top: -48px; }
+.qs-grid .qs-cell:nth-child(3n + 3) { top: -24px; }
+.qs-cell { position: relative; width: 100%; aspect-ratio: 832 / 1216; transition: transform .2s ease-in-out; }
+.qs-cell:hover { cursor: pointer; transform: scale(1.05); z-index: 1; }
+.qs-btn { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; margin: 0; border: 0; background: none; border-radius: 8px; cursor: pointer; display: block; }
+.qs-tiny, .qs-full { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; border-radius: 8px; display: block; }
+.qs-full:not([src]) { visibility: hidden; }
+.qs-blur { position: absolute; inset: 0; border-radius: 8px; backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); }
+.qs-copied { user-select: none; pointer-events: none; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: color-mix(in srgb, var(--bg1) 50%, transparent); border-radius: 8px; color: var(--txt); font-size: 1.25rem; font-weight: bold; opacity: 0; transition: opacity .2s ease-in-out; z-index: 2; }
+.qs-copied.on { opacity: 1; }
+.qs-fade { position: absolute; left: 0; right: 0; bottom: 0; height: 60px; pointer-events: none; background: linear-gradient(180deg, transparent 0%, var(--bg0) 100%); z-index: 10; }
+.qs-status { padding: 70px 20px; color: var(--dim); text-align: center; display: flex; flex-direction: column; gap: 10px; align-items: center; }
+@media (max-width: 900px) { .qs-scroll { padding: 20px 0; } .qs-gap-top { height: 34px; } .qs-gap { height: 30px; } }
+@media (max-width: 768px) {
+  .qs-grid { grid-template-columns: 1fr 1fr; }
+  .qs-grid .qs-cell:nth-child(3n + 2), .qs-grid .qs-cell:nth-child(3n + 3) { top: 0; }
+  .qs-grid .qs-cell:nth-child(2n + 2) { top: -24px; }
+}

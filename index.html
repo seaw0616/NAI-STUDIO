@@ -59,6 +59,7 @@ try {
     <button id="btnStyles" class="pill" title="스타일 프리셋 (고정 프롬프트)">🎨<span class="lbl"> 스타일</span></button>
     <button id="btnCharLib" class="pill" title="캐릭터 라이브러리">👤<span class="lbl"> 캐릭터</span></button>
     <div id="opusBar" hidden title=""><span id="opusBarTxt"></span><span id="opusBarTrack" class="ubar"></span><button id="opusBarPlus" class="ic xs" title="사용량 부스트 쓰기 / 사기">＋</button></div>
+    <button id="btnQuickstart" class="pill" hidden title="빠른 시작 그림 모음 — 보고 있는 그림을 닫고 NAI 빠른 시작 그림을 펼칩니다. 그림을 누르면 그 그림의 프롬프트와 설정을 가져옵니다 (NAI 메뉴 «Quick Start Gallery»)">🖼<span class="lbl"> 빠른 시작</span></button>
     <button id="btnNaiImport" class="pill" title="NAI 웹에서 만든 PNG를 드롭해 설정 그대로 재현">📥<span class="lbl"> NAI PNG</span></button>
     <button id="btnExif" class="pill" title="EXIF/메타데이터 도구">🧹</button>
     <button id="btnYt" class="pill" title="YouTube 플레이어">🎵</button>
@@ -299,7 +300,7 @@ try {
       <div class="vstage" id="vstage">
         <div id="viewerEmpty" class="vempty">
           <div class="vempty-ico">✦</div>
-          <div>아직 생성된 이미지가 없습니다</div>
+          <div id="viewerEmptyMsg">아직 생성된 이미지가 없습니다</div>
           <div class="hint">왼쪽에 프롬프트를 쓰고 <b>생성</b> · Ctrl+Enter</div>
         </div>
         <div id="viewerBg" hidden></div>
@@ -314,7 +315,8 @@ try {
         <div id="enhPanel" class="enhpanel" hidden></div>
       </div>
       <div class="vtools">
-        <div class="vgroup">
+        <!-- act: 그림에 쓰는 단추 묶음 — NAI 처럼 보고 있는 그림이 없으면 숨긴다 (결과 화면 위 단추 줄 hideWithout:"image") -->
+        <div class="vgroup act">
           <button id="tEnhance" class="tb" title="인핸스 (디테일 보강 · 확대)">✨<span>인핸스</span></button>
           <button id="tUpscale" class="tb" title="업스케일 2× — V5 로 다시 그려 확대 (1536×2048 까지 · 크기에 따라 ◈1~4, NAI 와 같음)">🔍<span>업스케일</span></button>
           <button id="tVary" class="tb" title="변형">🎲<span>변형</span></button>
@@ -322,7 +324,7 @@ try {
           <button id="tInpaint" class="tb" title="인페인트 — 이 그림을 바탕 그림으로 넣고 그림판 마스크 모드를 엽니다 (NAI Inpaint Image)">🖌<span>인페인트</span></button>
           <button id="tDirector" class="tb" title="디렉터 툴">🪄<span>디렉터</span></button>
         </div>
-        <div class="vgroup">
+        <div class="vgroup act">
           <button id="tToI2i" class="tb" title="i2i 소스로">↪<span>i2i</span></button>
           <button id="tToVibe" class="tb" title="바이브로 추가">🎨<span>바이브</span></button>
           <button id="tToPref" class="tb" title="Precise Reference로 (V4.5)">🪞<span>레퍼런스</span></button>

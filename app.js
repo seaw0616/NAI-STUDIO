@@ -272,6 +272,7 @@ const DEFAULTS = {
   /* NAI 설정 «Show Streamed Images Unprocessed»(rawIntermediates, 처음 값 끔) · «Inspect Image Results»(imageResultsInspect, 끔)
      · 결과 화면 보기 설정 «작은 그림 키워 보기»(imagegen-scaleup, 켬) */
   rawIntermediates: false, inspectResults: false, scaleUp: true,
+  hideQuickstart: false,   // NAI 설정 «Hide Quickstart Gallery»(hideQuickstartGallery, 기본 꺼짐 = 보고 있는 그림이 없으면 빠른 시작 그림 모음을 보여 준다)
   // NAI 설정 «Custom File Name Template»(imageFilenameTemplateEnabled 끔 · imageFilenameTemplate «{prompt} s-{seed}»)
   fnTplOn: false, fnTpl: '{prompt} s-{seed}',
   // 캐릭터 위치 격자 (NAI imagegen-position-grid-type «none» · columns 3 · rows 3)
@@ -1467,7 +1468,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.17';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.18';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -2893,6 +2894,7 @@ async function doGenerate(ov, label) {
   if (R.gen) { toast('이미 다른 생성이 진행 중입니다', 'err'); throw new Error('이미 다른 생성이 진행 중입니다'); }
   if (!hasToken()) { openSettings(); throw new Error('NAI API 토큰이 없습니다 — ⚙설정에서 저장하세요'); }
   R.gen = true;
+  if (typeof qsSync === 'function') qsSync();   // 생성 중에는 빠른 시작 그림 모음을 닫아 진행 막대·생성 중 그림 자리를 비운다
   const cont = R.auto.on && $('#contGen').checked;   // 연속 모드에선 버튼이 '정지'라 비활성화하지 않음
   const btn = $('#btnGen'); btn.disabled = !cont; btn.classList.add('busy');
   { const o = $('#tOld'); if (o) o.disabled = true; }   // NAI: 생성 중에는 OLD 단추를 못 누른다
@@ -3046,6 +3048,7 @@ function showPreview(pngBytes, frac, t0, sampIx, nSamp, sampStep, sampTot) {
   /* NAI 설정 «Show Streamed Images Unprocessed»(rawIntermediates, 처음 값 끔): 꺼져 있으면 생성 중 그림을 흐리게(5px) 보여 준다 */
   img.classList.toggle('raw', !!S.rawIntermediates);
   $('#viewerEmpty').hidden = true;
+  { const qg = $('#qsGallery'); if (qg) qg.hidden = true; }   // 생성 중 그림이 빠른 시작 그림 모음 뒤에 가리지 않게
   let bar = $('#genBar');
   if (!bar) { bar = document.createElement('div'); bar.id = 'genBar'; bar.innerHTML = '<div class="gb-fill"></div><span class="gb-txt"></span>'; st.appendChild(bar); }
   bar.hidden = false;
@@ -3064,7 +3067,8 @@ function hidePreview() {
   const img = $('#previewImg'); if (img) img.hidden = true;
   const bar = $('#genBar'); if (bar) bar.hidden = true;
   if (R._prevUrl) { URL.revokeObjectURL(R._prevUrl); R._prevUrl = null; }
-  if (!R.hist.length) $('#viewerEmpty').hidden = false;
+  if (!R.hist.length || !curItem()) $('#viewerEmpty').hidden = false;
+  if (typeof qsSync === 'function') qsSync();   // 생성이 끝났는데 고른 그림이 없으면(실패·취소) 빠른 시작 그림 모음을 다시 보인다
 }
 /* 미리보기 없이 한 번에 받는 방식. 스트림이 막혔을 때 돌아갈 곳이기도 하다. */
 async function generatePlain(body) {
@@ -3286,7 +3290,10 @@ async function loadHistory() {
     try { R.hist.push({ ...r, thumbUrl: null, url: URL.createObjectURL(r.blob) }); }
     catch (e) { logErr('이미지 한 건 건너뜀 (id=' + r.id + '): ' + e.message); }
   }
-  renderHist(); if (R.hist.length) showImage(R.hist.length - 1);
+  /* NAI 는 켤 때 고른 그림이 없어서 큰 그림 자리에 빠른 시작 그림 모음이 뜬다(SelectedImageResult 처음 값 = 없음).
+     같게 한다 — 다만 ⚙ «빠른 시작 그림 모음 숨기기»를 켜 두면 예전처럼 마지막 그림을 보여 준다. */
+  renderHist();
+  if (R.hist.length && S.hideQuickstart) showImage(R.hist.length - 1); else clearViewer();
 }
 /* 이미지를 크게 보기 — 뷰어 칸이 작아 원본을 볼 수 없다는 지적에서 나왔다.
    클릭하면 화면 전체에 띄우고, 휠로 확대/축소, 끌어서 이동, 한 번 더 클릭하면 1:1 ↔ 맞춤. */
@@ -3633,6 +3640,7 @@ function paintViewTools(it) {
   const ins = $('#tInspect'); if (ins) ins.hidden = !(it && S.inspectResults);
   const ci = $('#tCopyImg'); if (ci) ci.hidden = !(it && typeof ClipboardItem === 'function' && navigator.clipboard && navigator.clipboard.write);
   const iv = $('#viewerImg'); if (iv) iv.classList.toggle('noscale', S.scaleUp === false);
+  $$('.vtools .vgroup.act').forEach(g => { g.hidden = !it; });   // NAI: 그림에 쓰는 단추 줄은 보고 있는 그림이 없으면 숨긴다
 }
 function itemVarIdx(it) { return it && Array.isArray(it.vars) && it.vars.length ? Math.min(R.varSel || 0, it.vars.length - 1) : -1; }
 function syncItemVar(it) {   // it.blob·it.url 을 지금 고른 변형으로 맞춘다 (저장·i2i·스마트 툴이 모두 이 blob 을 쓴다)
@@ -3707,6 +3715,7 @@ function showImage(i) {
   if (it.judge && it.judge.overall != null) { const s = document.createElement('span'); s.textContent = '🔬 ' + it.judge.overall + '/10'; s.title = judgeTip(it.judge); s.style.color = it.judge.overall <= 4 ? 'var(--red)' : it.judge.overall <= 6 ? 'var(--gold)' : 'var(--green)'; $('#viewerMeta').appendChild(s); }
   histMarkCur(i);      // 목록 전체가 아니라 표시만 옮긴다
   refreshHistCard(i);  // 이 카드의 ★·💾·🔬 배지는 맞춰 둔다
+  if (typeof qsSync === 'function') qsSync();   // 그림을 고르면 빠른 시작 그림 모음은 닫힌다 (NAI 와 같음)
 }
 const curItem = () => (R.cur >= 0 && R.cur < R.hist.length) ? R.hist[R.cur] : null;
 function stepImage(d) {
@@ -3781,6 +3790,9 @@ function clearViewer() {
   // 툴바도 초기화 — 안 하면 이미지가 없는데 ★즐겨찾기·✔저장됨 표시가 남는다
   const f = $('#tFav'); if (f) { f.textContent = '☆'; f.classList.remove('on'); }
   if (typeof paintSavedUI === 'function') paintSavedUI(null);
+  // 히스토리는 있는데 고른 그림이 없을 때(빠른 시작 메뉴로 닫았을 때 등) «아직 생성된 이미지가 없습니다»는 맞지 않는다
+  const em = $('#viewerEmptyMsg'); if (em) em.textContent = R.hist.length ? '보고 있는 그림이 없습니다 — 오른쪽 히스토리에서 고르세요' : '아직 생성된 이미지가 없습니다';
+  if (typeof qsSync === 'function') qsSync();
 }
 /* 필드를 손으로 나열하면, 목록에 없는 필드는 put 이 레코드를 통째로 갈아끼울 때
    조용히 지워진다. 예를 들어 채점 결과를 붙여 놓고 ★즐겨찾기를 누르면 그 순간
@@ -5491,6 +5503,7 @@ function setMode(m) {
   if (m === 'scene' && window.renderScenes) renderScenes();
   if (m === 'library' && window.renderLibrary) renderLibrary();
   if (m === 'tools' && window.renderSmartTools) renderSmartTools();
+  if (typeof qsSync === 'function') qsSync();   // 빠른 시작 단추는 메인 화면에서만 보인다 (NAI: 그림 생성 화면 메뉴에만 있음)
 }
 
 /* ─────────────── 설정 ─────────────── */
@@ -5538,6 +5551,7 @@ function openSettings() {
       <label class="ck"><input type="checkbox" id="mStream"> 생성 중 실시간 미리보기 (msgpack 스트림) <span class="hint">— 끄면 다 그려진 뒤 한 번에 받습니다. NAI 가 스트림 형식을 바꿔 그림이 안 나올 때 여기서 끄세요.</span></label>
       <label class="ck"><input type="checkbox" id="mRawInter"> 생성 중 그림을 그대로 보기 <span class="hint">— 꺼져 있으면(NAI 기본값) 생성 중 그림을 흐리게 보여 주고 처음 5단계는 보여 주지 않습니다. 켜면 모든 단계를 그대로 보여 줍니다 (NAI «Show Streamed Images Unprocessed»).</span></label>
       <label class="ck"><input type="checkbox" id="mInspect"> 생성 결과 살펴보기 <span class="hint">— 켜면 결과 아래에 🔍 단추가 생겨 그 그림의 기록 내용을 글로 볼 수 있고, 인페인트 결과에 «받은 그대로»·«마스크 적용» 두 장이 함께 붙습니다 (NAI «Inspect Image Results», 기본값 꺼짐).</span></label>
+      <label class="ck"><input type="checkbox" id="mHideQs"> 빠른 시작 그림 모음 숨기기 <span class="hint" id="mHideQsHint"></span></label>
       <hr>
       <div class="mtitle">투명 그림 <span class="hint">(NAI 설정과 같은 칸)</span></div>
       <label class="fld">투명 부분 보이기 <span class="hint">— 배경 제거·투명 배경 그림의 투명한 곳을 무엇으로 보여 줄지 (NAI «Transparency Background», 기본값 테마 체크무늬)</span>
@@ -5697,6 +5711,13 @@ function openSettings() {
     }
     const ins = body.querySelector('#mInspect'); ins.checked = !!S.inspectResults;
     ins.onchange = () => { S.inspectResults = ins.checked; save(); const it = curItem(); if (it) paintViewTools(it); };
+    { // NAI «Hide Quickstart Gallery» — 고른 상태에 따라 설명이 바뀐다 (NAI checkedText·uncheckedText)
+      const hq = body.querySelector('#mHideQs'), hh = body.querySelector('#mHideQsHint');
+      const paint = () => { hh.textContent = hq.checked ? '— 그림 생성 화면에서 빠른 시작 그림 모음을 숨깁니다 (앱을 켜면 마지막 그림을 보여 줍니다)'
+        : '— 보고 있는 그림이 없으면 그림 생성 화면에 빠른 시작 그림 모음을 보여 줍니다 (NAI 기본값)'; };
+      hq.checked = !!S.hideQuickstart; paint();
+      hq.onchange = () => { S.hideQuickstart = hq.checked; save(); paint(); if (typeof qsSync === 'function') qsSync(); };
+    }
     { // 투명 그림 — NAI 설정 두 칸
       const tb = body.querySelector('#mTranspBg'), tc = body.querySelector('#mTranspColor'), al = body.querySelector('#mAlpha');
       const isHex = v => /^#[\da-f]{6}([\da-f]{2})?$/i.test(v || '');
@@ -5781,6 +5802,7 @@ function syncUI() {
   renderSections();
   renderRandPrompt();
   applyUcLayout();
+  if (typeof qsSync === 'function') qsSync();   // 서버에서 설정을 받아 «빠른 시작 숨기기»가 바뀐 경우까지 맞춘다
   $('#autoCount').value = S.autoCount; $('#autoDelay').value = S.autoDelay;
   $$('#autoModeSeg button').forEach(b => b.classList.toggle('on', b.dataset.m === (S.autoMode || 'random')));
   $('#autoModeHint').textContent = S.autoMode === 'fixed' ? '지금 조합(랜덤·청크 치환 결과)을 고정하고 시드만 바꿔 뽑습니다' : '<a|b|c>·청크가 매번 새로 뽑힙니다';

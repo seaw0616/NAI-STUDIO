@@ -51,7 +51,7 @@ VERSION = 17
 # 같은 PC 의 다른 프로그램은 127.0.0.1 에 닿을 수는 있어도 이 값은 모른다.
 SESSION_KEY = secrets.token_urlsafe(24)
 
-RELEASE = "12.17"   # 배포 버전. GitHub 릴리스 태그 "v12.17" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
+RELEASE = "12.18"   # 배포 버전. GitHub 릴리스 태그 "v12.18" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
 # 이 앱이 배포되는 저장소. 비워 두면 ⬆ 업데이트 버튼이 아예 안 뜬다 —
 # 사용자가 ⚙설정에 직접 타이핑해 넣기 전까지는 새 버전이 나온 줄도 모른다.
 # 실제로 그 때문에 옛 버전을 계속 쓰시는 분들이 있었다. 기본값을 박아 둔다.
@@ -1246,6 +1246,55 @@ def nai_rp_extract(src):
     return code
 
 
+def _nai_page():
+    """novelai.net/image 첫 화면 → (빌드 이름, 그 화면이 부르는 스크립트 주소 목록)."""
+    req = urllib.request.Request("https://novelai.net/image", headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        html = r.read(2 * 1024 * 1024).decode("utf-8", "replace")
+    b = re.search(r'"buildId":"([^"]+)"', html)
+    d = re.search(r'data-dpl-id="([^"]+)"', html)
+    build = (d.group(1) if d else "") or (b.group(1) if b else "") or "unknown"
+    paths = []
+    for p in re.findall(r'(/_next/static/[^"\'?\s]+\.js)', html):
+        if p not in paths:
+            paths.append(p)
+    return build, paths
+
+
+def _nai_scan(paths, marks):
+    """NAI 스크립트를 6개씩 받으며 marks({이름: (정규식, 알릴 이름)})마다 처음 맞는 스크립트 글을 모은다 → {이름: 글}.
+    다 찾으면 멈춘다. 하나라도 못 찾으면 무엇을 못 찾았는지 RuntimeError 로 알린다(조용히 넘기지 않는다)."""
+    if not paths:
+        raise RuntimeError("NAI 페이지에서 스크립트 주소를 하나도 찾지 못했습니다 (사이트 구조가 바뀐 것 같습니다)")
+
+    def one(p):
+        try:
+            rq = urllib.request.Request("https://novelai.net" + p, headers={"User-Agent": UA})
+            with urllib.request.urlopen(rq, timeout=40) as rr:
+                return rr.read(16 * 1024 * 1024).decode("utf-8", "replace")
+        except Exception:
+            return None
+    import concurrent.futures as _cf
+    found, fails, seen = {}, 0, 0
+    with _cf.ThreadPoolExecutor(6) as ex:
+        for k in range(0, len(paths), 6):
+            for t in ex.map(one, paths[k:k + 6]):
+                if t is None:
+                    fails += 1
+                    continue
+                seen += 1
+                for nm, (rx, _label) in marks.items():
+                    if nm not in found and rx.search(t):
+                        found[nm] = t
+            if len(found) == len(marks):
+                break
+    miss = [label for nm, (_rx, label) in marks.items() if nm not in found]
+    if miss:
+        raise RuntimeError("NAI 스크립트 %d개를 받았지만 %s 코드를 찾지 못했습니다%s"
+                           % (seen, "·".join(miss), " (받기 실패 %d개)" % fails if fails else ""))
+    return found
+
+
 def nai_random_prompt(force=False):
     """🎲 생성기 코드를 돌려준다 → {"ok", "build", "code", "err"}. 받아 둔 것이 하루 안이면 그대로 쓴다.
     실패하면 까닭을 그대로 돌려줘 앱이 크게 알린다(조용히 넘기지 않는다)."""
@@ -1254,49 +1303,15 @@ def nai_random_prompt(force=False):
         if _nai_rp["code"] and not force and now - _nai_rp["t"] < 86400:
             return {"ok": True, "build": _nai_rp["build"], "code": _nai_rp["code"], "err": ""}
         try:
-            req = urllib.request.Request("https://novelai.net/image", headers={"User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=20) as r:
-                html = r.read(2 * 1024 * 1024).decode("utf-8", "replace")
-            b = re.search(r'"buildId":"([^"]+)"', html)
-            d = re.search(r'data-dpl-id="([^"]+)"', html)
-            build = (d.group(1) if d else "") or (b.group(1) if b else "") or "unknown"
+            build, paths = _nai_page()
             cdir = DATA / "cache"
             cfile = cdir / ("nai_randprompt_%s.js" % re.sub(r"[^\w.-]", "_", build)[:80])
             if not force and cfile.exists():
                 code = cfile.read_text(encoding="utf-8")
                 _nai_rp.update(t=now, build=build, code=code, err="")
                 return {"ok": True, "build": build, "code": code, "err": ""}
-            paths = []
-            for p in re.findall(r'(/_next/static/[^"\'?\s]+\.js)', html):
-                if p not in paths:
-                    paths.append(p)
-            if not paths:
-                raise RuntimeError("NAI 페이지에서 스크립트 주소를 하나도 찾지 못했습니다 (사이트 구조가 바뀐 것 같습니다)")
             pat = re.compile(r"\.characterPrompts\?[\w$]+:[\w$]+===[\w$]+\.ImageGenerationModels\.naiDiffusionFurryV3\?")
-
-            def one(p):
-                try:
-                    rq = urllib.request.Request("https://novelai.net" + p, headers={"User-Agent": UA})
-                    with urllib.request.urlopen(rq, timeout=40) as rr:
-                        return rr.read(16 * 1024 * 1024).decode("utf-8", "replace")
-                except Exception:
-                    return None
-            import concurrent.futures as _cf
-            hit, fails, seen = None, 0, 0
-            with _cf.ThreadPoolExecutor(6) as ex:
-                for k in range(0, len(paths), 6):
-                    for t in ex.map(one, paths[k:k + 6]):
-                        if t is None:
-                            fails += 1
-                            continue
-                        seen += 1
-                        if hit is None and pat.search(t):
-                            hit = t
-                    if hit is not None:
-                        break
-            if hit is None:
-                raise RuntimeError("NAI 스크립트 %d개를 받았지만 무작위 프롬프트 코드를 찾지 못했습니다%s"
-                                   % (seen, " (받기 실패 %d개)" % fails if fails else ""))
+            hit = _nai_scan(paths, {"rp": (pat, "무작위 프롬프트")})["rp"]
             code = nai_rp_extract(hit)
             try:
                 cdir.mkdir(parents=True, exist_ok=True)
@@ -1311,6 +1326,191 @@ def nai_random_prompt(force=False):
         except Exception as e:
             _nai_rp["err"] = str(e)[:200]
             return {"ok": False, "build": _nai_rp["build"], "code": "", "err": _nai_rp["err"]}
+
+
+# ── NAI 빠른 시작 그림 모음 ───────────────────────────────────────────────────────
+# 그림 번호와 그림마다 붙은 생성 기록(설명·출처·Comment)은 NAI 저작물이라 이 저장소에 넣지 않는다. 무작위 프롬프트와 같게
+# 사용자 PC 에서 novelai.net 이 공개로 내주는 웹앱 스크립트를 받아 그 값만 뽑아 앱에 내준다(같은 NAI 빌드면 data/cache 에 둔 것).
+# 그림 파일은 앱이 NAI 와 같은 주소(static.novelai.net)에서 바로 연다. 차례는 앱이 NAI 와 같은 셈(CommitHash 씨앗)으로 정한다.
+_nai_qs = {"t": 0.0, "build": "", "data": None, "err": ""}
+_nai_qs_lock = threading.Lock()
+_QS_META_KEYS = ("Title", "Description", "Software", "Source", "Generation time", "Comment")
+
+
+def _js_lit(s, i):
+    """i 자리의 JS 글자 값(객체·배열·문자열·숫자·true/false/null·!0/!1)만 읽는다 → (값, 다음 자리).
+    함수·이름 같은 코드가 나오면 ValueError — 코드로 된 값은 돌리지 않고 거절한다."""
+    n = len(s)
+
+    def ws(k):
+        while k < n and s[k] in " \t\r\n":
+            k += 1
+        return k
+    i = ws(i)
+    c = s[i]
+    if c == "{":
+        out, i = {}, ws(i + 1)
+        while True:
+            if s[i] == "}":
+                return out, i + 1
+            if s[i] in "\"'":
+                k, i = _js_lit(s, i)
+            else:
+                m = _JS_IDENT.match(s, i)
+                if not m:
+                    raise ValueError("객체 열쇠가 아닌 글자 @%d" % i)
+                k, i = m.group(0), m.end()
+            i = ws(i)
+            if s[i] != ":":
+                raise ValueError("«:» 가 없음 @%d" % i)
+            v, i = _js_lit(s, i + 1)
+            out[k] = v
+            i = ws(i)
+            if s[i] == ",":
+                i = ws(i + 1)
+                continue
+            if s[i] == "}":
+                return out, i + 1
+            raise ValueError("객체 모양이 이상함 @%d" % i)
+    if c == "[":
+        out, i = [], ws(i + 1)
+        while True:
+            if s[i] == "]":
+                return out, i + 1
+            v, i = _js_lit(s, i)
+            out.append(v)
+            i = ws(i)
+            if s[i] == ",":
+                i = ws(i + 1)
+                continue
+            if s[i] == "]":
+                return out, i + 1
+            raise ValueError("배열 모양이 이상함 @%d" % i)
+    if c in "\"'":
+        q, j, buf = c, i + 1, []
+        esc = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v"}
+        while j < n and s[j] != q:
+            ch = s[j]
+            if ch == "\\":
+                e = s[j + 1]
+                if e in esc:
+                    buf.append(esc[e])
+                    j += 2
+                elif e == "0" and not s[j + 2].isdigit():
+                    buf.append("\0")
+                    j += 2
+                elif e == "x":
+                    buf.append(chr(int(s[j + 2:j + 4], 16)))
+                    j += 4
+                elif e == "u" and s[j + 2] == "{":
+                    k = s.index("}", j + 3)
+                    buf.append(chr(int(s[j + 3:k], 16)))
+                    j = k + 1
+                elif e == "u":
+                    buf.append(chr(int(s[j + 2:j + 6], 16)))
+                    j += 6
+                elif e == "\n":
+                    j += 2
+                else:
+                    buf.append(e)
+                    j += 2
+                continue
+            if ch == "\n":
+                raise ValueError("문자열 안 줄바꿈 @%d" % j)
+            buf.append(ch)
+            j += 1
+        # 😀 처럼 둘로 나뉜 글자를 합친다
+        return "".join(buf).encode("utf-16", "surrogatepass").decode("utf-16"), j + 1
+    m = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?").match(s, i)
+    if m:
+        t = m.group(0)
+        return (float(t) if any(x in t for x in ".eE") else int(t)), m.end()
+    for w, v in (("true", True), ("false", False), ("null", None), ("!0", True), ("!1", False)):
+        if s.startswith(w, i):
+            return v, i + len(w)
+    raise ValueError("글자 값이 아닌 것 @%d" % i)
+
+
+def nai_qs_extract(qs_src, commit_src):
+    """빠른 시작 그림 모음 자료를 뽑는다 → {"commit", "base", "ext", "tiny", "ids", "meta", "orderOk"}.
+    NAI 코드 모양이 바뀌어 하나라도 못 찾으면 RuntimeError (앱이 그 까닭을 그대로 보여 준다)."""
+    m = re.search(r"=\[([\d,\s]+)\]\.map\(\(?([\w$]+)\)?=>\(\{src:`(https://static\.novelai\.net/quickstart/[\w./-]+/)"
+                  r"\$\{\2\.toString\(\)\.padStart\(4,\"0\"\)\}(\.\w+)`,srcTiny:`\3\$\{\2\.toString\(\)\.padStart\(4,\"0\"\)\}"
+                  r"(_tiny\.\w+)`", qs_src)
+    if not m:
+        raise RuntimeError("NAI 스크립트에서 빠른 시작 그림 목록을 찾지 못했습니다 (사이트 코드 모양이 바뀐 것 같습니다)")
+    ids = [int(x) for x in re.findall(r"\d+", m.group(1))]
+    if not ids or len(ids) > 2000:
+        raise RuntimeError("빠른 시작 그림 번호가 이상합니다 (%d개)" % len(ids))
+    base, ext, tiny = m.group(3), m.group(4), m.group(5)
+    mb = re.search(r"metadataBundle:([\w$]+)\[", qs_src[m.end():]) or re.search(r"metadataBundle:([\w$]+)\[", qs_src)
+    if not mb:
+        raise RuntimeError("빠른 시작 그림의 생성 기록을 쓰는 코드를 찾지 못했습니다")
+    # 줄인 이름은 다른 모듈에서 또 쓰일 수 있다 — 그림 목록 바로 앞(같은 모듈)의 정의를 고른다
+    defs = list(re.finditer(r"(?:\b(?:let|var|const)\s+|,)" + re.escape(mb.group(1)) + r"=\{", qs_src))
+    before = [d for d in defs if d.start() < m.start()]
+    dm = before[-1] if before else (defs[0] if defs else None)
+    if not dm:
+        raise RuntimeError("빠른 시작 그림의 생성 기록(%s)을 찾지 못했습니다" % mb.group(1))
+    try:
+        raw, _end = _js_lit(qs_src, dm.end() - 1)
+    except (ValueError, IndexError) as e:
+        raise RuntimeError("빠른 시작 그림의 생성 기록을 읽지 못했습니다: %s" % e)
+    meta = {}
+    for k, v in (raw.items() if isinstance(raw, dict) else []):
+        if not (isinstance(k, str) and re.fullmatch(r"[\w.-]{1,40}", k) and isinstance(v, dict)):
+            continue
+        meta[k] = {mk: v[mk][:200000] for mk in _QS_META_KEYS if isinstance(v.get(mk), str)}
+    if not meta:
+        raise RuntimeError("빠른 시작 그림의 생성 기록이 비어 있습니다")
+    ch = re.search(r'"CommitHash",0,"([0-9a-f]{4,64})"', commit_src)
+    if not ch:
+        raise RuntimeError("NAI 빌드 해시(CommitHash)를 찾지 못했습니다")
+    # NAI 차례 셈: cyrb53a(CommitHash) 씨앗 → SeededRandom(Lehmer) 를 그림마다 한 번 → 작은 순 → 6의 배수까지.
+    # 앱이 이 셈을 따라 하므로, NAI 가 셈을 바꿨는지 여기서 본다(바뀌었으면 앱이 오류 기록에 남긴다).
+    order_ok = bool(re.search(r"cyrb53a\)\([\w$]+\.CommitHash\),[\w$]+=new [\w$]+\.SeededRandom\([\w$]+\)", qs_src)
+                    and re.search(r"=6\*Math\.floor\([\w$]+\.length/6\)", qs_src)
+                    and re.search(r"\.sort\(\(([\w$]+),([\w$]+)\)=>\1\.random-\2\.random\)", qs_src))
+    return {"commit": ch.group(1), "base": base, "ext": ext, "tiny": tiny, "ids": ids, "meta": meta, "orderOk": order_ok}
+
+
+def nai_quickstart(force=False):
+    """빠른 시작 그림 모음 자료 → {"ok", "build", "data", "err"}. 받아 둔 것이 하루 안이면 그대로 쓴다.
+    실패하면 까닭을 그대로 돌려줘 앱이 그 자리에 보여 준다(조용히 넘기지 않는다)."""
+    with _nai_qs_lock:
+        now = time.time()
+        if _nai_qs["data"] and not force and now - _nai_qs["t"] < 86400:
+            return {"ok": True, "build": _nai_qs["build"], "data": _nai_qs["data"], "err": ""}
+        try:
+            build, paths = _nai_page()
+            cdir = DATA / "cache"
+            cfile = cdir / ("nai_quickstart_%s.json" % re.sub(r"[^\w.-]", "_", build)[:80])
+            if not force and cfile.exists():
+                try:
+                    data = json.loads(cfile.read_text(encoding="utf-8"))
+                    if isinstance(data, dict) and data.get("ids") and data.get("meta") and data.get("commit"):
+                        _nai_qs.update(t=now, build=build, data=data, err="")
+                        return {"ok": True, "build": build, "data": data, "err": ""}
+                    err_add({"msg": "빠른 시작 캐시가 비어 있어 다시 받습니다", "where": "nai_quickstart"})
+                except Exception as e:
+                    err_add({"msg": "빠른 시작 캐시를 읽지 못해 다시 받습니다: %s" % e, "where": "nai_quickstart"})
+            got = _nai_scan(paths, {"qs": (re.compile(r"static\.novelai\.net/quickstart/"), "빠른 시작 그림 모음"),
+                                    "ch": (re.compile(r'"CommitHash",0,"[0-9a-f]+"'), "빌드 해시(CommitHash)")})
+            data = nai_qs_extract(got["qs"], got["ch"])
+            data["build"] = build
+            try:
+                cdir.mkdir(parents=True, exist_ok=True)
+                for old in cdir.glob("nai_quickstart_*.json"):     # 옛 빌드 것은 지운다
+                    if old != cfile:
+                        old.unlink()
+                cfile.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            except Exception as e:
+                err_add({"msg": "빠른 시작 캐시 저장 실패: %s" % e, "where": "nai_quickstart"})
+            _nai_qs.update(t=now, build=build, data=data, err="")
+            return {"ok": True, "build": build, "data": data, "err": ""}
+        except Exception as e:
+            _nai_qs["err"] = str(e)[:200]
+            return {"ok": False, "build": _nai_qs["build"], "data": None, "err": _nai_qs["err"]}
 
 
 def _dan_img_trim(cap=80 * 1024 * 1024):
@@ -2375,6 +2575,9 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if path == "/nai-randprompt":   # NAI 무작위 프롬프트(🎲) 생성기 — 사용자 PC 에서 NAI 웹앱 스크립트로 만든다
             self._json(200, nai_random_prompt(bool((qs.get("force") or [""])[0])))
+            return True
+        if path == "/nai-quickstart":   # NAI 빠른 시작 그림 모음 — 사용자 PC 에서 NAI 웹앱 스크립트로 뽑는다
+            self._json(200, nai_quickstart(bool((qs.get("force") or [""])[0])))
             return True
         if path == "/errors":     # 오류 기록 — 앱이 오류를 만나면 여기로 보낸다
             if self.command == "POST":
