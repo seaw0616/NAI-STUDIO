@@ -58,7 +58,7 @@ try {
     <button id="btnChunks" class="pill" title="프롬프트 청크">🧩<span class="lbl"> 청크</span></button>
     <button id="btnStyles" class="pill" title="스타일 프리셋 (고정 프롬프트)">🎨<span class="lbl"> 스타일</span></button>
     <button id="btnCharLib" class="pill" title="캐릭터 라이브러리">👤<span class="lbl"> 캐릭터</span></button>
-    <div id="opusBar" hidden title=""><span id="opusBarTxt"></span><span id="opusBarTrack"><span id="opusBarFill"></span></span></div>
+    <div id="opusBar" hidden title=""><span id="opusBarTxt"></span><span id="opusBarTrack" class="ubar"></span><button id="opusBarPlus" class="ic xs" title="사용량 부스트 쓰기 / 사기">＋</button></div>
     <button id="btnNaiImport" class="pill" title="NAI 웹에서 만든 PNG를 드롭해 설정 그대로 재현">📥<span class="lbl"> NAI PNG</span></button>
     <button id="btnExif" class="pill" title="EXIF/메타데이터 도구">🧹</button>
     <button id="btnYt" class="pill" title="YouTube 플레이어">🎵</button>
@@ -157,7 +157,7 @@ try {
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="promptCard">
       <div class="card-body">
         <div class="ptool">
           <span class="ptitle">프롬프트</span>
@@ -169,6 +169,9 @@ try {
             <button id="btnSaveChunkSel" class="btn xs ghost" title="선택한 텍스트(없으면 현재 칸 전체)를 청크로 저장">＋청크</button>
           </div>
         </div>
+        <!-- NAI 프롬프트 칸 탭: 네거티브를 붙여 두면(설정 ucDetached 끔) 프롬프트·네거티브를 탭으로 바꿔 쓴다 -->
+        <div id="promptTabs" class="seg ptabs" hidden><button data-t="p">프롬프트</button><button data-t="u">네거티브</button><button id="ucDetachBtn" class="ic xs" title="네거티브를 따로 떼어 프롬프트 아래에 둡니다 (NAI «Detach Undesired Content»)" hidden>⤓</button></div>
+        <div id="ucTabPane" hidden></div>
         <!-- NAI 🎲 무작위 프롬프트: 있으면 원래 프롬프트 칸 대신 보인다 -->
         <div id="randBox" class="rand-box" hidden>
           <div class="rand-head"><span class="rand-title">무작위 프롬프트</span>
@@ -182,7 +185,7 @@ try {
           <div id="pvBox" class="pv"><div class="pv-l">프롬프트</div><div id="pvPrompt" class="pv-t"></div><div class="pv-l">네거티브</div><div id="pvUc" class="pv-t"></div></div>
         </details>
         <details id="ucBox">
-          <summary>Undesired Content (네거티브 추가)</summary>
+          <summary>Undesired Content (네거티브 추가) <button id="ucAttachBtn" class="ic xs" title="네거티브를 프롬프트 칸의 탭으로 붙입니다 (NAI «Reattach Undesired Content»)">⤒</button></summary>
           <textarea id="uc" class="ta ac" rows="2" spellcheck="false" placeholder="프리셋 뒤에 이어붙을 네거티브"></textarea>
         </details>
         <div class="chead">
@@ -233,6 +236,8 @@ try {
       <div class="card-body">
         <label class="rng">Steps <output id="stepsV"></output><input type="range" id="steps" min="1" max="50" step="1"></label>
         <label class="rng">Prompt Guidance <output id="scaleV"></output><input type="range" id="scale" min="0" max="10" step="0.1"></label>
+        <div id="scaleWarn" class="warn-box" hidden><span id="scaleWarnTxt"></span> <a href="#" id="scaleReset">기본값으로</a></div>
+        <div id="sigmaWarn" class="warn-box" hidden>Variety+ 값이 이 모델에 맞지 않습니다(다른 그림에서 가져온 값). Variety+ 를 껐다가 다시 켜면 바로잡힙니다.</div>
         <label class="rng">Guidance Rescale <output id="rescaleV"></output><input type="range" id="rescale" min="0" max="1" step="0.02"></label>
         <div class="grid2">
           <label class="fld">Sampler<select id="sampler"></select></label>
@@ -241,9 +246,9 @@ try {
         <div id="v3Box" hidden>
           <label class="ck" title="NAI «Auto nai_smea»: 큰 크기(넓이 2,166,785 이상)에서는 SMEA 를 자동으로 켜고, 그보다 작으면 SMEA·DYN 을 끕니다. NAI 기본값은 켜짐입니다."><input type="checkbox" id="autoSmea"> SMEA 자동 <span class="hint">(큰 크기에서만 SMEA)</span></label>
           <div class="grid2"><label class="ck"><input type="checkbox" id="smea"> SMEA</label><label class="ck"><input type="checkbox" id="smeaDyn"> SMEA DYN</label></div>
-          <label class="rng">Undesired Content 강도 <output id="ucStrengthV"></output><input type="range" id="ucStrength" min="0" max="1.5" step="0.05"></label>
         </div>
         <div id="v4Box" hidden><label class="ck"><input type="checkbox" id="legacyUc"> 레거시 프롬프트 컨디셔닝</label></div>
+        <div class="row" style="justify-content:flex-end"><button id="btnAiReset" class="btn xs ghost" title="NAI «Reset Settings»와 같습니다. 스텝·가이던스·샘플러·Variety+ 같은 생성 설정과 시드를 이 모델의 기본값으로 되돌립니다. 크기·장수·프롬프트·네거티브·캐릭터는 그대로 둡니다.">↺ 생성 설정 기본값으로</button></div>
       </div>
     </details>
 
@@ -311,7 +316,7 @@ try {
       <div class="vtools">
         <div class="vgroup">
           <button id="tEnhance" class="tb" title="인핸스 (디테일 보강 · 확대)">✨<span>인핸스</span></button>
-          <button id="tUpscale" class="tb" title="업스케일 2× — V5 로 다시 그려 확대 (1024×1024 이하 · Opus 무료, 아니면 ◈1)">🔍<span>업스케일</span></button>
+          <button id="tUpscale" class="tb" title="업스케일 2× — V5 로 다시 그려 확대 (1536×2048 까지 · 크기에 따라 ◈1~4, NAI 와 같음)">🔍<span>업스케일</span></button>
           <button id="tVary" class="tb" title="변형">🎲<span>변형</span></button>
           <button id="tEdit" class="tb" title="편집 — 이 그림을 그림판에서 고쳐 바탕 그림으로 (NAI Edit Image)">✏<span>편집</span></button>
           <button id="tInpaint" class="tb" title="인페인트 — 이 그림을 바탕 그림으로 넣고 그림판 마스크 모드를 엽니다 (NAI Inpaint Image)">🖌<span>인페인트</span></button>
@@ -336,7 +341,7 @@ try {
           <button id="tSave" class="tb" title="저장">💾</button>
           <button id="tSaveClean" class="tb" title="메타데이터 제거 후 저장">🧹</button>
           <button id="tCopyImg" class="tb" title="그림을 클립보드에 복사합니다 — 다른 프로그램에 바로 붙여 넣을 수 있습니다 (NAI Copy to Clipboard)">🖼</button>
-          <button id="tMeta" class="tb" title="메타데이터 보기">🏷</button>
+          <button id="tMeta" class="tb" title="그림 정보 보기 — 제목·출처(NAI 서명 ✓)·요청 종류·설정 (NAI Image Inspector 와 같음)">🏷</button>
           <button id="tDelete" class="tb danger" title="삭제 (Delete)">🗑</button>
         </div>
       </div>
@@ -389,7 +394,7 @@ try {
       <div class="card-body grow hist-body">
         <div class="ptool">
           <span class="ptitle">히스토리 <span id="histCount" class="hint"></span></span>
-          <div class="ptool-r"><button id="histLock" class="btn xs ghost" title="스크롤 위치 고정 — 켜 두면 새 그림이 나오거나 다른 그림을 골라도 히스토리가 저절로 움직이지 않습니다" aria-pressed="false">🔒</button><button id="histFavOnly" class="btn xs ghost">☆</button><button id="histClear" class="btn xs ghost danger">비우기</button></div>
+          <div class="ptool-r"><button id="histSelClear" class="btn xs ghost" hidden title="고르기 풀기">✕</button><button id="histLock" class="btn xs ghost" title="스크롤 위치 고정 — 켜 두면 새 그림이 나오거나 다른 그림을 골라도 히스토리가 저절로 움직이지 않습니다" aria-pressed="false">🔒</button><button id="histFavOnly" class="btn xs ghost">☆</button><button id="histZip" class="btn xs ghost" title="히스토리 전부 ZIP 으로 받기">💾</button><button id="histClear" class="btn xs ghost danger">비우기</button></div>
         </div>
         <div id="histGrid" class="hgrid"></div>
         <button id="histTop" class="hist-top" title="맨 위로" hidden>↑</button>

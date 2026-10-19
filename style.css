@@ -440,6 +440,9 @@ select.style-sel.sm { width: auto; max-width: 180px; padding: 3px 24px 3px 8px; 
 .hgrid .hitem { position: relative; aspect-ratio: 1; border-radius: 9px; overflow: hidden; cursor: pointer; border: 2px solid transparent; transition: .15s; }
 .hgrid .hitem img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .hgrid .hitem.cur { border-color: var(--acc); }
+/* NAI 히스토리 여러 장 고르기 — 고른 카드는 테두리와 옅은 덮개 */
+.hgrid .hitem.sel { border-color: var(--gold); box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--gold) 70%, transparent); }
+.hgrid .hitem.sel::after { content: '✓'; position: absolute; top: 4px; left: 6px; font-size: 12px; font-weight: 800; color: #111; background: var(--gold); border-radius: 50%; width: 16px; height: 16px; line-height: 16px; text-align: center; pointer-events: none; }
 .hgrid .hitem:hover { transform: scale(1.03); }
 .hgrid .hitem .fav { position: absolute; top: 3px; right: 4px; color: var(--gold); font-size: 13px; text-shadow: 0 0 4px #000; }
 .hgrid .hitem.saved { border-color: var(--green); box-shadow: inset 0 0 0 1px var(--green); }
@@ -555,6 +558,24 @@ ol.guide { padding-left: 20px; display: flex; flex-direction: column; gap: 6px; 
 .pos-dot.on { background: var(--acc); color: var(--btnTxt); border-color: #fff; z-index: 2; }
 .pos-dot.off { opacity: .45; }
 .char-warn { margin-top: 6px; padding: 6px 8px; border-radius: 6px; font-size: 12px; background: color-mix(in srgb, var(--gold) 14%, transparent); border: 1px solid color-mix(in srgb, var(--gold) 60%, transparent); color: var(--txt); }
+/* NAI 프롬프트 칸 탭(네거티브를 붙여 둘 때) — 네거티브 탭이면 프롬프트 쪽 칸들을 감춘다 */
+.ptabs { margin: 0 0 6px; }
+.ptabs .ic { flex: 0 0 auto; }
+#promptCard.uc-tab #randBox, #promptCard.uc-tab #secList, #promptCard.uc-tab .pwrap:has(> #prompt), #promptCard.uc-tab #prompt,
+#promptCard.uc-tab #chunkBar, #promptCard.uc-tab #pvWrap { display: none !important; }
+#ucAttachBtn { margin-left: 6px; vertical-align: middle; }
+/* 그림 정보 보기 (NAI Image Inspector 와 같은 차례) */
+.ins-pic { width: 100%; height: 40vh; background: no-repeat center / contain; margin: 6px 0 10px; }
+.ins-line { margin: 3px 0; line-height: 1.5; word-break: break-word; }
+.ins-line b { opacity: .8; }
+.ins-ok { color: var(--green); font-weight: 800; }
+.ins-tabs { margin: 14px 0 6px; }
+.ins-area { max-height: 40vh; overflow: auto; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg0); }
+.ins-area pre { white-space: pre-wrap; margin: 0; font-size: 12px; }
+.ins-val { white-space: pre-wrap; }
+/* NAI 가이던스 칸 아래 경고(높음·낮음·Variety+ 값) — 캐릭터 경고와 같은 모양 */
+.warn-box { margin: 2px 0 6px; padding: 6px 8px; border-radius: 6px; font-size: 12px; line-height: 1.45; background: color-mix(in srgb, var(--gold) 14%, transparent); border: 1px solid color-mix(in srgb, var(--gold) 60%, transparent); color: var(--txt); }
+.warn-box a { color: var(--acc); white-space: nowrap; }
 #maskCanvasWrap { position: relative; align-self: center; line-height: 0; }
 #maskCanvasWrap canvas { border-radius: 8px; max-width: 100%; }
 /* touch-action:none 이 없으면 펜·손가락으로 칠할 때 브라우저가 스크롤·확대로 가로채
@@ -589,7 +610,12 @@ ol.guide { padding-left: 20px; display: flex; flex-direction: column; gap: 6px; 
 .tsrow .ts-cnt { color: var(--dim2); font-size: 11px; font-variant-numeric: tabular-nums; } .tsrow .ts-path { color: var(--dim2); font-size: 10.5px; }
 .tsdesc { font-size: 12px; color: var(--dim); background: var(--bg2); border-radius: 12px; padding: 10px; min-height: 40px; }
 .tsdesc b { color: var(--acc); }
-.chunk-row { display: grid; grid-template-columns: 130px 1fr 130px auto; gap: 8px; align-items: start; margin-bottom: 6px; }
+.chunk-row { display: grid; grid-template-columns: 16px 130px 1fr 34px 130px auto; gap: 8px; align-items: start; margin-bottom: 6px; }
+.ck-drag { cursor: grab; user-select: none; opacity: .55; line-height: 34px; text-align: center; }
+.ck-drag:hover { opacity: 1; }
+.chunk-row.drop, .ck-cat.drop { box-shadow: inset 0 2px 0 var(--acc); }
+.ck-col, .ck-ccol { width: 34px; height: 30px; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg0); cursor: pointer; }
+.ck-ccol { width: 26px; height: 22px; }
 .ck-cat { display: flex; align-items: center; gap: 8px; padding: 8px 4px 6px; margin-top: 6px; border-top: 1px solid var(--line); font-size: 13px; }
 .ck-cat .cdot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
 .ctxmenu { position: fixed; z-index: 300; background: var(--bg1); border: 1px solid var(--line2); border-radius: 12px; box-shadow: var(--shadow); padding: 5px; display: flex; flex-direction: column; min-width: 180px;  overflow-y: auto; }
@@ -808,9 +834,32 @@ input.sc-name-in:hover, input.sc-name-in:focus { border-bottom-color: var(--acc)
 
 /* Opus 사용량 막대 (NAI 와 같은 정보: 남은 % · 장수 · 하루 충전량) */
 #opusBar { display: flex; align-items: center; gap: 6px; font-size: 11px; opacity: .85; cursor: help; }
+/* NAI UsageBar: 채운 부분 안에서 남은 몫(제목 색)·부스트 몫(다른 색), 100% 마다 눈금 */
+.ubar { position: relative; overflow: hidden; border-radius: 3px; background: color-mix(in srgb, currentColor 18%, transparent); }
+.ubar .ub-fill { position: absolute; top: 0; left: 0; height: 100%; overflow: hidden; border-radius: 3px; transition: width .5s ease-in-out; }
+.ubar .ub-a, .ubar .ub-b { position: absolute; top: 0; height: 100%; transition: width .5s ease-in-out, left .5s ease-in-out; }
+.ubar .ub-a { background: currentColor; }
+.ubar .ub-b { background: var(--gold); }
+.ubar .ub-tick { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--bg1, #000); }
+.us-bar { height: 12px; margin: 6px 0; color: var(--acc); }
+.us-line { font-weight: 600; }
+.us-boost { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+#opusBarPlus { padding: 0 4px; line-height: 1; }
+#opusBar.nosub #opusBarPlus { display: none; }
+#opusBar { cursor: pointer; }
+/* 인벤토리 (NAI InventoryModal: 12칸 · 옆에 고른 아이템 설명) */
+.inv-wrap { display: flex; gap: 14px; flex-wrap: wrap; }
+.inv-left { flex: 1 1 260px; display: flex; flex-direction: column; gap: 8px; }
+.inv-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg0); }
+.inv-slot { aspect-ratio: 1; border: 1px solid var(--line); border-radius: 6px; background: var(--bg2); font-size: 26px; display: flex; align-items: center; justify-content: center; }
+.inv-slot.on { border-color: var(--acc); box-shadow: 0 0 0 2px color-mix(in srgb, var(--acc) 40%, transparent); }
+.inv-slot.dim { opacity: .45; }
+.inv-slot.empty { background: transparent; border-style: dashed; opacity: .5; }
+.inv-side { flex: 0 0 200px; display: flex; flex-direction: column; gap: 6px; padding: 14px; border-radius: 6px; background: var(--bg1); }
+.inv-big { font-size: 40px; text-align: center; }
+.inv-pages { justify-content: center; gap: 10px; }
 #opusBar #opusBarTrack { display: inline-block; width: 72px; height: 6px; border-radius: 3px;
   background: color-mix(in srgb, currentColor 18%, transparent); overflow: hidden; }
-#opusBar #opusBarFill { display: block; height: 100%; background: currentColor; transition: width .3s; }
 #opusBar.low { color: #e5534b; opacity: 1; font-weight: 600; }
 
 /* 썸네일 위 삭제 버튼 — 지우려고 굳이 열어 볼 필요가 없게 */

@@ -36,7 +36,14 @@ function catSelectHtml(id, cur) { return `<select id="${id}" class="cat-sel">${c
 function bindCatSelect(sel, onPick) { // "새 분류…" 선택 시 이름 입력
   sel.onchange = () => { if (sel.value === '__new__') { const v = prompt('새 분류 이름'); const n = addChunkCat(v); sel.outerHTML = catSelectHtml(sel.id, n || '기본'); const ns = document.getElementById(sel.id); bindCatSelect(ns, onPick); if (n) onPick(n); return; } onPick(sel.value); };
 }
-function catColor(cat) { const cats = chunkCats(); return CHUNK_COLORS[Math.max(0, cats.indexOf(cat || '기본')) % CHUNK_COLORS.length]; }
+/* 색 (NAI 프롬프트 청크는 청크마다·분류마다 색이 있다 — 빌드 b50892a 청크 편집 «Color»).
+   분류 색은 정해 두면 그 색(S.chunkCatColors), 없으면 예전처럼 분류 차례대로 돌려 쓰는 색. 청크 색은 정해 두면 그 색, 없으면 분류 색. */
+function catColor(cat) {
+  const k = cat || '기본', set = S.chunkCatColors && S.chunkCatColors[k];
+  if (set) return set;
+  const cats = chunkCats(); return CHUNK_COLORS[Math.max(0, cats.indexOf(k)) % CHUNK_COLORS.length];
+}
+function chunkColor(c) { return (c && c.color) || catColor(c && c.cat); }
 function renderChunkBar(target) {
   if (!target) {
     $$('.chunkbar[data-ta]').forEach(b => renderChunkBar(b));
@@ -51,7 +58,7 @@ function renderChunkBar(target) {
     const cc = document.createElement('span'); cc.className = 'chip cat'; cc.textContent = cat; bar.appendChild(cc);
     for (const c of S.chunks.filter(x => (x.cat || '기본') === cat)) {
       const b = document.createElement('button'); b.className = 'chip';
-      b.innerHTML = `<span class="cdot" style="background:${catColor(cat)}"></span>`;
+      b.innerHTML = `<span class="cdot" style="background:${chunkColor(c)}"></span>`;
       b.appendChild(document.createTextNode(c.name));
       /* 프롬프트 칸에는 언제나 '이름' 만 넣는다.
          후보 목록도 이름만 적으면 생성할 때마다 한 줄씩 뽑힌다 — chunkMap() 이 안에서 <이름> 으로 넘긴다.
@@ -263,9 +270,25 @@ function openChunkManager(focus, onlyCat) {
     body.innerHTML = `<div class="hint">청크 = 자주 쓰는 프롬프트 조각. 칩을 클릭하면 프롬프트에 <b>청크 이름</b>이 색칠된 태그로 들어가고, 생성할 때 내용으로 치환됩니다 (Alt+클릭 = 내용 그대로). 분류 제목의 ✎/🗑 으로 분류 이름 변경·삭제. 프롬프트 아래 칩/분류를 <b>우클릭</b>해도 같은 메뉴가 뜹니다.</div>
       <div class="row"><span class="hint">분류 보기:</span><select id="ckCatFilter" style="width:auto"></select></div>
       <div id="ckRows"></div>
-      <div class="row"><button class="btn sm" id="ckAdd">＋ 새 청크</button><button class="btn sm" id="ckAddCat">＋ 새 분류</button><button class="btn sm" id="ckExport">내보내기</button><button class="btn sm" id="ckImport">가져오기</button><span class="hint">변경은 즉시 저장</span></div>`;
+      <div class="row"><button class="btn sm" id="ckAdd">＋ 새 청크</button><button class="btn sm" id="ckAddCat">＋ 새 분류</button><button class="btn sm" id="ckExport">내보내기</button><button class="btn sm" id="ckImport">가져오기</button><button class="btn sm ghost danger" id="ckDelAll" title="NAI «Delete All Prompt Chunks» — 청크와 분류를 모두 지웁니다">🗑 모두 지우기</button><span class="hint">변경은 즉시 저장 · ⠿ 를 끌어 순서와 분류를 바꿉니다</span></div>`;
     const rows = body.querySelector('#ckRows'), filt = body.querySelector('#ckCatFilter');
     let curCat = onlyCat || 'all';
+    /* 끌어서 옮기기 (NAI 청크 목록: 청크는 다른 청크 앞이나 분류로, 분류는 다른 분류 자리로) */
+    let dragChunk = null, dragCatName = null;
+    const moveChunk = (src, before, cat) => {
+      if (!src || src === before) return;
+      S.chunks.splice(S.chunks.indexOf(src), 1);
+      src.cat = cat || '기본';
+      if (before) S.chunks.splice(S.chunks.indexOf(before), 0, src); else S.chunks.push(src);
+      addChunkCat(src.cat); save(); renderChunkBar(); draw();
+    };
+    const moveCat = (from, to) => {
+      if (!from || !to || from === to) return;
+      const cats = chunkCats(), i = cats.indexOf(from), j = cats.indexOf(to);
+      if (i < 0 || j < 0) return;
+      cats.splice(i, 1); cats.splice(cats.indexOf(to) + (i < j ? 1 : 0), 0, from);
+      S.chunkCats = cats; save(); renderChunkBar(); draw();
+    };
     const draw = () => {
       const cats = chunkCats();
       filt.innerHTML = '<option value="all">전체</option>' + cats.map(k => `<option value="${esc(k)}">${esc(k)}</option>`).join('');
@@ -274,8 +297,17 @@ function openChunkManager(focus, onlyCat) {
       const shown = cats.filter(k => curCat === 'all' || k === curCat);
       for (const cat of shown) {
         const head = document.createElement('div'); head.className = 'ck-cat';
-        head.innerHTML = `<span class="cdot" style="background:${catColor(cat)}"></span><b></b><span class="hint"></span><span style="flex:1"></span><button class="btn xs" data-a="ren">✎ 이름 변경</button><button class="btn xs ghost danger" data-a="del">🗑 분류 삭제</button>`;
+        head.innerHTML = `<span class="ck-drag" draggable="true" title="끌어서 분류 순서 바꾸기">⠿</span><input type="color" class="ck-ccol" title="분류 색 — 색을 따로 정하지 않은 청크가 이 색을 씁니다"><b></b><span class="hint"></span><span style="flex:1"></span><button class="btn xs" data-a="ren">✎ 이름 변경</button><button class="btn xs ghost danger" data-a="del">🗑 분류 삭제</button>`;
         head.querySelector('b').textContent = cat;
+        { const cc = head.querySelector('.ck-ccol'); cc.value = catColor(cat);
+          cc.onchange = () => { S.chunkCatColors = S.chunkCatColors || {}; S.chunkCatColors[cat] = cc.value; save(); renderChunkBar(); draw(); }; }
+        { const hd = head.querySelector('.ck-drag');
+          hd.addEventListener('dragstart', e => { dragCatName = cat; dragChunk = null; try { e.dataTransfer.setData('text/plain', cat); e.dataTransfer.effectAllowed = 'move'; } catch (er) { logErr('분류 끌기 시작 실패: ' + er.message); } });
+          head.addEventListener('dragover', e => { if (dragCatName || dragChunk) { e.preventDefault(); head.classList.add('drop'); } });
+          head.addEventListener('dragleave', () => head.classList.remove('drop'));
+          head.addEventListener('drop', e => { head.classList.remove('drop'); e.preventDefault();
+            if (dragChunk) { const c = dragChunk; dragChunk = null; moveChunk(c, null, cat); }
+            else if (dragCatName) { const f = dragCatName; dragCatName = null; moveCat(f, cat); } }); }
         head.querySelector('.hint').textContent = S.chunks.filter(c => (c.cat || '기본') === cat).length + '개';
         head.querySelector('[data-a="ren"]').onclick = () => renameCat(cat);
         head.querySelector('[data-a="del"]').onclick = () => {
@@ -296,9 +328,16 @@ function openChunkManager(focus, onlyCat) {
           if ((c.cat || '기본') !== cat) return;
           anyRow = true;
           const d = document.createElement('div'); d.className = 'chunk-row';
-          d.innerHTML = `<input type="text" placeholder="이름"><textarea rows="1" placeholder="내용" class="ac"></textarea>${catSelectHtml('ckc_' + i, c.cat)}<button class="ic" title="삭제">✕</button>`;
-          const [n, t] = [d.children[0], d.children[1]];
+          d.innerHTML = `<span class="ck-drag" draggable="true" title="끌어서 순서·분류 바꾸기">⠿</span><input type="text" placeholder="이름"><textarea rows="1" placeholder="내용" class="ac"></textarea><input type="color" class="ck-col" title="청크 색 — 분류 색과 같게 두면 분류 색을 따릅니다">${catSelectHtml('ckc_' + i, c.cat)}<button class="ic" title="삭제">✕</button>`;
+          const [n, t] = [d.children[1], d.children[2]];
           n.value = c.name; t.value = c.text;
+          { const col = d.querySelector('.ck-col'); col.value = chunkColor(c);
+            col.onchange = () => { if (col.value.toLowerCase() === String(catColor(c.cat)).toLowerCase()) delete c.color; else c.color = col.value; save(); renderChunkBar(); }; }
+          { const hd = d.querySelector('.ck-drag');
+            hd.addEventListener('dragstart', e => { dragChunk = c; dragCatName = null; try { e.dataTransfer.setData('text/plain', c.name); e.dataTransfer.effectAllowed = 'move'; } catch (er) { logErr('청크 끌기 시작 실패: ' + er.message); } });
+            d.addEventListener('dragover', e => { if (dragChunk) { e.preventDefault(); d.classList.add('drop'); } });
+            d.addEventListener('dragleave', () => d.classList.remove('drop'));
+            d.addEventListener('drop', e => { d.classList.remove('drop'); if (!dragChunk) return; e.preventDefault(); const s = dragChunk; dragChunk = null; moveChunk(s, c, c.cat); }); }
           n.onchange = () => { const nv = n.value.trim().replace(/\s+/g, '_'); const dup = S.chunks.find(x => x !== c && normKey(x.name) === normKey(nv)); if (dup) { toast('같은 이름의 청크가 이미 있습니다: ' + dup.name, 'err'); n.value = c.name; return; } const oldName = c.name; c.name = nv; if (oldName && normKey(oldName) !== normKey(nv)) tomb('chunk', oldName); untomb('chunk', nv); save(); renderChunkBar(); };
           /* 칩 띠를 글자마다 다시 그리면 안 된다 — 청크 77개를 매번 새로 만드는데,
              그때 화면엔 77행짜리 이 창이 떠 있어서 배치 계산이 통째로 다시 돈다.
@@ -348,6 +387,15 @@ function openChunkManager(focus, onlyCat) {
     draw();
     body.querySelector('#ckAdd').onclick = () => { const cat = curCat === 'all' ? '기본' : curCat; let n = 1; while (S.chunks.some(c => normKey(c.name) === normKey('청크' + n))) n++; S.chunks.push({ name: '청크' + n, text: '', cat, createdAt: Date.now() }); addChunkCat(cat); save(); draw(); renderChunkBar(); };
     body.querySelector('#ckAddCat').onclick = () => { const v = prompt('새 분류 이름'); const n = addChunkCat(v); if (!n) return; curCat = n; draw(); renderChunkBar(); };
+    // NAI «Delete All Prompt Chunks»: 청크와 분류를 모두 지운다(지운 기록을 남겨 다른 창·서버와 합칠 때 되살아나지 않게)
+    body.querySelector('#ckDelAll').onclick = () => {
+      if (!S.chunks.length && !(S.chunkCats || []).length) { toast('지울 청크가 없습니다'); return; }
+      if (!confirm(`프롬프트 청크 ${S.chunks.length}개와 분류를 모두 지울까요? 되돌릴 수 없습니다.`)) return;
+      for (const c of S.chunks) tomb('chunk', c.name);
+      for (const k of chunkCats()) if (k !== '기본') tomb('cat', k);
+      S.chunks = []; S.chunkCats = []; S.chunkCatColors = {};
+      save(); renderChunkBar(); draw(); toast('프롬프트 청크를 모두 지웠습니다');
+    };
     body.querySelector('#ckExport').onclick = () => downloadBlob(new Blob([JSON.stringify(S.chunks, null, 2)], { type: 'application/json' }), 'nai-chunks.json');
     body.querySelector('#ckImport').onclick = () => pickFiles(false, async f => {
       // 이름 비교는 프롬프트에서 청크를 찾을 때와 같은 기준이어야 한다 (대소문자·밑줄 무시).
@@ -1640,23 +1688,37 @@ async function toolVary() {
    — V5 모델로 다시 그리는 방식이고 **2배 고정**이다(번들 44868: gb·Kx·aS=2, class tK).
    옛 주소는 없어져 404 "Cannot POST /ai/upscale" 를 준다(2026-09-18 확인). 12.8 까지 우리 업스케일은
    그 옛 주소로 보내고 있어서 누르면 늘 실패했다.
-   요금(번들 tY): 넓이 104만 화소 이하 1 · 174만 이하 2 · 244만 이하 3 · 그 위 4. 입력은 104만 화소 이하만 받는다.
-   Opus 는 그 크기면 무료로 표시한다(NAI 버튼과 같은 조건 t1). */
+   요금과 한도는 부르는 곳마다 다르다 (빌드 b50892a):
+     · 생성 결과 아래 업스케일(actions.upscale): checkUpscalePrice — 넓이 ≤1048576 → 1 · ≤1747627 → 2 · ≤2446678 → 3 · ≤3145728 → 4,
+       그보다 크면 막고 «Image is larger than 1536x2048.». Opus 여도 이 값을 그대로 보여 준다.
+     · 이미지 툴 화면(우리 스마트 툴)의 업스케일: 넓이가 1048576 을 넘으면 막고, 그 안이면 Opus 무료 표시(imageIsOpusFree, 배경 제거만 빼고).
+   12.16 까지는 결과 아래 업스케일도 1024×1024 를 넘으면 막아서, NAI 에서는 되는 1536×1024 같은 그림을 못 키웠다. */
 const UPSCALE_MODEL = 'nai-diffusion-5-curated';
 const UPSCALE_X = 2;
-function upscaleCost(w, h, isOpus) {
+const UPSCALE_TABLE = [[1048576, 1], [1747627, 2], [2446678, 3], [3145728, 4]];
+function upscaleCost(w, h, from, isOpus) {
   const px = w * h;
-  if (!px || px > 1048576) return null;          // NAI 도 이 크기를 넘으면 버튼을 막는다
-  if (isOpus) return 0;
-  return px <= 1048576 ? 1 : px <= 1747627 ? 2 : px <= 2446678 ? 3 : 4;
+  if (!px) return null;
+  if (from === 'tool') return px > 1048576 ? null : (isOpus ? 0 : 1);
+  for (const [a, c] of UPSCALE_TABLE) if (px <= a) return c;
+  return null;
 }
-function upscaleCostLabel(w, h) {
-  const c = upscaleCost(w, h, !!R.isOpus);   // Opus 판정은 app.js refreshAnlas 한 곳에서만 (tier>=3 && 구독 활성)
-  return c == null ? '1024×1024 이하만 가능' : (c === 0 ? 'Opus 무료' : '◈ ' + c);
+function upscaleCostLabel(w, h, from) {
+  const c = upscaleCost(w, h, from, !!R.isOpus);   // Opus 판정은 app.js refreshAnlas 한 곳에서만 (tier>=3 && 구독 활성)
+  if (c == null) return from === 'tool' ? '1024×1024 이하만 가능' : '1536×2048 보다 크면 안 됨';
+  return c === 0 ? 'Opus 무료' : '◈ ' + c;
 }
 function toolUpscale() {   // 2배 고정이라 고를 것이 없다 — 바로 실행 (NAI 웹도 한 번 누르면 바로 돈다)
   const it = curItem(); if (!it) return;
-  runUpscale(it);
+  runUpscale(it, 'result');
+}
+/* NAI actions.upscale: 단추에 요금(1~4)을 보이고, 1536×2048 보다 큰 그림이면 막고 «Image is larger than 1536x2048.» 을 띄운다 */
+function paintUpscaleBtn(it) {
+  const b = $('#tUpscale'); if (!b) return;
+  const c = it && it.w ? upscaleCost(it.w, it.h, 'result', false) : null;
+  b.disabled = !!it && c == null;
+  b.title = !it ? '업스케일 2× — V5 로 다시 그려 확대'
+    : (c == null ? `1536×2048 보다 큰 그림이라 업스케일할 수 없습니다 (지금 ${it.w}×${it.h}, NAI 와 같음)` : `업스케일 2× — V5 로 다시 그려 확대 (◈ ${c})`);
 }
 /* 진행·완료 표시. 메인 화면의 #genStatus 는 스마트 툴 탭에서는 숨겨져 있어
    툴을 돌려도 화면상 아무 일도 안 일어난 것처럼 보였다 → 스마트 툴 쪽에도 같이 쓴다. */
@@ -1664,14 +1726,19 @@ function setGenStatus(t) {
   const a = $('#genStatus'); if (a) a.textContent = t;
   const b = $('#stCost'); if (b && S.mode === 'tools') b.textContent = t;
 }
-async function runUpscale(it) {
+async function runUpscale(it, from) {
+  from = from === 'tool' ? 'tool' : 'result';
   // 실행 시점에 다시 검사 — 누르는 사이 생성이 시작됐을 수 있다 (runDirector 와 동일)
   if (R.gen) { toast('이미 작업 중'); return; }
   if (!it || !it.blob) { toast('업스케일할 이미지가 없습니다', 'err'); return; }
-  // 크기 제한은 실행 지점에서 본다 — 큰 이미지를 보내면 서버가 거절한다
-  if (it.w * it.h > 1048576) { toast(`업스케일은 1024×1024(약 104만 화소) 이하만 가능합니다 (지금 ${it.w}×${it.h})`, 'err'); return; }
+  // 크기 제한은 실행 지점에서 본다 — NAI 가 막는 크기는 보내지 않는다 (위 주석: 결과 아래는 1536×2048, 스마트 툴은 1024×1024)
+  if (upscaleCost(it.w, it.h, from, false) == null) {
+    toast(from === 'tool' ? `스마트 툴의 업스케일은 1024×1024(약 104만 화소) 이하만 됩니다 (지금 ${it.w}×${it.h}) — NAI 이미지 툴과 같은 한도`
+                          : `1536×2048 보다 큰 그림은 업스케일할 수 없습니다 (지금 ${it.w}×${it.h}) — NAI 와 같은 한도`, 'err');
+    return;
+  }
   const tw = it.w * UPSCALE_X, th = it.h * UPSCALE_X;
-  R.gen = true; setGenStatus(`업스케일 ${UPSCALE_X}× 중… ${it.w}×${it.h} → ${tw}×${th} (${upscaleCostLabel(it.w, it.h)})`); $('#btnGen').disabled = true;
+  R.gen = true; setGenStatus(`업스케일 ${UPSCALE_X}× 중… ${it.w}×${it.h} → ${tw}×${th} (${upscaleCostLabel(it.w, it.h, from)})`); $('#btnGen').disabled = true;
   try {
     const res = await apiFetch('/img/ai/upscale', { method: 'POST', headers: authHeaders(true),
       body: JSON.stringify({ image: await blobToB64(it.blob), model: UPSCALE_MODEL, declared_blur_sigma: 0 }) });
@@ -1924,7 +1991,16 @@ function applyMeta(meta, o) {
       negative_prompt: ap.negative_prompt && ap.negative_prompt.base_caption != null ? ap.negative_prompt.base_caption : p.negative_prompt };
   }
   const m = baseModelOf(meta.model);
-  if ((!o || o.settings || o.vibes) && MODELS[m]) S.model = m;
+  /* hist = 히스토리 Ctrl+클릭(NAI 히스토리 설정 복사): 그림 설정을 통째로 옮기고 시드는 지금 것을 둔다(Ctrl+Shift 면 그림 시드).
+     그 밖(가져오기 창·⤴·설정 창 PNG)은 NAI «그림에서 설정 가져오기»(빌드 b50892a)와 같게 한다. */
+  const hist = !!(o && o.fromHist);
+  const prevModel = S.model, prevP = pickModelParams(S);   // NAI o = 가져오기 전 지금 모델의 설정
+  /* 설정·바이브를 가져오면 그림의 모델로 바꾼다. 다른 모델로 가면 NAI 는 그 모델이 기억한 값이 아니라
+     기본값(getModelDefaultParams)에서 시작한다 — 지금 모델의 설정은 제 몫으로 넣어 두고 바꾼다. */
+  if ((!o || o.settings || o.vibes || hist) && MODELS[m] && m !== S.model) {
+    useModelParams(m);
+    Object.assign(S, modelParamDefaults(m));
+  }
   const info = MODELS[S.model];
   // 품질 태그·네거티브 프리셋을 떼는 기준은 그림을 만든 모델이다 (NAI: Source 의 모델로 찾는다)
   const detModel = MODELS[m] ? m : S.model;
@@ -1932,6 +2008,13 @@ function applyMeta(meta, o) {
   const { useCoords } = cm; let prompt = cm.prompt, chars = cm.chars;
   if (o && o.clean) { prompt = cleanBrackets(prompt); chars = chars.map(c => ({ ...c, prompt: cleanBrackets(c.prompt), uc: cleanBrackets(c.uc) })); }
   if (want('settings')) {
+    /* NAI 설정 가져오기: 그 모델 기본값 위에 그림 값(settingsImportWhiteList — 스텝·가이던스·샘플러·스케줄·SMEA·디크리스퍼·
+       리스케일·크기·Variety+·세기·노이즈)을 얹는다. 목록에 없는 칸은 기본값으로 돌아가되 장수와 바이브 세기 맞추기는 지금 값,
+       시드는 «시드»를 같이 고르지 않았으면 비운다(무작위). 히스토리 Ctrl+클릭은 장수까지 그림 값으로 옮긴다. */
+    const keepN = S.n, keepVN = S.vibeNormalize;
+    Object.assign(S, modelParamDefaults(S.model));
+    S.vibeNormalize = keepVN;
+    S.n = hist && p.n_samples ? p.n_samples : keepN;
     S.quality = cm.quality;                 // 못 뗐으면 프롬프트에 이미 들어 있는 것 — 토글은 끈다 (두 벌 방지)
     S.transparent = cm.transparent;
   }
@@ -1966,25 +2049,58 @@ function applyMeta(meta, o) {
     if (!getUcText(S.model, ucIdx(S.model))) return;             // UC 프리셋 "없음" — 원래 대상이 아니다
     S.autoNsfw = hadNsfw;
   };
-  if (want('uc')) {
+  /* 네거티브 프리셋은 네거티브를 가져올 때뿐 아니라 설정을 가져올 때도 그림의 것으로 바뀐다 (NAI: R.ucPresetId = 찾은 프리셋).
+     그림 모델과 지금 모델이 다르면 같은 프리셋(id)을 이 모델 목록에서 찾는다(없으면 첫째). */
+  if (want('uc') || want('settings')) {
     const cu = cleanMetaUc(p, detModel, uc);
-    S.ucPreset = cu.presetIdx; uc = cu.uc;
-    S.uc = o && o.clean ? cleanBrackets(uc) : uc;
-    nsfwDecide();     // 프리셋이 정해진 뒤에 판단한다 (프리셋이 "없음" 이면 건드리지 않는다)
+    let pi = cu.presetIdx;
+    if (detModel !== S.model && MODELS[detModel] && MODELS[S.model]) {
+      const id = (MODELS[detModel].ucs[pi] || {}).id, j = MODELS[S.model].ucs.findIndex(u => u.id === id);
+      pi = j >= 0 ? j : 0;
+    }
+    S.ucPreset = pi;
+    if (want('uc')) {
+      uc = cu.uc;
+      S.uc = o && o.clean ? cleanBrackets(uc) : uc;
+      nsfwDecide();     // 프리셋이 정해진 뒤에 판단한다 (프리셋이 "없음" 이면 건드리지 않는다)
+    }
   }
   if (want('settings')) {
     if (p.width) S.w = p.width; if (p.height) S.h = p.height;
     if (p.steps) S.steps = p.steps; if (p.scale != null) S.scale = p.scale;
     if (p.cfg_rescale != null) S.rescale = p.cfg_rescale;
     if (p.sampler) S.sampler = p.sampler; if (p.noise_schedule) S.schedule = p.noise_schedule;
+    // NAI 가져오기: 옛 샘플러 nai_smea·nai_smea_dyn 은 Euler Ancestral + SMEA(·DYN)로, DYN 만 켜져 있으면 SMEA 도 켠다
+    if (S.sampler === 'nai_smea') { S.sampler = 'k_euler_ancestral'; p = { ...p, sm: true }; }
+    else if (S.sampler === 'nai_smea_dyn') { S.sampler = 'k_euler_ancestral'; p = { ...p, sm: true, sm_dyn: true }; }
+    if (p.strength != null) S.strength = p.strength;   // 세기·노이즈도 NAI 가져오기 목록에 든다 (그림을 넣어 만든 그림에만 적혀 있다)
+    if (p.noise != null) S.noise = p.noise;
     // NAI: V4 묶음 모델에서 노이즈 스케줄 native 는 karras 로 가져온다
     if (S.schedule === 'native' && (MODELS[S.model] || {}).ver >= 40 && (MODELS[S.model] || {}).ver < 50) S.schedule = 'karras';
+    /* Variety+ (NAI 가져오기): 그림에 적힌 skip_cfg_above_sigma 를 그 크기의 배율로 나눠 계수로 되돌리고 그대로 둔다.
+       이 모델 값(V4.5 58 · 그 밖 19)과 다르면(다른 모델 그림) NAI 처럼 그 값을 쓰고 칸 아래에 경고를 띄운다. */
     S.variety = p.skip_cfg_above_sigma != null && p.skip_cfg_above_sigma !== 0;
+    S.varietyCoef = null;
+    if (S.variety && p.width && p.height) {
+      const coef = p.skip_cfg_above_sigma / Math.sqrt(p.width * p.height / (832 * 1216));
+      if (isFinite(coef) && Math.abs(coef - sigmaCoef(S.model)) > 1e-6) S.varietyCoef = coef;
+    }
     S.decrisper = !!p.dynamic_thresholding;
-    S.smea = !!p.sm; S.smeaDyn = !!p.sm_dyn;
-    if (p.uncond_scale != null) S.ucStrength = p.uncond_scale;
-    S.legacyUc = !!p.legacy_uc;
+    S.smea = !!p.sm || !!p.sm_dyn; S.smeaDyn = !!p.sm_dyn;
+    // 네거티브 세기(uncond_scale)는 가져오지 않는다 — NAI 가져오기 목록(settingsImportWhiteList)에 없다 (대조표 A26)
+    /* 레거시 프롬프트 컨디셔닝: 히스토리 복사는 그림 값, 가져오기는 NAI 처럼 «가져오기 전 모델이 V4 면 그 모델 값, 아니면 끔» */
+    S.legacyUc = hist ? !!p.legacy_uc : (capsOf(prevModel).legacyUcOk ? !!prevP.legacyUc : false);
     S.aiChoice = !useCoords;   // 좌표 사용 여부는 설정에 든다 (NAI use_coords)
+    /* V3 SMEA 자동(NAI): 가져오기 전 모델의 «SMEA 자동»을 따르되, 큰 크기인데 SMEA 가 꺼진 그림·작은 크기인데 SMEA 가 켜진 그림이면 끈다
+       (그 그림이 SMEA 자동으로 만든 것이 아니라는 뜻이라서다). */
+    if (capsOf(S.model).autoSmea) {
+      const area = S.w * S.h;
+      S.autoSmea = prevP.autoSmea !== false && !(area >= AUTO_SMEA_AREA && !S.smea) && !(area < AUTO_SMEA_AREA && S.smea);
+    }
+    if (!want('seed')) {
+      if (hist) { S.seed = prevP.seed; S.randomSeed = prevP.randomSeed; }   // 히스토리 Ctrl+클릭은 지금 시드를 둔다
+      else { S.seed = ''; S.randomSeed = true; }                             // 가져오기는 시드를 비운다(무작위)
+    }
   }
   if (want('seed') && p.seed != null) { S.seed = String(p.seed); S.randomSeed = false; }
   if (want('chars')) {
@@ -2168,19 +2284,167 @@ function modelFromSource(src) {
   if (/V3/i.test(src)) return 'nai-diffusion-3';
   return S.model;
 }
-async function openMetaViewer(blob, title) {
-  const chunks = await pngTextChunks(new Uint8Array(await blob.arrayBuffer()));
-  const st = await blobHasStealth(blob);
-  openModal(title || 'PNG 메타데이터', body => {
-    const sd = document.createElement('div'); sd.className = 'hint'; sd.innerHTML = st ? '🕵 알파 채널에 숨은 메타(stealth pnginfo) <b>있음</b> — 🧹 제거 저장을 쓰면 함께 지워집니다' : '숨은(stealth) 메타 없음'; body.appendChild(sd);
-    if (!chunks.length) { const d = document.createElement('div'); d.className = 'hint'; d.textContent = '텍스트 메타데이터 청크 없음'; body.appendChild(d); return; }
-    for (const c of chunks) {
-      const h = document.createElement('div'); h.className = 'mtitle'; h.textContent = c.key; body.appendChild(h);
-      const pre = document.createElement('pre'); let txt = c.text;
-      if (c.key === 'Comment') { try { txt = JSON.stringify(JSON.parse(c.text), null, 2); } catch (e) {} }
-      pre.textContent = txt; body.appendChild(pre);
+/* ── 그림 정보 보기 (NAI «Image Inspector», 빌드 b50892a inspect 묶음) ─────────────────────────
+   NAI 와 같은 순서: 그림 · 제목(Title) · 설명(Description) · 소프트웨어(Software) · 출처(Source + 모델 이름 + NAI 서명이 맞으면 ✓)
+   · 요청 종류(텍스트로 그림·그림으로 그림·인페인트 + 바이브·그림에 넣은 바이브·정밀 레퍼런스) · «간단히 / 원본 매개변수»(마지막으로 본 쪽 기억).
+   글 묶음이 지워진 그림은 투명도에 숨은 기록(stealth)에서 읽는다. 다른 그림을 열거나, 창에 끌어 놓거나, 붙여 넣어도 본다(NAI 와 같음).
+   서명 확인도 NAI 와 같다: Comment 의 signed_hash 를 떼어 낸 글 + 그림 RGB(또는 투명도 맨 끝 비트를 지운 RGBA)를 NAI 공개 키로 Ed25519 확인. */
+const NAI_SIGN_KEY = 'Y2JcQAOhLwzwSDUJPNgL04nS0Tbqm7cSRc4xk0vRMic=';
+/* 8비트·인터레이스 없는 PNG(회색·회색+투명·RGB·RGBA)를 캔버스 없이 그대로 푼다. 캔버스는 반투명한 점의 색을 바꿀 수 있어 서명 확인에 쓸 수 없다. */
+async function pngRgbaExact(u8) {
+  if (!(u8 && u8.length > 33 && PNG_SIG.every((b, i) => u8[i] === b)) || typeof DecompressionStream !== 'function') return null;
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  let p = 8, w = 0, h = 0, depth = 0, ctype = 0, inter = 0; const idat = [];
+  while (p + 8 <= u8.length) {
+    const len = dv.getUint32(p), type = String.fromCharCode(u8[p + 4], u8[p + 5], u8[p + 6], u8[p + 7]), d0 = p + 8;
+    if (type === 'IHDR') { w = dv.getUint32(d0); h = dv.getUint32(d0 + 4); depth = u8[d0 + 8]; ctype = u8[d0 + 9]; inter = u8[d0 + 12]; }
+    else if (type === 'IDAT') idat.push(u8.subarray(d0, d0 + len));
+    else if (type === 'IEND') break;
+    p = d0 + len + 4;
+  }
+  const ch = { 0: 1, 2: 3, 4: 2, 6: 4 }[ctype];
+  if (depth !== 8 || inter !== 0 || !ch || !w || !h || !idat.length) return null;
+  const raw = new Uint8Array(await new Response(new Blob(idat).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer());
+  const stride = w * ch; if (raw.length < h * (stride + 1)) return null;
+  const out = new Uint8ClampedArray(w * h * 4); let prev = new Uint8Array(stride), cur = new Uint8Array(stride);
+  for (let y = 0; y < h; y++) {
+    const f = raw[y * (stride + 1)], row = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    for (let x = 0; x < stride; x++) {
+      const a = x >= ch ? cur[x - ch] : 0, b = prev[x], c = x >= ch ? prev[x - ch] : 0;
+      let v = row[x];
+      if (f === 1) v += a; else if (f === 2) v += b; else if (f === 3) v += (a + b) >> 1;
+      else if (f === 4) { const q = a + b - c, pa = Math.abs(q - a), pb = Math.abs(q - b), pc = Math.abs(q - c); v += (pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c); }
+      cur[x] = v & 255;
     }
-  });
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4, s = x * ch;
+      if (ch === 4) { out[o] = cur[s]; out[o + 1] = cur[s + 1]; out[o + 2] = cur[s + 2]; out[o + 3] = cur[s + 3]; }
+      else if (ch === 3) { out[o] = cur[s]; out[o + 1] = cur[s + 1]; out[o + 2] = cur[s + 2]; out[o + 3] = 255; }
+      else if (ch === 2) { out[o] = out[o + 1] = out[o + 2] = cur[s]; out[o + 3] = cur[s + 1]; }
+      else { out[o] = out[o + 1] = out[o + 2] = cur[s]; out[o + 3] = 255; }
+    }
+    const t = prev; prev = cur; cur = t;
+  }
+  return { width: w, height: h, data: out };
+}
+async function canvasRgba(blob) {
+  const img = await blobToImage(blob);
+  const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+  const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0);
+  return x.getImageData(0, 0, c.width, c.height);
+}
+async function ed25519Verify(pubB64, sigB64, msg) {
+  try {
+    const key = await crypto.subtle.importKey('raw', b64ToU8(pubB64), { name: 'Ed25519' }, false, ['verify']);
+    return await crypto.subtle.verify({ name: 'Ed25519' }, key, b64ToU8(sigB64), msg);
+  } catch (e) { return null; }   // 이 브라우저가 Ed25519 를 모르면 null — 그때는 ✓ 를 띄우지 않는다
+}
+/* NAI x(그림, Comment): 'valid' · 'invalid' · 'no_signature' · 'unsupported'  (pub: 시험 때만 다른 공개 키를 넣는다) */
+async function naiSignCheck(blob, comment, pub) {
+  const u8 = new Uint8Array(await blob.arrayBuffer());
+  const isPng = PNG_SIG.every((b, i) => u8[i] === b), isWebp = u8.length > 12 && String.fromCharCode(u8[8], u8[9], u8[10], u8[11]) === 'WEBP';
+  if (!isPng && !isWebp) return 'unsupported';
+  let t = String(comment || '');
+  try { const j = JSON.parse(t); if (j && typeof j.Comment === 'string') t = j.Comment; } catch (e) { return 'no_signature'; }
+  const m = t.match(/"signed_hash": "([^"]*)"/); if (!m) return 'no_signature';
+  let stripped = t.replace(', ' + m[0], ''); if (stripped === t) stripped = t.replace(m[0] + ', ', ''); if (stripped === t) stripped = t.replace(m[0], '');
+  const img = (isPng ? await pngRgbaExact(u8).catch(() => null) : null) || await canvasRgba(blob).catch(() => null);
+  if (!img) return 'invalid';
+  const tail = new TextEncoder().encode(stripped), n = img.width * img.height, d = img.data;
+  const rgb = new Uint8Array(3 * n + tail.length);
+  for (let i = 0; i < n; i++) { rgb[3 * i] = d[4 * i]; rgb[3 * i + 1] = d[4 * i + 1]; rgb[3 * i + 2] = d[4 * i + 2]; }
+  rgb.set(tail, 3 * n);
+  const rgba = new Uint8Array(4 * n + tail.length); rgba.set(d.subarray(0, 4 * n));
+  for (let i = 3; i < 4 * n; i += 4) rgba[i] &= 254;
+  rgba.set(tail, 4 * n);
+  for (const msg of [rgb, rgba]) { const ok = await ed25519Verify(pub || NAI_SIGN_KEY, m[1], msg); if (ok === null) return 'unsupported'; if (ok) return 'valid'; }
+  return 'invalid';
+}
+/* 그림 파일에서 NAI 가 읽는 기록(Title·Description·Software·Source·Comment·Generation time)을 꺼낸다 — 글 묶음이 없으면 숨은 기록에서 */
+async function inspectMetaOf(blob) {
+  const chunks = await pngTextChunks(new Uint8Array(await blob.arrayBuffer())).catch(() => []);
+  const X = {}; for (const c of chunks) if (X[c.key] === undefined) X[c.key] = c.text;
+  let viaStealth = false;
+  if (X.Comment === undefined) {
+    const st = await readStealthMeta(blob).catch(() => null);
+    if (st && typeof st === 'object') { for (const k of Object.keys(st)) if (X[k] === undefined) X[k] = typeof st[k] === 'string' ? st[k] : JSON.stringify(st[k]); viaStealth = true; }
+  }
+  return { X, chunks, viaStealth };
+}
+const INSPECT_REQ = { 0: '알 수 없는 요청', PromptGenerateRequest: '텍스트로 그림 생성', Img2ImgRequest: '그림으로 그림 생성', NativeInfillingRequest: '인페인트' };
+async function openMetaViewer(blob, title) {
+  openModal(title || '그림 정보', body => {
+    body.innerHTML = `<div class="row" style="justify-content:flex-end;gap:6px"><button class="btn sm" id="insOpen" title="다른 그림 파일을 열어 정보를 봅니다 (이 창에 그림을 끌어 놓거나 붙여 넣어도 됩니다)">다른 그림 열기</button></div><div id="insBody"></div>`;
+    const box = body.querySelector('#insBody');
+    const show = async b => {
+      box.innerHTML = '<div class="hint">읽는 중…</div>';
+      let url = null;
+      try {
+        const { X, chunks, viaStealth } = await inspectMetaOf(b);
+        url = URL.createObjectURL(b);
+        box.innerHTML = '';
+        const pic = document.createElement('div'); pic.className = 'ins-pic'; pic.style.backgroundImage = `url(${url})`; box.appendChild(pic);
+        const line = (k, v, cls) => { const d = document.createElement('div'); d.className = 'ins-line' + (cls ? ' ' + cls : ''); const b1 = document.createElement('b'); b1.textContent = k + ': '; d.appendChild(b1); const s = document.createElement('span'); s.textContent = v; d.appendChild(s); box.appendChild(d); return s; };
+        if (X.Comment === undefined) { const d = document.createElement('div'); d.className = 'hint'; d.style.textAlign = 'center'; d.textContent = '이 그림에는 생성 기록이 없습니다.'; box.appendChild(d); }
+        else {
+          let V = null; try { V = JSON.parse(X.Comment); } catch (e) { V = null; }
+          if (X.Title !== undefined) line('제목', X.Title);
+          if (X.Description !== undefined) line('설명', X.Description);
+          if (X.Software !== undefined) line('소프트웨어', X.Software);
+          if (X.Source !== undefined) {
+            const mid = typeof modelFromSource === 'function' ? modelFromSource(X.Source) : '';
+            const s = line('출처', X.Source + (MODELS[mid] ? ` (${MODELS[mid].name})` : ''));
+            naiSignCheck(b, X.Comment).then(r => { if (r === 'valid') { const ok = document.createElement('span'); ok.className = 'ins-ok'; ok.textContent = ' ✓'; ok.title = 'NAI 서명이 맞습니다 — NovelAI 에서 만든 그대로인 그림입니다'; s.appendChild(ok); } }).catch(e => logErr('서명 확인 실패: ' + e.message));
+          }
+          if (V) {
+            const rt = INSPECT_REQ[V.request_type != null ? V.request_type : 0] || String(V.request_type);
+            const extra = [];
+            if (V.controlnet_model) extra.push('controlnet: ' + V.controlnet_model);
+            if ((Array.isArray(V.reference_strength_multiple) && V.reference_strength_multiple.length) || (V.reference_strength || 0) > 0)
+              extra.push('바이브' + (Array.isArray(V.reference_image_multiple) && V.reference_image_multiple.length ? ', 그림에 넣은 바이브' : ''));
+            if (Array.isArray(V.director_reference_strengths) && V.director_reference_strengths.length) extra.push('정밀 레퍼런스');
+            line('요청 종류', rt + extra.map(x => ` (${x})`).join(''));
+            const tabs = document.createElement('div'); tabs.className = 'seg ins-tabs'; tabs.innerHTML = '<button data-v="0">간단히</button><button data-v="1">원본 매개변수</button>'; box.appendChild(tabs);
+            const area = document.createElement('div'); area.className = 'ins-area'; box.appendChild(area);
+            let raw = false; try { raw = localStorage.getItem('inspect-viewraw') === '1'; } catch (e) { logErr('정보 보기 방식 읽기 실패(간단히로 봅니다): ' + e.message); }
+            const paint = () => {
+              tabs.querySelectorAll('button').forEach(x => x.classList.toggle('on', (x.dataset.v === '1') === raw));
+              area.innerHTML = '';
+              if (raw) { const pre = document.createElement('pre'); pre.textContent = JSON.stringify(V, null, 4); area.appendChild(pre); return; }
+              const row = (k, v) => { if (v === undefined || v === null) return; const d = document.createElement('div'); d.className = 'ins-line'; const b1 = document.createElement('b'); b1.textContent = k + ': '; d.appendChild(b1); const s = document.createElement('span'); s.className = 'ins-val'; s.textContent = String(v); d.appendChild(s); area.appendChild(d); };
+              row('프롬프트', V.prompt); row('네거티브', V.uc);
+              const cc = (V.v4_prompt && V.v4_prompt.caption && V.v4_prompt.caption.char_captions) || [];
+              const nc = (V.v4_negative_prompt && V.v4_negative_prompt.caption && V.v4_negative_prompt.caption.char_captions) || [];
+              cc.forEach((c, i) => { row(`캐릭터 ${i + 1} 프롬프트`, c && c.char_caption); row(`캐릭터 ${i + 1} 네거티브`, nc[i] ? nc[i].char_caption : ''); });
+              if (V.width !== undefined && V.height !== undefined) row('크기', `${V.width}x${V.height}`);
+              row('시드', V.seed); row('스텝', V.steps);
+              if (V.sampler !== undefined) row('샘플러', `${V.sampler} ${V.noise_schedule ? '(' + V.noise_schedule + ')' : ''} ${V.sm_dyn ? '[SMEA+DYN]' : V.sm ? '[SMEA]' : ''}`.trim());
+              row('프롬프트 가이던스', V.scale); row('가이던스 리스케일', V.cfg_rescale); row('네거티브 세기', V.uncond_scale);
+            };
+            tabs.querySelectorAll('button').forEach(x => x.onclick = () => { raw = x.dataset.v === '1'; try { localStorage.setItem('inspect-viewraw', raw ? '1' : '0'); } catch (e) { logErr('정보 보기 방식 기억 실패: ' + e.message); } paint(); });
+            paint();
+          }
+        }
+        // 우리 앱에만 있는 것: 숨은 기록이 있는지(🧹 제거 저장이 지운다)와 글 묶음 원문
+        const st = await blobHasStealth(b).catch(() => false);
+        const sd = document.createElement('div'); sd.className = 'hint'; sd.style.marginTop = '10px';
+        sd.innerHTML = (viaStealth ? '글 묶음이 지워져 있어 투명도에 숨은 기록에서 읽었습니다. ' : '') + (st ? '🕵 투명도에 숨은 기록(stealth) <b>있음</b> — 🧹 제거 저장을 쓰면 함께 지워집니다' : '숨은(stealth) 기록 없음');
+        box.appendChild(sd);
+        if (chunks.length) {
+          const det = document.createElement('details'); det.className = 'sub'; det.innerHTML = `<summary>PNG 글 묶음 ${chunks.length}개 원문</summary>`;
+          for (const c of chunks) { const h = document.createElement('div'); h.className = 'mtitle'; h.textContent = c.key; det.appendChild(h); const pre = document.createElement('pre'); let txt = c.text; if (c.key === 'Comment') { try { txt = JSON.stringify(JSON.parse(c.text), null, 2); } catch (e) { txt = c.text; /* JSON 이 아니면 원문 그대로 보인다 */ } } pre.textContent = txt; det.appendChild(pre); }
+          box.appendChild(det);
+        }
+      } catch (e) { box.innerHTML = ''; const d = document.createElement('div'); d.className = 'hint'; d.textContent = '그림을 읽지 못했습니다: ' + e.message; box.appendChild(d); }
+      finally { if (url) setTimeout(() => URL.revokeObjectURL(url), 60000); }
+    };
+    body.querySelector('#insOpen').onclick = () => pickFiles(false, f => show(f), 'image/*');
+    body.addEventListener('dragover', e => { e.preventDefault(); });
+    body.addEventListener('drop', e => { const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (f && /^image\//.test(f.type)) { e.preventDefault(); e.stopPropagation(); show(f); } });
+    body.addEventListener('paste', e => { const it = [...((e.clipboardData && e.clipboardData.items) || [])].find(x => /^image\//.test(x.type)); if (it) { e.preventDefault(); show(it.getAsFile()); } });
+    body.tabIndex = -1;
+    if (blob) show(blob); else box.innerHTML = '<div class="hint" style="text-align:center;margin-top:40px">«다른 그림 열기»를 누르거나 이 창에 그림을 끌어 놓으면 생성 기록을 보여 줍니다.</div>';
+  }, true);
 }
 
 
@@ -3208,7 +3472,7 @@ const ST_TOOLS = [
     run: (it, o) => runDirector({ req_type: 'colorize', width: it.w, height: it.h, image: it.b64, prompt: o.prompt, defry: o.defry }, '채색', it) },
   { k: 'emotion', ic: '🙂', n: '표정 변경', d: '감정을 골라 표정을 바꿉니다', emo: true, prompt: '추가 프롬프트 (선택)', defry: true,
     run: (it, o) => runDirector({ req_type: 'emotion', width: it.w, height: it.h, image: it.b64, prompt: o.emo + ';;' + (o.prompt || ''), defry: o.defry }, '표정 변경', it) },
-  { k: 'upscale', ic: '⤢', n: '업스케일', d: '2배 확대 · V5 로 다시 그림 (1024² 이하만)', run: it => runUpscale(it.item) },
+  { k: 'upscale', ic: '⤢', n: '업스케일', d: '2배 확대 · V5 로 다시 그림 (1024² 이하만)', run: it => runUpscale(it.item, 'tool') },
   { k: 'i2i', ic: '🖼', n: '이미지 투 이미지', d: '이 이미지를 바탕으로 다시 생성', run: it => { setI2I(it.blob, it.meta, true); setMode('main'); toast('메인 탭의 i2i 로 넣었습니다'); } },
   { k: 'edit', ic: '✏', n: '편집', d: '그림판에서 색칠·지우기·그림 넣기·캔버스 늘리기 뒤 바탕 그림으로', run: async it => { setMode('main'); await cvEditImage(it.blob, it.meta); } },
   { k: 'inpaint', ic: '🖌', n: '인페인팅', d: '칠한 부분만 다시 그리기 (그림판 마스크 모드)', run: async it => { setMode('main'); await cvInpaintItem(it.blob, it.meta); } },
@@ -3230,7 +3494,7 @@ function renderSmartTools() {
   list.innerHTML = '';
   for (const t of ST_TOOLS) {
     const c = document.createElement('div'); c.className = 'st-card' + (has ? '' : ' off');
-    const tc = DT.has(t.k) ? fmt(costOf(t.k)) : (t.k === 'upscale' && has && ST.w ? upscaleCostLabel(ST.w, ST.h) : '');
+    const tc = DT.has(t.k) ? fmt(costOf(t.k)) : (t.k === 'upscale' && has && ST.w ? upscaleCostLabel(ST.w, ST.h, 'tool') : '');
     c.innerHTML = `<div class="st-t"><span class="st-i">${t.ic}</span><b>${t.n}</b></div><div class="hint">${t.d}${tc ? ` · <b>${tc}</b>` : ''}</div><div class="st-opt"></div>
       <button class="btn sm primary st-go"${has ? '' : ' disabled'}>실행</button>`;
     const opt = c.querySelector('.st-opt');
