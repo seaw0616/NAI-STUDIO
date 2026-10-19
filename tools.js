@@ -1758,6 +1758,7 @@ const DIRECTOR = [
   ['bg-removal', '🪄 배경 제거', '인물만 남기고 배경 투명'], ['lineart', '✒ 선화 추출', '이미지를 선화로'], ['sketch', '✏ 스케치', '연필 스케치 스타일'],
   ['colorize', '🎨 채색', '선화/흑백을 채색 (프롬프트·강도)'], ['emotion', '🙂 감정 변경', '표정 변경 (감정 선택)'], ['declutter', '🧽 정리', '텍스트·잡동사니 제거'],
   ['declutter-keep-bubbles', '💬 정리(말풍선 유지)', '잡동사니만 지우고 말풍선은 남김'],
+  ['pixel-snap', '▦ Pixel Snap', 'AI 가 만든 도트 그림을 깔끔하게 다듬습니다 (브라우저에서 처리 · Anlas 안 듦)'],
 ];
 /* NAI 웹 번들(31a484c, chunks/5196)의 감정 enum 전체 24종 — 순서까지 그대로.
    예전엔 19종만 있었고 주석에 '확정 19종' 이라고 적혀 있었다(틀린 주석이었다).
@@ -1784,6 +1785,12 @@ function openDirector() {
       b.innerHTML = `<b>${name.split(' ')[0]}</b><span>${name.split(' ').slice(1).join(' ')}</span><span class="hint">${desc}</span>`;
       b.onclick = () => {
         [...grid.children].forEach(x => x.classList.toggle('primary', x === b));
+        if (key === 'pixel-snap') {   // NAI: 서버에 보내지 않고 브라우저 작업자로 — 요금 없음, 지원하지 않는 브라우저면 안내만
+          opts.innerHTML = psSupported() ? `${psOptsHtml()}<div class="row"><button class="btn primary" id="dtRun">실행</button><span class="hint">무료 (브라우저에서 처리)</span></div>`
+            : '<div class="hint" style="color:var(--gold)">이 브라우저에서는 Pixel Snap 을 쓸 수 없습니다</div>';
+          if (psSupported()) { psBindOpts(opts); opts.querySelector('#dtRun').onclick = async () => { closeModal(); await runPixelSnap({ blob: it.blob, meta: it.meta }, PS.opts); }; }
+          return;
+        }
         const needPrompt = key === 'colorize' || key === 'emotion';
         opts.innerHTML = `${key === 'emotion' ? `<label class="fld">감정<select id="dtEmo">${EMOTIONS.map(e => `<option>${e}</option>`).join('')}</select></label>` : ''}
           ${needPrompt ? `<label class="fld">추가 프롬프트 (선택)<input type="text" id="dtPrompt" placeholder="예: blue hair, sunset"></label>
@@ -1868,6 +1875,84 @@ async function runDirector(req, label, srcItem) {
     setGenStatus(label + ' 완료'); refreshAnlas().catch(() => {});
   } catch (e) { setGenStatus('오류: ' + e.message); toast(e.message, 'err'); }
   finally { R.gen = false; $('#btnGen').disabled = false; }
+}
+
+/* ── NAI Pixel Snap (도트 그림 다듬기, 빌드 b50892a PixelSnapWorkerInterface·isPixelSnapSupported) ──────────────
+   NAI 는 이 툴을 서버가 아니라 브라우저 안 작업자(Worker)에서 돌린다(웹GL·웹GPU·WASM 차례로, Anlas 안 듦).
+   작업자 파일은 NAI 저작물이라 저장소에 넣지 않고, 서버가 사용자 PC 에서 NAI 공개 사이트 파일을 받아 NAI 와 같은 경로(/_next/static/…)로 내준다.
+   작업자 시작 파일에는 서버가 보안 규칙(CSP)을 붙여, 작업자가 그 파일들 말고는 아무 데도(앱 설정·토큰·생성 요청) 닿지 못한다.
+   옵션은 NAI 와 같다: 색 줄이기 끔/자동/직접(16~256, 처음 64) · 찾은 도트 크기 그대로 쓰기(maxDetail null) · 원래 크기로 키우기. */
+const PS = { worker: null, wait: new Map(), opts: { paletteMode: 'auto', colors: 64, avoidOverRefining: false, upscale: false } };
+function psSupported() {   // NAI eM: OffscreenCanvas 2d 가 되어야 한다
+  try { return typeof OffscreenCanvas !== 'undefined' && !!new OffscreenCanvas(1, 1).getContext('2d'); } catch (e) { return false; }
+}
+async function psWorker() {
+  if (PS.worker) return PS.worker;
+  const r = await fetch('/nai-pixelsnap', { cache: 'no-store' });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok || !j.worker || !Array.isArray(j.chunks) || !j.chunks.length) throw new Error(j.err || ('작업자를 준비하지 못했습니다 (HTTP ' + r.status + ')'));
+  if (![j.worker, ...j.chunks].every(u => /^\/_next\/static\/chunks\/[\w-]+\.js$/.test(u))) throw new Error('작업자 파일 주소가 이상합니다');
+  // NAI 터보팩 작업자 시작 규칙: #params=[청크 목록(거꾸로), 파일 꼬리, 기준 경로, 배포 번호, 파일 꼬리]
+  const params = [j.chunks.slice().reverse(), '', '/_next/', '', ''];
+  const w = new Worker(j.worker + '#params=' + encodeURIComponent(JSON.stringify(params)));
+  w.addEventListener('message', e => { const d = e.data || {}, p = PS.wait.get(d.id); if (!p) return; PS.wait.delete(d.id); clearTimeout(p.to); d.error ? p.rej(new Error(d.error)) : p.res(d.data); });
+  w.addEventListener('messageerror', () => logErr('Pixel Snap 작업자 메시지를 읽지 못함'));
+  w.addEventListener('error', e => {
+    logErr('Pixel Snap 작업자 오류: ' + (e.message || '알 수 없음'));
+    for (const [, p] of PS.wait) { clearTimeout(p.to); p.rej(new Error(e.message || 'Pixel Snap 작업자 오류')); }
+    PS.wait.clear(); if (PS.worker === w) PS.worker = null;
+    try { w.terminate(); } catch (er) { logErr('작업자 끄기 실패: ' + er.message); }
+  });
+  PS.worker = w;
+  return w;
+}
+function psRun(buf, opts, ms) {
+  return psWorker().then(w => new Promise((res, rej) => {
+    const id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random();
+    const to = setTimeout(() => { if (PS.wait.delete(id)) rej(new Error('Pixel Snap 이 2분 안에 끝나지 않았습니다')); }, ms || 120000);   // NAI 와 같은 2분
+    PS.wait.set(id, { res, rej, to });
+    w.postMessage({ task: 'pixelsnap', id, image: buf, opts }, [buf]);
+  }));
+}
+/* NAI 와 같은 옵션 모양: 자동이면 {colors:'auto', autoTol:6.5}, 직접이면 {colors:N}, 끔이면 {colors:0} · 도트 크기 그대로면 maxDetail null */
+function psOptsOf(o) {
+  return { ...(o.paletteMode === 'auto' ? { colors: 'auto', autoTol: 6.5 } : { colors: o.paletteMode === 'custom' ? +o.colors : 0 }),
+    maxDetail: o.avoidOverRefining ? null : undefined, upscale: !!o.upscale };
+}
+async function runPixelSnap(src, o) {   // src: { blob, meta }
+  if (!psSupported()) { toast('이 브라우저에서는 Pixel Snap 을 쓸 수 없습니다', 'err'); return; }
+  if (R.gen) { toast('이미 작업 중'); return; }
+  R.gen = true; $('#btnGen').disabled = true;
+  setGenStatus(PS.worker ? 'Pixel Snap 처리 중… (브라우저에서 처리 · Anlas 안 듦)' : 'NAI 에서 Pixel Snap 작업자를 받는 중… (처음 한 번)');
+  try {
+    const d = await psRun(await src.blob.arrayBuffer(), psOptsOf(o || PS.opts));
+    if (!d || !d.png) throw new Error('결과 그림이 없습니다');
+    const blob = new Blob([d.png], { type: 'image/png' });
+    const item = await addToHistory(blob, src.meta || { parameters: {} }, 'Pixel Snap', { tool: 'pixel-snap' });
+    if (S.autoSaveOn) autoSave(item);
+    if (S.mode === 'tools' && typeof stSet === 'function') stSet(item.blob, item.meta);
+    setGenStatus(`Pixel Snap 완료 — ${d.Wc}×${d.Hc} 칸${d.paletteSize ? ' · ' + d.paletteSize + '색' : ''}${d.note ? ' · ' + d.note : ''}`);
+  } catch (e) { logErr('Pixel Snap: ' + e.message); setGenStatus('오류: ' + e.message); toast('Pixel Snap 을 하지 못했습니다 — ' + e.message, 'err'); }
+  finally { R.gen = false; $('#btnGen').disabled = false; }
+}
+/* Pixel Snap 옵션 칸 (NAI 이미지 툴 화면과 같은 칸·설명) — 디렉터 툴 창과 스마트 툴 카드가 같이 쓴다. 바꾸면 PS.opts 에 둔다(NAI 처럼 켜 둔 동안만). */
+function psOptsHtml() {
+  const o = PS.opts;
+  return `<label class="fld">색 줄이기 (Palettize)<select class="ps-mode"><option value="off"${o.paletteMode === 'off' ? ' selected' : ''}>끔</option><option value="auto"${o.paletteMode === 'auto' ? ' selected' : ''}>자동</option><option value="custom"${o.paletteMode === 'custom' ? ' selected' : ''}>직접</option></select></label>
+    <label class="rng ps-colors-row"${o.paletteMode === 'custom' ? '' : ' hidden'}>색 수 <output class="ps-colorsV">${o.colors}</output><input type="range" class="ps-colors" min="16" max="256" step="16" value="${o.colors}"></label>
+    <label class="ck"><input type="checkbox" class="ps-avoid"${o.avoidOverRefining ? ' checked' : ''}> 찾은 도트 크기 그대로 쓰기 (Avoid Over-Refining) <span class="hint ps-avoidH"></span></label>
+    <label class="ck"><input type="checkbox" class="ps-up"${o.upscale ? ' checked' : ''}> 원래 크기로 키우기 (Upscale) <span class="hint ps-upH"></span></label>`;
+}
+function psBindOpts(root) {
+  const q = s => root.querySelector(s), mode = q('.ps-mode'), cr = q('.ps-colors'), av = q('.ps-avoid'), up = q('.ps-up');
+  const paint = () => {
+    q('.ps-colors-row').hidden = mode.value !== 'custom'; q('.ps-colorsV').textContent = cr.value;
+    q('.ps-avoidH').textContent = av.checked ? '— 찾아낸 도트 크기를 늘 그대로 씁니다' : '— 그림에 더 잘 맞으면 더 작은 도트 크기를 쓸 수도 있습니다';
+    q('.ps-upH').textContent = up.checked ? '— 결과를 원래 그림 크기쯤으로 다시 키웁니다' : '— 결과를 찾은 도트 크기 그대로 둡니다';
+  };
+  const keep = () => { PS.opts = { paletteMode: mode.value, colors: +cr.value, avoidOverRefining: av.checked, upscale: up.checked }; paint(); };
+  mode.onchange = keep; cr.oninput = keep; av.onchange = keep; up.onchange = keep;
+  paint();
 }
 
 /* 메타에서 캐릭터 목록을 꺼낸다. 우리 이미지는 characterPrompts 에, novelai.net PNG 는
@@ -3611,6 +3696,8 @@ const ST_TOOLS = [
   { k: 'emotion', ic: '🙂', n: '표정 변경', d: '감정을 골라 표정을 바꿉니다', emo: true, prompt: '추가 프롬프트 (선택)', defry: true,
     run: (it, o) => runDirector({ req_type: 'emotion', width: it.w, height: it.h, image: it.b64, prompt: o.emo + ';;' + (o.prompt || ''), defry: o.defry }, '표정 변경', it) },
   { k: 'upscale', ic: '⤢', n: '업스케일', d: '2배 확대 · V5 로 다시 그림 (1024² 이하만)', run: it => runUpscale(it.item, 'tool') },
+  { k: 'pixel-snap', ic: '▦', n: 'Pixel Snap', d: 'AI 가 만든 도트 그림을 깔끔하게 다듬습니다 · 브라우저에서 처리 · 무료', ps: true,
+    run: it => runPixelSnap({ blob: it.blob, meta: it.item.meta }, PS.opts) },
   { k: 'i2i', ic: '🖼', n: '이미지 투 이미지', d: '이 이미지를 바탕으로 다시 생성', run: it => { setI2I(it.blob, it.meta, true); setMode('main'); toast('메인 탭의 i2i 로 넣었습니다'); } },
   { k: 'edit', ic: '✏', n: '편집', d: '그림판에서 색칠·지우기·그림 넣기·캔버스 늘리기 뒤 바탕 그림으로', run: async it => { setMode('main'); await cvEditImage(it.blob, it.meta); } },
   { k: 'inpaint', ic: '🖌', n: '인페인팅', d: '칠한 부분만 다시 그리기 (그림판 마스크 모드)', run: async it => { setMode('main'); await cvInpaintItem(it.blob, it.meta); } },
@@ -3623,7 +3710,7 @@ function renderSmartTools() {
   /* 요금은 툴마다 다르다 — 배경 제거만 3배+5 이고 Opus 무료도 못 받는다.
      예전엔 위에 한 줄(일반 툴 기준 'Opus 무료')만 띄워서, 바로 아래 배경 제거 카드를 누르면
      표시와 달리 65 Anlas 가 나갔다(ST.tool 은 어디서도 정해지지 않는 값이었다). → 카드마다 붙인다. */
-  const DT = new Set(DIRECTOR.map(d => d[0]));
+  const DT = new Set(DIRECTOR.map(d => d[0]).filter(k => k !== 'pixel-snap'));   // Pixel Snap 은 NAI 처럼 요금이 없다(브라우저에서 처리)
   const costOf = k => (has && ST.w && typeof directorToolCost === 'function') ? directorToolCost(ST.w, ST.h, !!R.isOpus, R.opusUsage, k) : null;
   const fmt = c => c == null ? '' : (c === 0 ? 'Opus 무료' : '◈ ' + c);
   const ce = $('#stCost');
@@ -3639,6 +3726,10 @@ function renderSmartTools() {
     if (t.emo) opt.innerHTML += `<label class="fld">표정<select class="st-emo">${EMOTIONS.map(e => `<option>${e}</option>`).join('')}</select></label>`;
     if (t.prompt) opt.innerHTML += `<input type="text" class="st-p" placeholder="${t.prompt}">`;
     if (t.defry) opt.innerHTML += `<label class="rng">원본 유지도 <output class="st-dv">0</output><input type="range" class="st-d" min="0" max="5" step="1" value="0"></label>`;
+    if (t.ps) {   // NAI 이미지 툴 Pixel Snap 칸 — 지원하지 않는 브라우저면 NAI 처럼 안내만 두고 실행 단추를 막는다
+      if (psSupported()) { opt.innerHTML += psOptsHtml(); psBindOpts(opt); }
+      else { opt.innerHTML += '<div class="hint" style="color:var(--gold)">이 브라우저에서는 Pixel Snap 을 쓸 수 없습니다</div>'; c.querySelector('.st-go').disabled = true; }
+    }
     const dr = c.querySelector('.st-d'); if (dr) dr.oninput = () => c.querySelector('.st-dv').textContent = dr.value;
     c.querySelector('.st-go').onclick = async () => {
       if (!ST.blob) return;

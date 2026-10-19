@@ -51,7 +51,7 @@ VERSION = 17
 # 같은 PC 의 다른 프로그램은 127.0.0.1 에 닿을 수는 있어도 이 값은 모른다.
 SESSION_KEY = secrets.token_urlsafe(24)
 
-RELEASE = "12.18"   # 배포 버전. GitHub 릴리스 태그 "v12.18" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
+RELEASE = "12.19"   # 배포 버전. GitHub 릴리스 태그 "v12.19" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
 # 이 앱이 배포되는 저장소. 비워 두면 ⬆ 업데이트 버튼이 아예 안 뜬다 —
 # 사용자가 ⚙설정에 직접 타이핑해 넣기 전까지는 새 버전이 나온 줄도 모른다.
 # 실제로 그 때문에 옛 버전을 계속 쓰시는 분들이 있었다. 기본값을 박아 둔다.
@@ -1513,6 +1513,112 @@ def nai_quickstart(force=False):
             return {"ok": False, "build": _nai_qs["build"], "data": None, "err": _nai_qs["err"]}
 
 
+# ── NAI Pixel Snap (도트 그림 다듬기) ─────────────────────────────────────────────
+# NAI 는 Pixel Snap 을 서버가 아니라 브라우저 안 작업자(Worker)에서 돌린다(웹GL·웹GPU·WASM, Anlas 안 듦).
+# 작업자 파일은 NAI 저작물이라 이 저장소에 넣지 않는다. 사용자 PC 에서 novelai.net 이 공개로 내주는 그 파일들(작업자 시작 파일·
+# 작업자 청크·실행 청크·WASM)만 받아 data/cache/nai_static 에 두고, NAI 와 같은 경로(/_next/static/…)로 앱에 내준다.
+# 작업자 시작 파일에는 보안 규칙(CSP)을 붙여, 그 작업자가 이 파일들 말고는 아무 데도(앱 설정·토큰·생성 요청 등) 접근하지 못하게 한다.
+_nai_ps = {"t": 0.0, "build": "", "man": None, "err": ""}
+_nai_ps_lock = threading.Lock()
+_NAI_STATIC_RX = re.compile(r"^(chunks/[\w-]+\.js|media/[\w.-]+\.wasm)$")
+_NAI_STATIC_DIR = DATA / "cache" / "nai_static"
+
+
+def nai_ps_find(page_src, scan_src):
+    """Pixel Snap 작업자를 만드는 코드에서 파일 이름을 뽑는다 → (작업자 시작 파일, [청크 …]) — NAI 가 넘기는 차례 그대로.
+    page_src: 작업자 인터페이스(PixelSnapWorkerInterface)가 든 스크립트, scan_src: 작업자 모듈 정의를 찾을 글(보통 같은 스크립트)."""
+    m = re.search(r"pixelsnap worker error[\s\S]{0,400}?class [\w$]+\{constructor\(\)\{[\w$]+\|\|\([\w$]+=[\w$]+\.r\((\d+)\)\(Worker\)\)", page_src)
+    if not m:
+        raise RuntimeError("NAI 스크립트에서 Pixel Snap 작업자를 만드는 코드를 찾지 못했습니다 (사이트 코드 모양이 바뀐 것 같습니다)")
+    d = re.search(r"[,\[]" + m.group(1) + r",[\w$]+=>\{[\w$]+\.v\([\w$]+\.r\(\d+\)\.default\(\"(static/chunks/turbopack-worker-[\w-]+\.js)\","
+                  r"\[((?:\"static/chunks/[\w-]+\.js\",?)+)\]\)\)\}", scan_src)
+    if not d:
+        raise RuntimeError("Pixel Snap 작업자 파일 목록(모듈 %s)을 찾지 못했습니다" % m.group(1))
+    return d.group(1), re.findall(r"\"(static/chunks/[\w-]+\.js)\"", d.group(2)), m.group(1)
+
+
+def _nai_static_get(rel):
+    """novelai.net/_next/<rel> 을 받아 data/cache/nai_static/<rel> 에 둔다 (이름에 내용 해시가 들어 있어 이름이 같으면 내용도 같다)."""
+    if not _NAI_STATIC_RX.match(rel.replace("static/", "", 1)):
+        raise RuntimeError("받을 수 없는 NAI 파일 이름: %s" % rel)
+    dst = _NAI_STATIC_DIR / rel.replace("static/", "", 1)
+    if dst.exists() and dst.stat().st_size > 0:
+        return dst.read_bytes()
+    rq = urllib.request.Request("https://novelai.net/_next/" + rel, headers={"User-Agent": UA})
+    with urllib.request.urlopen(rq, timeout=60) as r:
+        body = r.read(32 * 1024 * 1024)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(dst.suffix + ".part")
+    tmp.write_bytes(body)
+    tmp.replace(dst)
+    return body
+
+
+def nai_pixelsnap(force=False):
+    """Pixel Snap 작업자 준비 → {"ok", "build", "worker", "chunks", "err"} (worker·chunks 는 /_next/static/… 경로).
+    받아 둔 것이 하루 안이면 그대로 쓴다. 실패하면 까닭을 돌려줘 앱이 크게 알린다."""
+    with _nai_ps_lock:
+        now = time.time()
+        man = _nai_ps["man"]
+        if man and not force and now - _nai_ps["t"] < 86400:
+            return {"ok": True, "build": _nai_ps["build"], "worker": man["worker"], "chunks": man["chunks"], "err": ""}
+        try:
+            build, paths = _nai_page()
+            mfile = DATA / "cache" / ("nai_pixelsnap_%s.json" % re.sub(r"[^\w.-]", "_", build)[:80])
+            if not force and mfile.exists():
+                try:
+                    man = json.loads(mfile.read_text(encoding="utf-8"))
+                    if all((_NAI_STATIC_DIR / f).exists() for f in man.get("files") or []) and man.get("files"):
+                        _nai_ps.update(t=now, build=build, man=man, err="")
+                        return {"ok": True, "build": build, "worker": man["worker"], "chunks": man["chunks"], "err": ""}
+                except Exception as e:
+                    err_add({"msg": "Pixel Snap 준비 기록을 읽지 못해 다시 받습니다: %s" % e, "where": "nai_pixelsnap"})
+            got = _nai_scan(paths, {"ps": (re.compile(r"pixelsnap worker error"), "Pixel Snap 작업자")})
+            boot, chunks, _mid = nai_ps_find(got["ps"], got["ps"])
+            boot_src = _nai_static_get(boot).decode("utf-8", "replace")
+            if "Missing worker bootstrap config" not in boot_src or "importScripts" not in boot_src:
+                raise RuntimeError("Pixel Snap 작업자 시작 파일 모양이 예상과 다릅니다")
+            texts = [_nai_static_get(c).decode("utf-8", "replace") for c in chunks]
+            if not any('"pixelsnap"!==' in t for t in texts):
+                raise RuntimeError("받은 작업자 파일에 Pixel Snap 작업이 없습니다")
+            wasm = []
+            for t in texts:
+                for w in re.findall(r"\.q\(\"/_next/(static/media/[\w.-]+\.wasm)\"\)", t):
+                    if w not in wasm:
+                        wasm.append(w)
+            for w in wasm:
+                if _nai_static_get(w)[:4] != b"\0asm":
+                    raise RuntimeError("받은 WASM 파일이 WASM 이 아닙니다: %s" % w)
+            files = [p.replace("static/", "", 1) for p in [boot] + chunks + wasm]
+            man = {"build": build, "worker": "/_next/" + boot, "chunks": ["/_next/" + c for c in chunks],
+                   "wasm": ["/_next/" + w for w in wasm], "files": files}
+            try:
+                mfile.parent.mkdir(parents=True, exist_ok=True)
+                for old in mfile.parent.glob("nai_pixelsnap_*.json"):
+                    if old != mfile:
+                        old.unlink()
+                mfile.write_text(json.dumps(man, ensure_ascii=False), encoding="utf-8")
+            except Exception as e:
+                err_add({"msg": "Pixel Snap 준비 기록 저장 실패: %s" % e, "where": "nai_pixelsnap"})
+            _nai_ps.update(t=now, build=build, man=man, err="")
+            return {"ok": True, "build": build, "worker": man["worker"], "chunks": man["chunks"], "err": ""}
+        except Exception as e:
+            _nai_ps["err"] = str(e)[:200]
+            return {"ok": False, "build": _nai_ps["build"], "worker": "", "chunks": [], "err": _nai_ps["err"]}
+
+
+def nai_static_allowed(rel):
+    """/_next/static/<rel> 로 내줘도 되는 파일인가 — 지금 준비해 둔 Pixel Snap 파일 목록에 있는 것만 (아무 NAI 파일이나 내주지 않는다)."""
+    man = _nai_ps["man"]
+    if not man:
+        try:
+            fs = sorted((DATA / "cache").glob("nai_pixelsnap_*.json"), key=lambda p: p.stat().st_mtime)
+            man = json.loads(fs[-1].read_text(encoding="utf-8")) if fs else None
+        except Exception:
+            man = None
+    return bool(man and _NAI_STATIC_RX.match(rel) and rel in (man.get("files") or [])), (man or {}).get("worker", "")
+
+
 def _dan_img_trim(cap=80 * 1024 * 1024):
     """이미지 캐시 총량을 제한한다 (호출자가 _dan_lock 을 쥔 상태로 부른다)."""
     items = [(k, v) for k, v in _dan_cache.items() if k.startswith("img|")]
@@ -2578,6 +2684,28 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if path == "/nai-quickstart":   # NAI 빠른 시작 그림 모음 — 사용자 PC 에서 NAI 웹앱 스크립트로 뽑는다
             self._json(200, nai_quickstart(bool((qs.get("force") or [""])[0])))
+            return True
+        if path == "/nai-pixelsnap":   # NAI Pixel Snap 작업자 준비 — 사용자 PC 에서 NAI 공개 사이트 파일을 받아 둔다
+            self._json(200, nai_pixelsnap(bool((qs.get("force") or [""])[0])))
+            return True
+        if path.startswith("/_next/static/"):   # Pixel Snap 작업자 파일만 (준비해 둔 목록에 있는 것만, NAI 와 같은 경로로)
+            rel = path[len("/_next/static/"):]
+            okf, worker = nai_static_allowed(rel)
+            f = _NAI_STATIC_DIR / rel
+            if not okf or not f.is_file():
+                self._json(404, {"message": "not found"})
+                return True
+            extra = {"Cache-Control": "max-age=86400", "X-Content-Type-Options": "nosniff"}
+            if "/_next/static/" + rel == worker:
+                # 작업자 시작 파일 — 이 규칙이 작업자 전체에 걸린다: 작업자 청크·WASM 말고는 불러오지도, 요청하지도 못한다
+                host = self.headers.get("Host") or ""
+                if not re.fullmatch(r"(localhost|127\.0\.0\.1|\[::1\])(:\d{1,5})?", host):
+                    self._json(403, {"message": "bad host"})
+                    return True
+                o = "http://" + host
+                extra["Content-Security-Policy"] = ("default-src 'none'; script-src %s/_next/static/chunks/ 'wasm-unsafe-eval'; "
+                                                    "connect-src %s/_next/static/media/" % (o, o))
+            self._send(200, f.read_bytes(), "application/wasm" if rel.endswith(".wasm") else "application/javascript; charset=utf-8", extra)
             return True
         if path == "/errors":     # 오류 기록 — 앱이 오류를 만나면 여기로 보낸다
             if self.command == "POST":

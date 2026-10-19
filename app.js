@@ -1468,7 +1468,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.18';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.19';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -3470,6 +3470,7 @@ function histCardEl(i) {
     HCARD.set(it, d);
     const img = document.createElement('img'); img.decoding = 'async'; img.title = (it.label ? it.label + ' · ' : '') + `seed ${it.seed}` + (it.saved ? ' · 💾 저장됨' : '');
     setCardImage(img, it);
+    if (it.tool === 'pixel-snap') img.classList.add('pixelated');   // NAI: Pixel Snap 결과는 점이 번지지 않게 그린다 (imageRendering pixelated)
     d.appendChild(img);
     if (it.fav) { const f = document.createElement('span'); f.className = 'fav'; f.textContent = '★'; d.appendChild(f); }
     if (it.saved) { const s = document.createElement('span'); s.className = 'svd'; s.textContent = '💾'; s.title = it.saved.how === 'download' ? '다운로드로 넘김 (받았는지는 확인 불가)' : '저장됨'; d.appendChild(s); }
@@ -3697,6 +3698,7 @@ function showImage(i) {
   syncItemVar(it);
   R.showOld = false;
   $('#viewerImg').src = viewUrlOf(it); $('#viewerImg').hidden = false; $('#viewerEmpty').hidden = true;
+  $('#viewerImg').classList.toggle('pixelated', it.tool === 'pixel-snap');   // NAI: Pixel Snap 결과는 점이 번지지 않게 키워 보인다
   { const mk = $('#viewerOldMask'); if (mk) mk.hidden = true; }
   { const k = itemVarIdx(it); if (k >= 0 && it.vars[k].loc && !VAR_DISP.has(it.vars[k]))
       varDisplayUrl(it).then(u => { if (u && R.hist[R.cur] === it && !R.showOld) $('#viewerImg').src = u; }).catch(e => logErr('변형 자리 그림 실패: ' + e.message)); }
