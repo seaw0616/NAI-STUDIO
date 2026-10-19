@@ -1745,7 +1745,8 @@ async function runUpscale(it, from) {
     if (!res.ok) throw await apiError(res);
     const imgs = await respImages(res);
     if (!imgs.length) throw new Error('업스케일 결과에 이미지가 없습니다');
-    for (const b of imgs) { const item = await addToHistory(b, it.meta || { parameters: {} }, `업스케일 ${UPSCALE_X}×`, { tool: 'upscale' }); if (S.autoSaveOn) autoSave(item); }
+    const gid = 'g' + Date.now().toString(36) + uid();   // 한 번에 받은 결과 묶음 (캔버스 결과 화면)
+    for (const b of imgs) { const item = await addToHistory(b, it.meta || { parameters: {} }, `업스케일 ${UPSCALE_X}×`, { tool: 'upscale', gid }); if (S.autoSaveOn) autoSave(item); }
     setGenStatus('업스케일 완료'); refreshAnlas().catch(() => {});
   } catch (e) { setGenStatus('오류: ' + e.message); toast(e.message, 'err'); }
   finally { R.gen = false; $('#btnGen').disabled = false; }
@@ -1864,8 +1865,9 @@ async function runDirector(req, label, srcItem) {
       last = await addToHistory(vars[0].blob, (it && it.meta) || { parameters: {} }, label, { vars, tool: req.req_type });
       if (S.autoSaveOn) autoSave(last);
     } else {
+      const gid = 'g' + Date.now().toString(36) + uid();   // 한 번에 받은 결과 묶음 (캔버스 결과 화면)
       for (let i = 0; i < imgs.length; i++) {
-        const item = await addToHistory(imgs[i], (it && it.meta) || { parameters: {} }, label, { tool: req.req_type });
+        const item = await addToHistory(imgs[i], (it && it.meta) || { parameters: {} }, label, { tool: req.req_type, gid });
         last = item; if (S.autoSaveOn) autoSave(item);
       }
     }

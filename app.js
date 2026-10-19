@@ -273,6 +273,9 @@ const DEFAULTS = {
      · 결과 화면 보기 설정 «작은 그림 키워 보기»(imagegen-scaleup, 켬) */
   rawIntermediates: false, inspectResults: false, scaleUp: true,
   hideQuickstart: false,   // NAI 설정 «Hide Quickstart Gallery»(hideQuickstartGallery, 기본 꺼짐 = 보고 있는 그림이 없으면 빠른 시작 그림 모음을 보여 준다)
+  /* NAI 설정 «Simple Output Viewer»(simpleOutputViewer)·«Reduced Motion»(canvasReducedMotion)·«Lock Output Viewer Camera»(canvasLockCamera).
+     NAI 의 «단순 결과 화면» 기본값은 꺼짐(= 캔버스 결과 화면)이다. 이 앱은 주 화면이 크게 바뀌므로 사용자가 고를 때까지 지금 화면(켜짐)으로 둔다 — ⚙ 에서 끈다. */
+  simpleOutputViewer: true, canvasReducedMotion: false, canvasLockCamera: false,
   // NAI 설정 «Custom File Name Template»(imageFilenameTemplateEnabled 끔 · imageFilenameTemplate «{prompt} s-{seed}»)
   fnTplOn: false, fnTpl: '{prompt} s-{seed}',
   // 캐릭터 위치 격자 (NAI imagegen-position-grid-type «none» · columns 3 · rows 3)
@@ -1468,7 +1471,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.19';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.20';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -2995,12 +2998,13 @@ async function doGenerate(ov, label) {
     R.varSel = 0;                         // NAI: 새로 뽑으면 결과 변형 번호를 0 으로 돌린다
     let item = null; const meta = metaOf(body, ov);
     const nWant = (body.parameters && body.parameters.n_samples) || 1;
+    const gid = 'g' + Date.now().toString(36) + uid();   // 한 번에 뽑은 그림 묶음 (NAI 결과 묶음 — 캔버스 결과 화면이 묶음째로 늘어놓는다)
     for (let k = 0; k < blobs.length; k++) {
       // 배치(장수 2~4)는 장마다 meta 를 복제하고 시드를 보정 — 같은 객체 공유·같은 파일명으로 덮어쓰기 방지.
       // 시드는 받은 순서가 아니라 장 번호로 붙인다(한 장만 받았어도 그 장 번호의 시드).
       const si = sampIdx[k] != null ? sampIdx[k] : k;
       const m = nWant > 1 ? { ...meta, parameters: { ...meta.parameters, seed: (meta.parameters.seed || 0) + si }, batchIndex: si } : meta;
-      item = await addToHistory(blobs[k], m, label + (blobs.length > 1 ? ` (${k + 1}/${blobs.length})` : ''), { vars: vars && vars[k], ...(orig || {}) });
+      item = await addToHistory(blobs[k], m, label + (blobs.length > 1 ? ` (${k + 1}/${blobs.length})` : ''), { vars: vars && vars[k], ...(orig || {}), gid });
       if (S.autoSaveOn) await autoSave(item);
       if (S.judgeAuto) maybeAutoJudge(item);   // 자동 채점 (기본 꺼짐 · 생성을 기다리게 하지 않으려고 await 하지 않는다)
     }
@@ -3220,15 +3224,18 @@ async function addToHistory(blob, meta, label, opt) {
   /* 원본과 비교(NAI originalImage·mask): 인핸스·인페인트 결과에만 붙는다 */
   if (opt && opt.orig) { item.orig = opt.orig; if (opt.origMask) item.origMask = opt.origMask; }
   if (opt && opt.tool) item.tool = opt.tool;   // 디렉터 툴·업스케일 결과 (파일 이름 틀 {type} — NAI 는 툴 이름 그대로)
+  if (opt && opt.gid) item.gid = String(opt.gid);   // 같은 요청으로 받은 그림 묶음 (캔버스 결과 화면)
   try { item.id = await histPut({ blob, meta, seed: item.seed, model: item.model, w, h, fav: false, t: item.t, name: item.name, label: item.label, sceneId: item.sceneId,
-    ...(vars ? { vars } : {}), ...(item.orig ? { orig: item.orig } : {}), ...(item.origMask ? { origMask: item.origMask } : {}), ...(item.tool ? { tool: item.tool } : {}) }); }
+    ...(vars ? { vars } : {}), ...(item.orig ? { orig: item.orig } : {}), ...(item.origMask ? { origMask: item.origMask } : {}), ...(item.tool ? { tool: item.tool } : {}), ...(item.gid ? { gid: item.gid } : {}) }); }
   catch (e) { item.unsaved = true; logErr('히스토리 저장 실패: ' + e.message); toast('이미지를 브라우저 저장소에 못 넣었습니다 (공간 부족?) — 새로고침하면 사라집니다', 'err'); }
   item.url = URL.createObjectURL(blob);
   R.hist.push(item);
   if (typeof noteMushLater === 'function') noteMushLater(item);   // 뭉갬 '평소' 기록 (한가할 때)
   /* 새 카드 한 장만 맨 앞에 붙인다. 예전엔 여기서 renderHist() 로 400장을 통째로 다시 만들어,
      뽑을 때마다 화면이 멈췄다(2026-10, 뽑을 때 렉이 걸린다는 보고). 지운 옛 카드는 pruneHistory 가 뗀다. */
-  await pruneHistory(item); histAddCard(item); showImage(R.hist.length - 1);
+  await pruneHistory(item); histAddCard(item);
+  R._ovwNew = true;   // 캔버스 결과 화면: 새 결과면 그 묶음 전체에 맞춘다 (NAI 와 같음)
+  try { showImage(R.hist.length - 1); } finally { R._ovwNew = false; }
   return item;
 }
 /* 히스토리 상한. 넘으면 즐겨찾기가 아닌 것 중 오래된 것부터 지운다.
@@ -3463,6 +3470,24 @@ function updateHistCount() {
   $('#histCount').textContent = R.hist.length ? `(${n}${S.histFavOnly ? '/' + R.hist.length : ''})` : '';
 }
 /* 카드 한 장을 만든다. renderHist 와 refreshHistCard 가 같은 것을 쓰도록 뽑아 둔다. */
+/* NAI 히스토리 설정 복사(빌드 b50892a Fu) — 히스토리 카드와 캔버스 결과 화면의 그림이 같이 쓴다.
+   Ctrl+클릭 = 설정(시드는 지금 것) · Ctrl+Shift+클릭 = 설정+시드 · Shift+클릭 = 시드만.
+   업스케일·스마트 툴 결과는 «설정을 복사할 수 없는 그림»이다(ImageGenCopyableSettingLabels 밖) */
+function histCopyClick(it, e) {
+  if ((e.ctrlKey || e.metaKey) && it.tool) { toast('이 그림에서는 설정을 가져올 수 없습니다 (NAI 와 같음)'); return; }
+  if (e.ctrlKey || e.metaKey) {
+    const withSeed = !!e.shiftKey;
+    applyMeta(it.meta, { fromHist: true, prompt: true, uc: true, chars: true, settings: true, seed: withSeed });
+    restoreHistVibes(it);   // NAI 는 그 그림에 쓴 바이브도 같이 옮긴다
+    toast(withSeed ? '설정과 시드를 가져왔습니다' : '설정을 가져왔습니다 (시드는 지금 것 그대로)');
+    return;
+  }
+  if (e.shiftKey) {
+    if (it.seed == null) { toast('이 이미지에는 시드가 없습니다', 'err'); return; }
+    S.seed = String(it.seed); S.randomSeed = false; syncUI(); save();
+    toast('시드 ' + it.seed + ' 를 가져왔습니다');
+  }
+}
 function histCardEl(i) {
   {
     const it = R.hist[i];
@@ -3483,24 +3508,9 @@ function histCardEl(i) {
     d.draggable = true;
     d.addEventListener('dragstart', e => { try { e.dataTransfer.setData('text/nai-hist', String(it.id != null ? it.id : it.t)); e.dataTransfer.effectAllowed = 'copy'; } catch (er) { logErr('히스토리 끌기 시작 실패: ' + er.message); } });
     d.onclick = e => {
-      const meta = it.meta;
       /* NAI 히스토리 여러 장 고르기(빌드 b50892a): Alt+Ctrl+클릭 = 하나씩 고르기·풀기, Alt+Shift+클릭 = 마지막으로 누른 그림부터 여기까지 */
       if (e.altKey && (e.ctrlKey || e.metaKey || e.shiftKey)) { histSelectClick(it, e.shiftKey); return; }
-      /* NAI 히스토리 설정 복사(빌드 b50892a Fu): 업스케일·스마트 툴 결과는 «설정을 복사할 수 없는 그림»이다(ImageGenCopyableSettingLabels 밖) */
-      if ((e.ctrlKey || e.metaKey) && it.tool) { toast('이 그림에서는 설정을 가져올 수 없습니다 (NAI 와 같음)'); return; }
-      if (e.ctrlKey || e.metaKey) {
-        const withSeed = !!e.shiftKey;
-        applyMeta(meta, { fromHist: true, prompt: true, uc: true, chars: true, settings: true, seed: withSeed });
-        restoreHistVibes(it);   // NAI 는 그 그림에 쓴 바이브도 같이 옮긴다
-        toast(withSeed ? '설정과 시드를 가져왔습니다' : '설정을 가져왔습니다 (시드는 지금 것 그대로)');
-        return;
-      }
-      if (e.shiftKey) {
-        if (it.seed == null) { toast('이 이미지에는 시드가 없습니다', 'err'); return; }
-        S.seed = String(it.seed); S.randomSeed = false; syncUI(); save();
-        toast('시드 ' + it.seed + ' 를 가져왔습니다');
-        return;
-      }
+      if (e.ctrlKey || e.metaKey || e.shiftKey) { histCopyClick(it, e); return; }
       // 만들 때의 번호(i)가 아니라 지금 위치로 연다 — 앞쪽 그림이 지워지면 번호가 밀린다
       const at = R.hist.indexOf(it); if (at >= 0) showImage(at);
     };
@@ -3718,6 +3728,7 @@ function showImage(i) {
   histMarkCur(i);      // 목록 전체가 아니라 표시만 옮긴다
   refreshHistCard(i);  // 이 카드의 ★·💾·🔬 배지는 맞춰 둔다
   if (typeof qsSync === 'function') qsSync();   // 그림을 고르면 빠른 시작 그림 모음은 닫힌다 (NAI 와 같음)
+  ovwSync();   // 캔버스 결과 화면이면 고른 그림으로 날아간다
 }
 const curItem = () => (R.cur >= 0 && R.cur < R.hist.length) ? R.hist[R.cur] : null;
 function stepImage(d) {
@@ -3795,6 +3806,333 @@ function clearViewer() {
   // 히스토리는 있는데 고른 그림이 없을 때(빠른 시작 메뉴로 닫았을 때 등) «아직 생성된 이미지가 없습니다»는 맞지 않는다
   const em = $('#viewerEmptyMsg'); if (em) em.textContent = R.hist.length ? '보고 있는 그림이 없습니다 — 오른쪽 히스토리에서 고르세요' : '아직 생성된 이미지가 없습니다';
   if (typeof qsSync === 'function') qsSync();
+  ovwSync();
+}
+
+/* ── NAI 캔버스 결과 화면 (빌드 b50892a BO — 설정 «단순 결과 화면»을 끄면) ─────────────────────────────
+   최근에 생성한 결과 묶음을 한 판에 위에서 아래로(최신이 위) 늘어놓고, 끌어 옮기고 확대해 본다. NAI 와 같은 셈:
+   · 묶음 안 배치 — 3장이면 삼각 배치 넷 중 하나(묶음 id 해시), 그 밖은 가로 ceil(√n)칸 격자, 그림 사이 48 · 묶음 사이 340 · 묶음마다 가운데 맞춤
+   · 처음엔 8묶음, 아래 끝 800 앞까지 내려가면 8묶음씩 더 · 그림을 고르면 그 그림에 맞춰 날아간다(여백 10, 화면 가장자리 5%·6~26px,
+     최대 배율은 «작은 그림 키워 보기»면 8 아니면 1, Pixel Snap 결과는 화면 점에 맞춘 배율) · 새로 뽑으면 그 묶음 전체에 맞춘다
+   · 휠 = 옮기기(Shift 면 가로) · Ctrl+휠 = 확대(0.1~8) · 가운데 단추나 Shift+끌기·손가락 = 옮기기(놓으면 미끄러짐) · 두 손가락 = 확대
+   · 키: F 맞추기 · + − 확대 · 1 실제 크기 · Esc 묶음 전체 · W A S D 옮기기 · 멈추고 0.12초 뒤 가운데에 가장 가까운 묶음을 고른다
+   · 설정 «움직임 줄이기»면 바로 옮겨 가고, «카메라 잠그기»면 손으로 옮기거나 확대하지 못한다(고르면 맞추는 것은 그대로)
+   화면 폭 900 이하(휴대폰)는 NAI 처럼 늘 단순 결과 화면이다. 장식 그림(NAI 별자리 무늬)은 넣지 않았다. */
+const OVW = { cam: { x: 0, y: 0, scale: 1 }, tgt: null, k: 11, raf: 0, shown: 8, lay: null, tiles: new Map(), pan: null, ptrs: new Map(), pinch: null,
+  inertia: 0, settleT: 0, idleT: 0, rq: 0, keys: new Set(), keyRaf: 0, groupOnly: false, keepGroup: false, quiet: false, wasDrag: false, size: null, newest: '', lastSel: null };
+function ovwOn() {
+  return S.mode === 'main' && S.simpleOutputViewer === false && window.innerWidth > 900 && R.hist.length > 0 && (!!curItem() || !!S.hideQuickstart);
+}
+// 창 폭이 900 을 넘나들면 단순 화면과 캔버스가 바뀐다 (NAI: 휴대폰 폭에서는 늘 단순)
+window.addEventListener('resize', () => { clearTimeout(OVW.rzT); OVW.rzT = setTimeout(() => ovwSync(), 150); });
+const ovwReduced = () => !!S.canvasReducedMotion || (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+const ovwHash01 = s => { let t = 0x811c9dc5; for (let i = 0; i < s.length; i++) { t ^= s.charCodeAt(i); t = Math.imul(t, 0x1000193); } return (t >>> 0) / 0x100000000; };
+const ovwPad = (r, p) => ({ x: r.x - p, y: r.y - p, width: r.width + 2 * p, height: r.height + 2 * p });
+const ovwHit = (a, b) => a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+function ovwSnapPx(f, t) { const d = window.devicePixelRatio || 1, o = Math.floor(f * (t || 1) * d); return o >= 1 ? o / ((t || 1) * d) : f; }   // NAI snapPixelArtScale
+/* 묶음 안 배치 (NAI Uv·Ub 삼각 배치 · 격자) */
+function ovwTriV(e, top) {
+  const [i, r, n] = e, a = top ? i : n, o = top ? [r, n] : [i, r], s = o[0].width + 48 + o[1].width, l = Math.max(s, a.width), d = (l - s) / 2;
+  const u = top ? a.height : Math.max(o[0].height, o[1].height), h = top ? a.height + 48 : 0;
+  const p = [{ x: d, y: h, width: o[0].width, height: o[0].height }, { x: d + o[0].width + 48, y: h, width: o[1].width, height: o[1].height }];
+  const m = { x: (l - a.width) / 2, y: top ? 0 : u + 48, width: a.width, height: a.height };
+  return { rects: top ? [m, ...p] : [...p, m], size: { width: l, height: u + 48 + (top ? Math.max(o[0].height, o[1].height) : a.height) } };
+}
+function ovwTriH(e, left) {
+  const [i, r, n] = e, a = left ? i : n, o = left ? [r, n] : [i, r], s = o[0].height + 48 + o[1].height, l = Math.max(o[0].width, o[1].width), c = Math.max(s, a.height);
+  const d = a.width + 48 + l, u = left ? a.width + 48 : 0, h = (c - s) / 2;
+  const p = { x: left ? 0 : l + 48, y: (c - a.height) / 2, width: a.width, height: a.height };
+  const m = [{ x: u + (l - o[0].width) / 2, y: h, width: o[0].width, height: o[0].height }, { x: u + (l - o[1].width) / 2, y: h + o[0].height + 48, width: o[1].width, height: o[1].height }];
+  return { rects: left ? [p, ...m] : [...m, p], size: { width: d, height: c } };
+}
+function ovwGroupLayout(sizes, key) {
+  if (sizes.length === 3) { const k = Math.floor(4 * ovwHash01(key + ':tri')); return k === 0 ? ovwTriV(sizes, true) : k === 1 ? ovwTriV(sizes, false) : k === 2 ? ovwTriH(sizes, true) : ovwTriH(sizes, false); }
+  const cols = Math.max(1, Math.ceil(Math.sqrt(sizes.length))), rects = []; let x = 0, y = 0, rowH = 0, w = 0;
+  sizes.forEach((s, t) => { if (t > 0 && t % cols === 0) { y += rowH + 48; x = 0; rowH = 0; } rects.push({ x, y, width: s.width, height: s.height }); x += s.width + 48; rowH = Math.max(rowH, s.height); w = Math.max(w, x - 48); });
+  return { rects, size: { width: w, height: y + rowH } };
+}
+/* 결과 묶음 — 최신부터. 같은 요청으로 받은 그림(gid 가 같고 이어진 것)은 한 묶음, gid 가 없는 옛 그림은 한 장씩 */
+function ovwGroups() {
+  const out = [];
+  for (let i = R.hist.length - 1; i >= 0; i--) {
+    const it = R.hist[i], last = out[out.length - 1];
+    if (last && it.gid && last.gid === it.gid) last.items.unshift(it);
+    else out.push({ gid: it.gid || '', key: it.gid || ('h' + (it.id != null ? it.id : it.t)), items: [it] });
+  }
+  return out;
+}
+function ovwLayout() {
+  const all = ovwGroups(), groups = all.slice(0, OVW.shown), place = [], bounds = new Map(); let y = 0;
+  for (const g of groups) {
+    const { rects, size } = ovwGroupLayout(g.items.map(it => ({ width: it.w || 832, height: it.h || 1216 })), g.key);
+    const x0 = -size.width / 2;
+    rects.forEach((r, i) => place.push({ g, it: g.items[i], rect: { x: r.x + x0, y: r.y + y, width: r.width, height: r.height } }));
+    bounds.set(g.key, { x: x0, y, width: size.width, height: size.height });
+    y += size.height + 340;
+  }
+  OVW.lay = { all, groups, place, bounds, height: Math.max(0, y - 340) };
+  return OVW.lay;
+}
+const ovwGroupOf = it => OVW.lay && OVW.lay.groups.find(g => g.items.includes(it));
+function ovwRectOf(it) { const p = OVW.lay && OVW.lay.place.find(q => q.it === it); return p ? p.rect : null; }
+function ovwVisible() { const st = $('#ovwStage'); return !!st && !st.hidden; }
+function ovwSize() { const st = $('#ovwStage'); return st ? { w: st.clientWidth, h: st.clientHeight } : { w: 0, h: 0 }; }
+function ovwViewRect() { const { w, h } = ovwSize(), c = OVW.cam; return { x: -c.x / c.scale, y: -c.y / c.scale, width: w / c.scale, height: h / c.scale }; }
+function ovwEl() {
+  let st = $('#ovwStage');
+  if (st) return st;
+  st = document.createElement('div'); st.id = 'ovwStage'; st.className = 'ovw-stage'; st.hidden = true; st.tabIndex = -1;
+  st.innerHTML = '<div class="ovw-world" id="ovwWorld"></div>';
+  const vs = $('#vstage'); vs.insertBefore(st, $('#btnPrev'));
+  ovwBind(st);
+  return st;
+}
+/* 화면에 보이는 그림만 그린다 (NAI 처럼 보이는 곳 둘레 400 까지) */
+function ovwRender() {
+  const w = $('#ovwWorld'); if (!w || !OVW.lay) return;
+  const vis = ovwPad(ovwViewRect(), 400 / OVW.cam.scale), cur = curItem(), want = new Set();
+  for (const p of OVW.lay.place) {
+    if (!ovwHit(p.rect, vis)) continue;
+    const key = p.it.id != null ? 'i' + p.it.id : 't' + p.it.t; want.add(key);
+    let el = OVW.tiles.get(key);
+    if (!el) {
+      el = document.createElement('div'); el.className = 'ovw-tile';
+      const im = document.createElement('img'); im.alt = ''; im.decoding = 'async'; im.draggable = true; el.appendChild(im);
+      im.addEventListener('dragstart', e => { const it = el._it; if (!it) return; try { e.dataTransfer.setData('text/nai-hist', String(it.id != null ? it.id : it.t)); e.dataTransfer.effectAllowed = 'copy'; } catch (er) { logErr('결과 끌기 시작 실패: ' + er.message); } });
+      w.appendChild(el); OVW.tiles.set(key, el);
+    }
+    const src = viewUrlOf(p.it);
+    if (el._src !== src) { el.firstChild.src = src; el._src = src; }
+    el._it = p.it; el._p = p;
+    const s = el.style; s.left = p.rect.x + 'px'; s.top = p.rect.y + 'px'; s.width = p.rect.width + 'px'; s.height = p.rect.height + 'px';
+    // NAI: 고른 그림(묶음 전체를 고른 때는 한 장짜리 묶음일 때만)에 테두리
+    el.classList.toggle('sel', p.it === cur && (!OVW.groupOnly || p.g.items.length === 1));
+    el.firstChild.classList.toggle('pixelated', p.it.tool === 'pixel-snap');
+  }
+  for (const [k, el] of OVW.tiles) if (!want.has(k)) { el.remove(); OVW.tiles.delete(k); }
+}
+function ovwApply() {
+  const w = $('#ovwWorld'), st = $('#ovwStage'); if (!w || !st) return;
+  const c = OVW.cam;
+  w.style.transform = `translate(${c.x}px, ${c.y}px) scale(${c.scale})`;
+  st.style.setProperty('--ovw-ring', Math.max(2, 3 / c.scale) + 'px');
+  // 날아가는 동안에는 한 장면에 한 번만, 그 밖(바로 옮기기·끌기·휠)에는 바로 그린다 — 화면에 들어온 그림이 늦게 뜨지 않게
+  if (OVW.raf) { if (!OVW.rq) OVW.rq = requestAnimationFrame(() => { OVW.rq = 0; ovwRender(); }); }
+  else ovwRender();
+  ovwSettleSoon();
+}
+/* NAI ex: 맞춤 배율·자리 (가장자리 5% · 6~26px, 배율 0.1~8, 최대 배율 m) */
+function ovwFit(rect, m, px) {
+  const { w, h } = ovwSize(); if (!w || !h || rect.width <= 0 || rect.height <= 0) return null;
+  const mx = Math.min(26, Math.max(6, .05 * w)), my = Math.min(26, Math.max(6, .05 * h)), aw = Math.max(1, w - 2 * mx), ah = Math.max(1, h - 2 * my);
+  let f = Math.min(Math.min(m === undefined ? 1 : m, 8), Math.max(.1, Math.min(aw / rect.width, ah / rect.height)));
+  if (px) f = ovwSnapPx(f, px);
+  return { x: mx + aw / 2 - (rect.x + rect.width / 2) * f, y: my + ah / 2 - (rect.y + rect.height / 2) * f, scale: f };
+}
+function ovwStop() { if (OVW.raf) cancelAnimationFrame(OVW.raf); OVW.raf = 0; OVW.tgt = null; if (OVW.inertia) cancelAnimationFrame(OVW.inertia); OVW.inertia = 0; }
+/* 카메라 날아가기 (NAI ey: 1-exp(-dt·k) 로 다가가고, 0.5px·0.001 안이면 멈춤 / 움직임 줄이기면 바로) */
+function ovwFlyTo(t, animate, k) {
+  if (!t) return;
+  if (!animate || ovwReduced()) { ovwStop(); OVW.cam = { ...t }; ovwApply(); return; }
+  OVW.tgt = { ...t }; OVW.k = k || 11;
+  if (OVW.raf) return;
+  let last = performance.now();
+  const step = now => {
+    const g = OVW.tgt; if (!g) { OVW.raf = 0; return; }
+    const dt = Math.min(.034, (now - last) / 1000); last = now;
+    const r = 1 - Math.exp(-dt * OVW.k), o = OVW.cam;
+    const n = { x: o.x + (g.x - o.x) * r, y: o.y + (g.y - o.y) * r, scale: o.scale + (g.scale - o.scale) * r };
+    if (Math.abs(g.x - n.x) < .5 && Math.abs(g.y - n.y) < .5 && Math.abs(g.scale - n.scale) < .001) { OVW.cam = { ...g }; OVW.tgt = null; OVW.raf = 0; ovwApply(); return; }
+    OVW.cam = n; ovwApply(); OVW.raf = requestAnimationFrame(step);
+  };
+  OVW.raf = requestAnimationFrame(step);
+}
+/* NAI eM(flyToRect): 아주 멀면(화면 높이 3배 넘게) 먼저 가까이 옮긴 뒤 날아간다 */
+function ovwFlyRect(rect, animate, px) {
+  const t = ovwFit(ovwPad(rect, 10), S.scaleUp !== false ? Infinity : 1, px); if (!t) return;
+  if (animate && !ovwReduced()) {
+    const { w, h } = ovwSize(), c = OVW.cam;
+    const nx = (w / 2 - c.x) / c.scale, ny = (h / 2 - c.y) / c.scale, sx = (w / 2 - t.x) / t.scale, sy = (h / 2 - t.y) / t.scale;
+    const dx = nx - sx, dy = ny - sy, dist = Math.hypot(dx, dy), lim = 3 * h / t.scale;
+    if (dist > lim) { const q = lim / dist; OVW.cam = { scale: t.scale, x: w / 2 - (sx + dx * q) * t.scale, y: h / 2 - (sy + dy * q) * t.scale }; ovwApply(); }
+  }
+  ovwFlyTo(t, animate);
+}
+function ovwPxOf(it) { return it && it.tool === 'pixel-snap' ? 1 : undefined; }
+function ovwFitCur(animate) {
+  const it = curItem(); if (!it || !OVW.lay) return;
+  const g = ovwGroupOf(it);
+  if (g && (OVW.groupOnly || g.items.length === 1)) { const b = OVW.lay.bounds.get(g.key); if (b) ovwFlyRect(b, animate, g.items.every(x => x.tool === 'pixel-snap') ? 1 : undefined); return; }
+  const r = ovwRectOf(it); if (r) ovwFlyRect(r, animate, ovwPxOf(it));
+}
+function ovwZoomBy(f) {   // NAI zoomBy: 화면 가운데를 두고 (잠그면 안 함)
+  if (S.canvasLockCamera) return;
+  const { w, h } = ovwSize(), a = OVW.tgt || OVW.cam, s = Math.min(8, Math.max(.1, a.scale * f)); if (s === a.scale) return;
+  const q = s / a.scale; ovwFlyTo({ scale: s, x: w / 2 - (w / 2 - a.x) * q, y: h / 2 - (h / 2 - a.y) * q }, true, 18);
+}
+function ovwPanBy(dx, dy) { if (!dx && !dy) return; OVW.cam = { ...OVW.cam, x: OVW.cam.x + dx, y: OVW.cam.y + dy }; if (OVW.tgt) OVW.tgt = { ...OVW.tgt, x: OVW.tgt.x + dx, y: OVW.tgt.y + dy }; ovwApply(); }
+/* 멈추고 0.12초 뒤: 화면 가운데에 가장 가까운 그림의 묶음을 고른다(날아가지 않음) · 아래 끝에 가까우면 8묶음 더 · 2초 동안 아무것도 안 보이면 가까운 묶음으로 */
+function ovwSettleSoon() {
+  clearTimeout(OVW.settleT); clearTimeout(OVW.idleT);
+  if (OVW.raf || OVW.pan || OVW.pinch || OVW.inertia) return;
+  OVW.settleT = setTimeout(() => {
+    if (!ovwVisible() || !OVW.lay || OVW.raf || OVW.pan) return;
+    const v = ovwViewRect();
+    if (OVW.shown < OVW.lay.all.length && v.y + v.height > OVW.lay.height - 800) { OVW.shown = Math.min(OVW.shown + 8, OVW.lay.all.length); ovwLayout(); ovwRender(); }
+    const cx = v.x + v.width / 2, cy = v.y + v.height / 2; let best = null, bd = Infinity;
+    for (const p of OVW.lay.place) { const dx = p.rect.x + p.rect.width / 2 - cx, dy = p.rect.y + p.rect.height / 2 - cy, d = dx * dx + dy * dy; if (d < bd) { bd = d; best = p; } }
+    const cur = curItem();
+    if (best && (!cur || !best.g.items.includes(cur))) {
+      const idx = R.hist.indexOf(best.g.items[0]);
+      if (idx >= 0) { OVW.quiet = true; OVW.groupOnly = true; try { showImage(idx); } finally { OVW.quiet = false; } }
+    }
+  }, 120);
+  OVW.idleT = setTimeout(() => {
+    if (!ovwVisible() || !OVW.lay || OVW.raf || OVW.pan) return;
+    const v = ovwViewRect();
+    if (OVW.lay.place.some(p => ovwHit(p.rect, v))) return;
+    const cx = v.x + v.width / 2, cy = v.y + v.height / 2; let best = null, bd = Infinity;
+    for (const b of OVW.lay.bounds.values()) { const dx = b.x + b.width / 2 - cx, dy = b.y + b.height / 2 - cy, d = dx * dx + dy * dy; if (d < bd) { bd = d; best = b; } }
+    if (best) ovwFlyRect(best, true);
+  }, 2000);
+}
+/* showImage·clearViewer·설정·탭이 부른다. 고른 그림이 바뀌었으면 그 그림(새 결과면 묶음 전체)으로 날아간다 */
+function ovwSync() {
+  const on = ovwOn(), vs = $('#vstage');
+  if (vs) vs.classList.toggle('ovw-on', on);
+  let st = $('#ovwStage');
+  if (!on) { if (st) st.hidden = true; ovwStop(); return; }
+  st = ovwEl(); const first = st.hidden; st.hidden = false;
+  st.classList.toggle('locked', !!S.canvasLockCamera);
+  const lay = ovwLayout(), newest = lay.groups[0] ? lay.groups[0].key : '';
+  const it = curItem();
+  if (!it) { OVW.lastSel = null; ovwRender(); if (first) { const b = lay.bounds.get(newest); if (b) ovwFlyRect(b, false); } return; }
+  if (OVW.quiet) { OVW.lastSel = it; ovwRender(); return; }   // 가운데 묶음 자동 고르기 — 날아가지 않는다
+  // NAI 는 고른 그림이 바뀔 때만 날아간다 (즐겨찾기·변형 바꾸기처럼 같은 그림을 다시 그릴 때는 그대로)
+  if (it === OVW.lastSel && !R._ovwNew && !first) { ovwRender(); return; }
+  OVW.lastSel = it;
+  if (!ovwGroupOf(it)) {   // 고른 그림이 늘어놓은 묶음 밖(오래된 그림)이면 거기까지 묶음을 늘린다
+    const at = lay.all.findIndex(x => x.items.includes(it));
+    if (at >= 0) { OVW.shown = at + 1; ovwLayout(); }
+  }
+  if (newest) OVW.newest = newest;
+  if (R._ovwNew) OVW.groupOnly = true;          // NAI: 새 결과는 묶음 전체에 맞춘다
+  else if (!OVW.keepGroup) OVW.groupOnly = false;
+  ovwRender();
+  ovwFitCur(!first);
+}
+function ovwKeyFree(e) {
+  const a = document.activeElement;
+  return ovwVisible() && $('#modalOverlay').hidden && !R.cvOpen && !(a && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable)) && !e.ctrlKey && !e.metaKey && !e.altKey;
+}
+function ovwBind(st) {
+  // 휠: 옮기기 · Ctrl+휠 확대 (NAI)
+  st.addEventListener('wheel', e => {
+    if (S.canvasLockCamera) return;
+    e.preventDefault(); if (OVW.inertia) { cancelAnimationFrame(OVW.inertia); OVW.inertia = 0; }
+    if (e.ctrlKey) {
+      const b = st.getBoundingClientRect(), px = e.clientX - b.left, py = e.clientY - b.top, a = OVW.cam;
+      if (e.deltaMode !== 0 || Math.abs(e.deltaY) >= 50) {
+        const sg = Math.sign(e.deltaY); if (!sg) return;
+        const i = OVW.tgt || a, s = Math.min(8, Math.max(.1, i.scale * (sg < 0 ? 1.2 : 1 / 1.2))), q = s / i.scale;
+        ovwFlyTo({ scale: s, x: px - (px - i.x) * q, y: py - (py - i.y) * q }, true, 18); return;
+      }
+      ovwStop();
+      const o = Math.exp(Math.max(-.25, Math.min(.25, -.01 * e.deltaY))), s = Math.min(8, Math.max(.1, a.scale * o)), q = s / a.scale;
+      OVW.cam = { scale: s, x: px - (px - a.x) * q, y: py - (py - a.y) * q }; ovwApply(); return;
+    }
+    if (OVW.raf) { cancelAnimationFrame(OVW.raf); OVW.raf = 0; OVW.tgt = null; }
+    ovwPanBy(-(e.deltaX + (e.shiftKey ? e.deltaY : 0)), -(e.shiftKey ? 0 : e.deltaY));
+  }, { passive: false });
+  // 끌기: 가운데 단추·Shift+왼쪽·손가락 = 옮기기 (왼쪽만 누르면 그림 고르기), 두 손가락 = 확대, 놓을 때 빠르면 미끄러짐 (NAI)
+  st.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse' && e.button !== 0 && e.button !== 1) return;
+    if (S.canvasLockCamera) { OVW.wasDrag = false; return; }
+    if (OVW.raf) { cancelAnimationFrame(OVW.raf); OVW.raf = 0; OVW.tgt = null; }
+    const was = !!OVW.inertia; if (OVW.inertia) { cancelAnimationFrame(OVW.inertia); OVW.inertia = 0; }
+    if (e.pointerType === 'mouse' && e.button === 0 && !e.shiftKey) { OVW.wasDrag = was; return; }
+    if (e.button === 1) e.preventDefault();
+    OVW.ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (OVW.ptrs.size === 2) { const [p, q] = [...OVW.ptrs.values()]; OVW.pinch = { d: Math.hypot(p.x - q.x, p.y - q.y), mx: (p.x + q.x) / 2, my: (p.y + q.y) / 2 }; OVW.wasDrag = true; OVW.pan = null; try { st.setPointerCapture(e.pointerId); } catch (er) { logErr('끌기 잡기 실패: ' + er.message); } return; }
+    OVW.wasDrag = was; OVW.pan = { sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY, vx: 0, vy: 0, lt: performance.now(), id: e.pointerId };
+  });
+  st.addEventListener('pointermove', e => {
+    if (!OVW.ptrs.has(e.pointerId)) return;
+    OVW.ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (OVW.ptrs.size === 2 && OVW.pinch) {
+      const [p, q] = [...OVW.ptrs.values()], d = Math.hypot(p.x - q.x, p.y - q.y), mx = (p.x + q.x) / 2, my = (p.y + q.y) / 2, b = st.getBoundingClientRect();
+      if (OVW.pinch.d > 0) { const n = mx - b.left, a = my - b.top, c = OVW.cam, s = Math.min(8, Math.max(.1, c.scale * d / OVW.pinch.d)), k = s / c.scale;
+        OVW.cam = { scale: s, x: n - (n - (c.x + mx - OVW.pinch.mx)) * k, y: a - (a - (c.y + my - OVW.pinch.my)) * k }; ovwApply(); }
+      OVW.pinch = { d, mx, my }; return;
+    }
+    const p = OVW.pan; if (!p) return;
+    if (!OVW.wasDrag && Math.hypot(e.clientX - p.sx, e.clientY - p.sy) > 5) { OVW.wasDrag = true; st.classList.add('panning'); try { st.setPointerCapture(e.pointerId); } catch (er) { logErr('끌기 잡기 실패: ' + er.message); } }
+    if (OVW.wasDrag) {
+      ovwPanBy(e.clientX - p.lx, e.clientY - p.ly);
+      const now = performance.now(), dt = now - p.lt;
+      if (dt > 0) { const n = 1 - Math.exp(-dt / 50); p.vx += ((e.clientX - p.lx) / dt - p.vx) * n; p.vy += ((e.clientY - p.ly) / dt - p.vy) * n; p.lt = now; }
+    }
+    p.lx = e.clientX; p.ly = e.clientY;
+  });
+  const up = e => {
+    OVW.ptrs.delete(e.pointerId); if (OVW.ptrs.size < 2) OVW.pinch = null;
+    if (OVW.ptrs.size === 0) {
+      const p = OVW.pan; OVW.pan = null; st.classList.remove('panning');
+      if (p && OVW.wasDrag && performance.now() - p.lt < 60 && !ovwReduced()) {   // NAI eD: 미끄러짐 (초당 5 씩 줄어든다, 최대 4px/ms)
+        let vx = p.vx, vy = p.vy; const sp = Math.hypot(vx, vy); if (sp > 4) { vx = 4 / sp * vx; vy = 4 / sp * vy; }
+        let last = performance.now();
+        const go = now => { const dt = Math.min(34, now - last); last = now; ovwPanBy(vx * dt, vy * dt); const d = Math.exp(-(dt / 1000 * 5)); vx *= d; vy *= d;
+          if (Math.hypot(vx, vy) < .02) { OVW.inertia = 0; ovwSettleSoon(); return; } OVW.inertia = requestAnimationFrame(go); };
+        OVW.inertia = requestAnimationFrame(go);
+      } else ovwSettleSoon();
+    }
+    try { if (st.hasPointerCapture(e.pointerId)) st.releasePointerCapture(e.pointerId); } catch (er) { logErr('끌기 놓기 실패: ' + er.message); }
+  };
+  st.addEventListener('pointerup', up); st.addEventListener('pointercancel', up);
+  st.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });
+  // 그림 누르기 (NAI 타일 클릭): Ctrl/Shift = 히스토리처럼 설정 복사 · 한 장짜리 고른 묶음·이미 고른 그림 = 묶음 전체에 맞춤 · 아니면 그 그림 고르고 날아가기
+  st.addEventListener('click', e => {
+    const tile = e.target.closest && e.target.closest('.ovw-tile'); if (!tile || !tile._p) return;
+    if (OVW.wasDrag) { OVW.wasDrag = false; return; }
+    const { it, g } = tile._p, cur = curItem();
+    if (e.ctrlKey || e.metaKey || e.shiftKey) { histCopyClick(it, e); return; }
+    const inGroup = !!cur && g.items.includes(cur);
+    if ((g.items.length === 1 && inGroup) || (cur === it && !OVW.groupOnly)) {
+      OVW.groupOnly = true; ovwRender();
+      const b = OVW.lay.bounds.get(g.key); if (b) ovwFlyRect(b, true, g.items.every(x => x.tool === 'pixel-snap') ? 1 : undefined);
+      return;
+    }
+    const idx = R.hist.indexOf(it); if (idx < 0) return;
+    OVW.groupOnly = false; OVW.keepGroup = false; showImage(idx);
+  });
+  // 창 크기가 바뀌면 바뀐 만큼의 반을 옮겨 가운데를 지킨다 (NAI)
+  new ResizeObserver(() => {
+    const n = { w: st.clientWidth, h: st.clientHeight }, o = OVW.size;
+    if (o && (o.w > 0 || o.h > 0) && n.w > 0) ovwPanBy((n.w - o.w) / 2, (n.h - o.h) / 2);
+    OVW.size = n;
+  }).observe(st);
+  // 키 (NAI): F 맞추기 · + − 확대 · 1 실제 크기 · Esc 묶음 전체 · W A S D 옮기기
+  document.addEventListener('keydown', e => {
+    if (!ovwKeyFree(e)) return;
+    const k = e.key;
+    if (k === 'f' || k === 'F') { e.preventDefault(); e.stopImmediatePropagation(); ovwFitCur(true); return; }
+    if (k === '+' || k === '=') { e.preventDefault(); ovwZoomBy(1.3); return; }
+    if (k === '-' || k === '_') { e.preventDefault(); ovwZoomBy(1 / 1.3); return; }
+    if (k === '1') { const it = curItem(), r = it && ovwRectOf(it); if (!r || S.canvasLockCamera) return; e.preventDefault();
+      const { w, h } = ovwSize(), s = ovwPxOf(it) ? ovwSnapPx(1, 1) : 1; ovwFlyTo({ x: w / 2 - (r.x + r.width / 2) * s, y: h / 2 - (r.y + r.height / 2) * s, scale: s }, true); return; }
+    if (k === 'Escape') { const it = curItem(); if (!it || OVW.groupOnly) return; e.preventDefault(); OVW.groupOnly = true; ovwRender(); ovwFitCur(true); return; }
+    const lk = k.toLowerCase();
+    if ('wasd'.includes(lk) && lk.length === 1 && !S.canvasLockCamera) {
+      e.preventDefault(); OVW.keys.add(lk);
+      if (!OVW.keyRaf) { let last = 0; const go = now => { const dt = last ? Math.min(.05, (now - last) / 1000) : 0; last = now;
+        let x = 0, y = 0; if (OVW.keys.has('w')) y += 1; if (OVW.keys.has('s')) y -= 1; if (OVW.keys.has('a')) x += 1; if (OVW.keys.has('d')) x -= 1;
+        if (x || y) { const h = Math.hypot(x, y); ovwPanBy(x / h * 1000 * dt, y / h * 1000 * dt); }
+        OVW.keyRaf = OVW.keys.size ? requestAnimationFrame(go) : 0; };
+        OVW.keyRaf = requestAnimationFrame(go); }
+    }
+  }, true);
+  document.addEventListener('keyup', e => { OVW.keys.delete(String(e.key).toLowerCase()); });
+  window.addEventListener('blur', () => { OVW.keys.clear(); });
 }
 /* 필드를 손으로 나열하면, 목록에 없는 필드는 put 이 레코드를 통째로 갈아끼울 때
    조용히 지워진다. 예를 들어 채점 결과를 붙여 놓고 ★즐겨찾기를 누르면 그 순간
@@ -5506,6 +5844,7 @@ function setMode(m) {
   if (m === 'library' && window.renderLibrary) renderLibrary();
   if (m === 'tools' && window.renderSmartTools) renderSmartTools();
   if (typeof qsSync === 'function') qsSync();   // 빠른 시작 단추는 메인 화면에서만 보인다 (NAI: 그림 생성 화면 메뉴에만 있음)
+  ovwSync();
 }
 
 /* ─────────────── 설정 ─────────────── */
@@ -5554,6 +5893,10 @@ function openSettings() {
       <label class="ck"><input type="checkbox" id="mRawInter"> 생성 중 그림을 그대로 보기 <span class="hint">— 꺼져 있으면(NAI 기본값) 생성 중 그림을 흐리게 보여 주고 처음 5단계는 보여 주지 않습니다. 켜면 모든 단계를 그대로 보여 줍니다 (NAI «Show Streamed Images Unprocessed»).</span></label>
       <label class="ck"><input type="checkbox" id="mInspect"> 생성 결과 살펴보기 <span class="hint">— 켜면 결과 아래에 🔍 단추가 생겨 그 그림의 기록 내용을 글로 볼 수 있고, 인페인트 결과에 «받은 그대로»·«마스크 적용» 두 장이 함께 붙습니다 (NAI «Inspect Image Results», 기본값 꺼짐).</span></label>
       <label class="ck"><input type="checkbox" id="mHideQs"> 빠른 시작 그림 모음 숨기기 <span class="hint" id="mHideQsHint"></span></label>
+      <label class="ck"><input type="checkbox" id="mSimpleView"> 단순 결과 화면 (Simple Output Viewer) <span class="hint" id="mSimpleViewHint"></span></label>
+      <div class="hint" id="mOvwKeys" hidden style="margin:-2px 0 4px 24px">캔버스 결과 화면: 휠 = 옮기기(Shift 면 가로) · Ctrl+휠 = 확대 · 가운데 단추나 Shift+끌기 = 옮기기 · 그림을 누르면 그 그림으로, 한 번 더 누르면 묶음 전체로 · F 맞추기 · + − 확대 · 1 실제 크기 · Esc 묶음 전체 · W A S D 옮기기 (NAI 와 같음 — 이 화면에서는 F 가 즐겨찾기가 아니라 «맞추기»입니다)</div>
+      <label class="ck"><input type="checkbox" id="mOvwReduced"> 결과 화면 움직임 줄이기 (Reduced Motion) <span class="hint" id="mOvwReducedHint"></span></label>
+      <label class="ck"><input type="checkbox" id="mOvwLock"> 결과 화면 카메라 잠그기 (Lock Output Viewer Camera) <span class="hint" id="mOvwLockHint"></span></label>
       <hr>
       <div class="mtitle">투명 그림 <span class="hint">(NAI 설정과 같은 칸)</span></div>
       <label class="fld">투명 부분 보이기 <span class="hint">— 배경 제거·투명 배경 그림의 투명한 곳을 무엇으로 보여 줄지 (NAI «Transparency Background», 기본값 테마 체크무늬)</span>
@@ -5718,7 +6061,22 @@ function openSettings() {
       const paint = () => { hh.textContent = hq.checked ? '— 그림 생성 화면에서 빠른 시작 그림 모음을 숨깁니다 (앱을 켜면 마지막 그림을 보여 줍니다)'
         : '— 보고 있는 그림이 없으면 그림 생성 화면에 빠른 시작 그림 모음을 보여 줍니다 (NAI 기본값)'; };
       hq.checked = !!S.hideQuickstart; paint();
-      hq.onchange = () => { S.hideQuickstart = hq.checked; save(); paint(); if (typeof qsSync === 'function') qsSync(); };
+      hq.onchange = () => { S.hideQuickstart = hq.checked; save(); paint(); if (typeof qsSync === 'function') qsSync(); ovwSync(); };
+    }
+    { // NAI «Simple Output Viewer»·«Reduced Motion»·«Lock Output Viewer Camera» — 고른 상태에 따라 설명이 바뀐다 (NAI checkedText·uncheckedText)
+      const sv = body.querySelector('#mSimpleView'), sh = body.querySelector('#mSimpleViewHint'), keys = body.querySelector('#mOvwKeys');
+      const rm = body.querySelector('#mOvwReduced'), rh = body.querySelector('#mOvwReducedHint'), lk = body.querySelector('#mOvwLock'), lh = body.querySelector('#mOvwLockHint');
+      const paint = () => {
+        sh.textContent = sv.checked ? '— 지금 생성한 그림만 장식 없이 보여 줍니다 (NAI 기본값은 꺼짐 = 캔버스 결과 화면)'
+          : '— 최근에 생성한 그림 묶음을 한 판에 늘어놓고 끌어 옮기거나 확대해 봅니다 (화면 폭이 900 이하면 늘 단순 화면)';
+        keys.hidden = sv.checked;
+        rh.textContent = rm.checked ? '— 결과 화면이 움직이는 모습 없이 바로 옮겨 갑니다' : '— 결과 화면이 부드럽게 움직입니다';
+        lh.textContent = lk.checked ? '— 결과 화면을 끌어 옮기거나 확대할 수 없습니다' : '— 결과 화면을 끌어 옮기고 확대할 수 있습니다';
+      };
+      sv.checked = S.simpleOutputViewer !== false; rm.checked = !!S.canvasReducedMotion; lk.checked = !!S.canvasLockCamera; paint();
+      sv.onchange = () => { S.simpleOutputViewer = sv.checked; save(); paint(); ovwSync(); };
+      rm.onchange = () => { S.canvasReducedMotion = rm.checked; save(); paint(); };
+      lk.onchange = () => { S.canvasLockCamera = lk.checked; save(); paint(); const st = $('#ovwStage'); if (st) st.classList.toggle('locked', lk.checked); };
     }
     { // 투명 그림 — NAI 설정 두 칸
       const tb = body.querySelector('#mTranspBg'), tc = body.querySelector('#mTranspColor'), al = body.querySelector('#mAlpha');
@@ -5805,6 +6163,7 @@ function syncUI() {
   renderRandPrompt();
   applyUcLayout();
   if (typeof qsSync === 'function') qsSync();   // 서버에서 설정을 받아 «빠른 시작 숨기기»가 바뀐 경우까지 맞춘다
+  ovwSync();   // «단순 결과 화면» 설정이 바뀐 경우까지
   $('#autoCount').value = S.autoCount; $('#autoDelay').value = S.autoDelay;
   $$('#autoModeSeg button').forEach(b => b.classList.toggle('on', b.dataset.m === (S.autoMode || 'random')));
   $('#autoModeHint').textContent = S.autoMode === 'fixed' ? '지금 조합(랜덤·청크 치환 결과)을 고정하고 시드만 바꿔 뽑습니다' : '<a|b|c>·청크가 매번 새로 뽑힙니다';
