@@ -943,12 +943,18 @@ input.sc-name-in:hover, input.sc-name-in:focus { border-bottom-color: var(--acc)
 .ovw-stage { position: absolute; inset: 0; z-index: 1; overflow: hidden; background: var(--bg0); touch-action: none; user-select: none; outline: none; }
 .ovw-stage.locked { touch-action: auto; }
 .ovw-stage.panning { cursor: grabbing; }
+.ovw-stage.shift .ovw-tile { cursor: grab; }   /* NAI: Shift 를 누르는 동안 (카메라 잠금이면 빼고) */
 .ovw-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
 .ovw-tile { position: absolute; cursor: pointer; background: var(--tbg, transparent); }   /* NAI: 투명한 곳은 «투명 부분 보이기» 무늬 */
 .ovw-tile img { display: block; width: 100%; height: 100%; object-fit: contain; -webkit-user-drag: element; }
 .ovw-tile.sel { outline: var(--ovw-ring, 3px) solid var(--acc); outline-offset: 0; z-index: 1; }
 .vstage.ovw-on #viewerImg, .vstage.ovw-on #viewerBg, .vstage.ovw-on #viewerOldMask, .vstage.ovw-on .vnav, .vstage.ovw-on #viewerOrigTag { display: none !important; }
 .vstage.ovw-on #varBar, .vstage.ovw-on #enhPanel, .vstage.ovw-on #genBar, .vstage.ovw-on #previewImg { z-index: 3; }
+/* 생성 중 빈 칸 (NAI dummy 그림): 그 장의 생성 중 그림을 흐리게(5px), «생성 중 그림 그대로 보기»거나 다 된 장이면 그대로 · 단추 없음 */
+.ovw-tile.pending { cursor: default; overflow: hidden; outline: 1px dashed color-mix(in srgb, var(--txt) 25%, transparent); outline-offset: -1px; }
+.ovw-tile.pending > img:first-child { filter: blur(5px); }
+.ovw-tile.pending.raw > img:first-child { filter: none; }
+.ovw-tile.pending .ovw-hov, .ovw-tile.pending .ovw-seed, .ovw-tile.pending .orig-tag { display: none; }
 /* 고른 그림에서 «원본»을 누르는 동안: 원본과 인페인트 마스크 30% (NAI UN) */
 .ovw-tile img.ovw-old, .pb-pin img.ovw-old, .ovw-tile img.ovw-oldmask, .pb-pin img.ovw-oldmask { position: absolute; inset: 0; pointer-events: none; }
 .ovw-tile img.ovw-oldmask, .pb-pin img.ovw-oldmask { opacity: .3; image-rendering: pixelated; }

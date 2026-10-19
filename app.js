@@ -1472,7 +1472,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.21';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.22';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -2951,6 +2951,12 @@ async function doGenerate(ov, label) {
       try { await addToHistory(o.blob, o.meta || { parameters: {} }, o.label || '', { vars: o.vars, gid, varOrig: true, ...(o.tool ? { tool: o.tool } : {}) }); }
       catch (e) { logErr('변형 원본을 결과 묶음에 넣지 못함: ' + e.message); toast('변형 결과 묶음에 원본을 넣지 못했습니다: ' + e.message, 'err'); }
     }
+    /* NAI Eb onStart: 캔버스 결과 화면이면 새 묶음 자리(빈 칸)를 먼저 놓고, 실시간 미리보기를 쓰면 그 묶음을 고른다(N).
+       빈 칸 크기는 결과 크기 — 인핸스 Max 는 키운 크기, 집중 영역 인페인트는 원래 그림 크기 */
+    { const pp = body.parameters || {}; let pw = pp.width, ph = pp.height;
+      if (pp.upscaled_enhance && typeof maxEnhanceTargetSize === 'function') { const z = maxEnhanceTargetSize(pw, ph); if (z) { pw = z.width; ph = z.height; } }
+      if (ov._focus) { pw = ov._focus.D; ph = ov._focus.B; }
+      ovwPendingStart(gid, pp.n_samples || 1, pw, ph, S.stream !== false && !ov.noStream); }
     R.abort = new AbortController();
     let blobs;
     if (S.stream !== false && !ov.noStream) {
@@ -3038,7 +3044,7 @@ async function doGenerate(ov, label) {
     if (typeof recordGenFail === 'function') recordGenFail(e.message);
     refreshAnlas().catch(() => {});   // 요청이 나간 뒤 끊긴 경우가 많다 — 잔액을 실제와 맞춘다
     $('#genStatus').textContent = '오류: ' + e.message; toast(e.message, 'err'); throw e;
-  } finally { R.gen = false; R.abort = null; btn.disabled = !!R.tooLong && !$('#contGen').checked; btn.classList.remove('busy'); hidePreview(); $('#btnCancel').hidden = true; { const o = $('#tOld'); if (o) o.disabled = false; } }
+  } finally { R.gen = false; R.abort = null; btn.disabled = !!R.tooLong && !$('#contGen').checked; btn.classList.remove('busy'); ovwPendingEnd(); hidePreview(); $('#btnCancel').hidden = true; { const o = $('#tOld'); if (o) o.disabled = false; } }
 }
 /* NAI 생성 단추(빌드 78a367e): 캐릭터 프롬프트 가운데 «1girl»·«1boy» 가 든 것이 있으면, 캐릭터마다 첫 «1girl»→«girl»·«1boy»→«boy» 로 바꾸고
    화면 글도 그렇게 바꾼다 (캐릭터 칸은 한 사람이므로 숫자 태그를 빼는 NAI 규칙) */
@@ -3054,11 +3060,15 @@ function fixCharOneGirl() {
 function showPreview(pngBytes, frac, t0, sampIx, nSamp, sampStep, sampTot) {
   const st = $('#vstage'); let img = $('#previewImg');
   if (!img) { img = document.createElement('img'); img.id = 'previewImg'; st.appendChild(img); }
-  if (R._prevUrl) URL.revokeObjectURL(R._prevUrl);
-  R._prevUrl = URL.createObjectURL(new Blob([pngBytes], { type: imgTypeOf(pngBytes) }));   // 중간 그림은 PNG·WebP·JPEG 어느 것이든 브라우저가 연다
-  img.src = R._prevUrl; img.hidden = false;
-  /* NAI 설정 «Show Streamed Images Unprocessed»(rawIntermediates, 처음 값 끔): 꺼져 있으면 생성 중 그림을 흐리게(5px) 보여 준다 */
-  img.classList.toggle('raw', !!S.rawIntermediates);
+  // 캔버스 결과 화면: NAI 처럼 그 장의 빈 칸에 넣는다 (가운데 큰 미리보기는 쓰지 않는다)
+  if (ovwPendingImage(sampIx - 1, pngBytes, false)) img.hidden = true;
+  else {
+    if (R._prevUrl) URL.revokeObjectURL(R._prevUrl);
+    R._prevUrl = URL.createObjectURL(new Blob([pngBytes], { type: imgTypeOf(pngBytes) }));   // 중간 그림은 PNG·WebP·JPEG 어느 것이든 브라우저가 연다
+    img.src = R._prevUrl; img.hidden = false;
+    /* NAI 설정 «Show Streamed Images Unprocessed»(rawIntermediates, 처음 값 끔): 꺼져 있으면 생성 중 그림을 흐리게(5px) 보여 준다 */
+    img.classList.toggle('raw', !!S.rawIntermediates);
+  }
   $('#viewerEmpty').hidden = true;
   { const qg = $('#qsGallery'); if (qg) qg.hidden = true; }   // 생성 중 그림이 빠른 시작 그림 모음 뒤에 가리지 않게
   let bar = $('#genBar');
@@ -3166,6 +3176,7 @@ async function generateStreaming(body) {
             const si = d.samp_ix != null ? d.samp_ix : finals.length;
             seen[si] = steps - skip;
             finals.push({ si, blob: new Blob([d.image], { type: imgTypeOf(d.image) }) });   // 받는 형식이 WebP 면 WebP
+            ovwPendingImage(si, d.image, true);   // 캔버스 결과 화면: 다 된 장은 그 칸에 바로 (NAI finals)
           }
         }
       }
@@ -3839,7 +3850,7 @@ function clearViewer() {
    화면 폭 900 이하(휴대폰)는 NAI 처럼 늘 단순 결과 화면이다. 장식 그림(NAI 별자리 무늬)은 넣지 않았다. */
 const OVW = { cam: { x: 0, y: 0, scale: 1 }, tgt: null, k: 11, raf: 0, shown: 8, lay: null, tiles: new Map(), pan: null, ptrs: new Map(), pinch: null,
   inertia: 0, settleT: 0, idleT: 0, rq: 0, keys: new Set(), keyRaf: 0, groupOnly: false, keepGroup: false, quiet: false, wasDrag: false, size: null, newest: '', lastSel: null,
-  board: null, wall: null, prev: null, _pinShow: false };   // board: 핀 보드 배치(pbLayout) · wall: 핀 보드를 고름(NAI 묶음 «pin-wall») · prev: 그 전 선택(Q 로 돌아감)
+  board: null, wall: null, prev: null, _pinShow: false, pending: null, pendSel: false };   // pending: 생성 중 결과 자리 · pendSel: 그 자리를 고름   // board: 핀 보드 배치(pbLayout) · wall: 핀 보드를 고름(NAI 묶음 «pin-wall») · prev: 그 전 선택(Q 로 돌아감)
 function ovwOn() {
   return S.mode === 'main' && S.simpleOutputViewer === false && window.innerWidth > 900 && R.hist.length > 0 && (!!curItem() || !!S.hideQuickstart);
 }
@@ -3871,7 +3882,8 @@ function ovwGroupLayout(sizes, key) {
   sizes.forEach((s, t) => { if (t > 0 && t % cols === 0) { y += rowH + 48; x = 0; rowH = 0; } rects.push({ x, y, width: s.width, height: s.height }); x += s.width + 48; rowH = Math.max(rowH, s.height); w = Math.max(w, x - 48); });
   return { rects, size: { width: w, height: y + rowH } };
 }
-/* 결과 묶음 — 최신부터. 같은 요청으로 받은 그림(gid 가 같고 이어진 것)은 한 묶음, gid 가 없는 옛 그림은 한 장씩 */
+/* 결과 묶음 — 최신부터. 같은 요청으로 받은 그림(gid 가 같고 이어진 것)은 한 묶음, gid 가 없는 옛 그림은 한 장씩.
+   생성 중이면 맨 위에 그 요청의 빈 칸(아직 안 온 장)을 둔다 (NAI Eb·Ex 의 dummy 그림) */
 function ovwGroups() {
   const out = [];
   for (let i = R.hist.length - 1; i >= 0; i--) {
@@ -3879,7 +3891,40 @@ function ovwGroups() {
     if (last && it.gid && last.gid === it.gid) last.items.unshift(it);
     else out.push({ gid: it.gid || '', key: it.gid || ('h' + (it.id != null ? it.id : it.t)), items: [it] });
   }
+  const P = OVW.pending;
+  if (P) {
+    const g = out[0] && out[0].gid === P.gid ? out[0] : null;   // 변형 원본처럼 같은 묶음이 이미 있으면 그 뒤에 잇는다
+    const real = g ? g.items.filter(x => !x.varOrig).length : 0, k = Math.max(0, P.n - real);
+    const ph = Array.from({ length: k }, (_, i) => ({ _pending: true, _pi: real + i, w: P.w, h: P.h, id: null, t: 'p' + P.gid + ':' + (real + i) }));
+    if (ph.length) { if (g) g.items.push(...ph); else out.unshift({ gid: P.gid, key: P.gid, items: ph }); }
+  }
   return out;
+}
+/* 생성 중 결과 자리 (NAI Eb onStart: 요청을 보내면 빈 칸 n장 묶음을 맨 위에 놓고, 실시간 미리보기를 쓰면 그 묶음을 고른다(N) ·
+   업스케일 Ex 는 고르지 않는다(deferFocus)). 장마다 생성 중 그림을 그 칸에 흐리게(«생성 중 그림 그대로 보기»면 그대로), 다 된 장은 그대로 보인다.
+   결과가 히스토리에 들어오면 같은 묶음(gid)의 진짜 그림으로 바뀐다. 캔버스 결과 화면이 아닐 때는 아무것도 하지 않는다 */
+function ovwPendingStart(gid, n, w, h, focus) {
+  ovwPendingEnd(true);
+  if (!ovwOn()) return;
+  OVW.pending = { gid: String(gid), n: Math.max(1, n | 0), w: w || 832, h: h || 1216, urls: [], fin: [] };
+  OVW.pendSel = !!focus;
+  if (focus) { OVW.wall = null; OVW.prev = null; }
+  ovwLayout(); ovwRender();
+  if (focus) { const b = ovwGroupFit(OVW.pending.gid); if (b) ovwFlyRect(b, true); }
+}
+function ovwPendingImage(si, bytes, final) {
+  const P = OVW.pending; if (!P || si == null || si < 0 || si >= P.n || !ovwVisible()) return false;
+  if (P.urls[si]) { try { URL.revokeObjectURL(P.urls[si]); } catch (e) { logErr('생성 중 그림 주소 정리 실패: ' + e.message); } }
+  P.urls[si] = URL.createObjectURL(new Blob([bytes], { type: imgTypeOf(bytes) }));
+  if (final) P.fin[si] = true;
+  ovwRender();
+  return true;
+}
+function ovwPendingEnd(silent) {
+  const P = OVW.pending; if (!P) return;
+  for (const u of P.urls) if (u) { try { URL.revokeObjectURL(u); } catch (e) { logErr('생성 중 그림 주소 정리 실패: ' + e.message); } }
+  OVW.pending = null; OVW.pendSel = false;
+  if (!silent && ovwVisible()) { ovwLayout(); ovwRender(); }
 }
 function ovwLayout() {
   const all = ovwGroups(), groups = all.slice(0, OVW.shown), place = [], bounds = new Map(); let y = 0;
@@ -3891,6 +3936,15 @@ function ovwLayout() {
     y += size.height + 340;
   }
   OVW.lay = { all, groups, place, bounds, height: Math.max(0, y - 340) };
+  /* NAI eR·shiftWorldY: 맨 위에 새 묶음(생성 중 자리 포함)이 끼어 아래 묶음이 밀리면, 전에도 있던 묶음 가운데 가장 위의 것이
+     밀린 만큼 카메라도 옮겨 보던 화면이 튀지 않게 한다 (날아가는 중이면 목표도 같이) */
+  { const prev = OVW.prevY, now = new Map([...bounds].map(([k, b]) => [k, b.y]));
+    if (prev && ovwVisible()) for (const g of groups) { const a = prev.get(g.key); if (a === undefined) continue;
+      const dy = bounds.get(g.key).y - a;
+      if (dy) { OVW.cam = { ...OVW.cam, y: OVW.cam.y - dy * OVW.cam.scale }; if (OVW.tgt) OVW.tgt = { ...OVW.tgt, y: OVW.tgt.y - dy * OVW.tgt.scale };
+        const wd = $('#ovwWorld'); if (wd) wd.style.transform = `translate(${OVW.cam.x}px, ${OVW.cam.y}px) scale(${OVW.cam.scale})`; }
+      break; }
+    OVW.prevY = now; }
   OVW.board = pbLayout(OVW.lay);   // 핀 보드 (최신 묶음 왼쪽)
   return OVW.lay;
 }
@@ -3929,12 +3983,21 @@ function ovwRender() {
     const key = p.it.id != null ? 'i' + p.it.id : 't' + p.it.t; want.add(key);
     let el = OVW.tiles.get(key);
     if (!el) { el = ovwTileEl(); w.appendChild(el); OVW.tiles.set(key, el); }
+    if (p.it._pending) {   // 생성 중 빈 칸: 그 장의 생성 중 그림(흐리게) · 다 된 장은 그대로 · 단추 없음 (NAI dummy 그림)
+      const P = OVW.pending, u = (P && P.urls[p.it._pi]) || '', im = el.firstChild;
+      el.classList.add('pending'); el.classList.toggle('raw', !!S.rawIntermediates || !!(P && P.fin[p.it._pi])); el.classList.remove('sel');
+      if (el._src !== u) { if (u) { im.src = u; im.hidden = false; } else { im.removeAttribute('src'); im.hidden = true; } el._src = u; }
+      el._it = p.it; el._p = p;
+      const s = el.style; s.left = p.rect.x + 'px'; s.top = p.rect.y + 'px'; s.width = p.rect.width + 'px'; s.height = p.rect.height + 'px';
+      continue;
+    }
     const src = viewUrlOf(p.it);
     if (el._src !== src) { el.firstChild.src = src; el._src = src; }
+    el.firstChild.draggable = !OVW.shift;
     el._it = p.it; el._p = p;
     const s = el.style; s.left = p.rect.x + 'px'; s.top = p.rect.y + 'px'; s.width = p.rect.width + 'px'; s.height = p.rect.height + 'px';
     // NAI: 고른 그림(묶음 전체를 고른 때는 한 장짜리 묶음일 때만)에 테두리 — 핀 보드를 고른 동안은 결과 묶음에 테두리가 없다
-    const sel = !OVW.wall && p.it === cur && (!OVW.groupOnly || p.g.items.length === 1);
+    const sel = !OVW.wall && !OVW.pendSel && p.it === cur && (!OVW.groupOnly || p.g.items.length === 1);
     el.classList.toggle('sel', sel);
     el.firstChild.classList.toggle('pixelated', p.it.tool === 'pixel-snap');
     el.querySelector('.orig-tag').hidden = !p.it.varOrig;
@@ -4006,6 +4069,7 @@ function ovwFlyRect(rect, animate, px) {
 }
 function ovwPxOf(it) { return it && it.tool === 'pixel-snap' ? 1 : undefined; }
 function ovwFitCur(animate) {
+  if (OVW.pendSel && OVW.pending) { const b = ovwGroupFit(OVW.pending.gid); if (b) ovwFlyRect(b, animate); return; }   // 생성 중 자리를 고른 동안
   if (OVW.wall) {   // 핀 보드를 골랐으면 그 핀, 아니면 보드 전체 (NAI eJ «pin-wall»)
     const q = OVW.wall.pin && pbPinPlace(OVW.wall.pin);
     if (q) ovwFlyRect(q.rect, animate, pbPx(q)); else if (OVW.board) ovwFlyRect(OVW.board.bounds, animate);
@@ -4037,11 +4101,12 @@ function ovwSettleSoon() {
     const B = OVW.board;
     if (B) { for (const q of B.images) { const d = near(q.rect); if (d < bd) { bd = d; best = null; wall = true; } }
       if (!B.images.length && ovwHit(B.frame, ovwPad(v, 400 / OVW.cam.scale))) { const d = near(B.frame); if (d < bd) { bd = d; best = null; wall = true; } } }
-    if (wall) { if (!OVW.wall) { OVW.prev = { it: curItem(), groupOnly: OVW.groupOnly }; OVW.wall = { pin: null }; ovwRender(); } return; }
+    if (wall) { if (!OVW.wall) { OVW.prev = { it: curItem(), groupOnly: OVW.groupOnly }; OVW.wall = { pin: null }; OVW.pendSel = false; ovwRender(); } return; }
+    if (best && best.it._pending) { if (!OVW.pendSel) { OVW.wall = null; OVW.prev = null; OVW.pendSel = true; ovwRender(); } return; }   // 생성 중 묶음 (NAI: 새 묶음도 묶음)
     const cur = curItem();
-    if (best && (OVW.wall || !cur || !best.g.items.includes(cur))) {
-      const idx = R.hist.indexOf(best.g.items[0]);
-      OVW.wall = null; OVW.prev = null;
+    if (best && (OVW.wall || OVW.pendSel || !cur || !best.g.items.includes(cur))) {
+      const idx = R.hist.indexOf(best.g.items.find(x => !x._pending) || best.g.items[0]);
+      OVW.wall = null; OVW.prev = null; OVW.pendSel = false;
       if (idx >= 0) { OVW.quiet = true; OVW.groupOnly = true; try { if (!best.g.items.includes(cur)) showImage(idx); else ovwRender(); } finally { OVW.quiet = false; } }
     }
   }, 120);
@@ -4068,8 +4133,9 @@ function ovwSync() {
   const it = curItem();
   if (!it) { OVW.lastSel = null; ovwRender(); if (first) { const b = lay.bounds.get(newest); if (b) ovwFlyRect(b, false); } return; }
   if (OVW._pinShow) { OVW.lastSel = it; ovwRender(); return; }   // 핀 보드의 핀을 골랐다 — 날아가는 것은 pbSelectWall 이 한다
-  // 다른 곳(히스토리·생성·키)에서 그림을 고르면 핀 보드 선택은 풀린다
+  // 다른 곳(히스토리·생성·키)에서 그림을 고르면 핀 보드 선택·생성 중 자리 선택은 풀린다
   if (OVW.wall && (it !== OVW.lastSel || R._ovwNew)) { OVW.wall = null; OVW.prev = null; }
+  if (OVW.pendSel && (it !== OVW.lastSel || R._ovwNew)) OVW.pendSel = false;
   if (OVW.quiet) { OVW.lastSel = it; ovwRender(); return; }   // 가운데 묶음 자동 고르기 — 날아가지 않는다
   // NAI 는 고른 그림이 바뀔 때만 날아간다 (즐겨찾기·변형 바꾸기처럼 같은 그림을 다시 그릴 때는 그대로)
   if (it === OVW.lastSel && !R._ovwNew && !first) { ovwRender(); return; }
@@ -4161,9 +4227,10 @@ function ovwBind(st) {
     const btn = e.target.closest('button[data-a]');
     if (btn) { ovwTileAction(btn.dataset.a, tile._p.it); return; }   // 마우스를 올리면 뜨는 단추 (NAI Ui·시드)
     const { it, g } = tile._p, cur = curItem();
+    if (it._pending) return;   // 생성 중 빈 칸은 누를 것이 없다 (NAI: 다 된 그림만 고른다)
     if (e.ctrlKey || e.metaKey || e.shiftKey) { histCopyClick(it, e); return; }
-    // 핀 보드를 고른 동안에는 어느 묶음도 고른 것이 아니다 (NAI: 묶음 «pin-wall») — 누른 그림을 바로 고른다
-    const wasWall = !!OVW.wall; OVW.wall = null; OVW.prev = null;
+    // 핀 보드·생성 중 자리를 고른 동안에는 어느 묶음도 고른 것이 아니다 (NAI: 묶음 «pin-wall»·새 묶음) — 누른 그림을 바로 고른다
+    const wasWall = !!OVW.wall || !!OVW.pendSel; OVW.wall = null; OVW.prev = null; OVW.pendSel = false;
     const inGroup = !wasWall && !!cur && g.items.includes(cur);
     if (!wasWall && ((g.items.length === 1 && inGroup) || (cur === it && !OVW.groupOnly))) {
       OVW.groupOnly = true; ovwRender();
@@ -4214,6 +4281,11 @@ function ovwBind(st) {
   }, true);
   document.addEventListener('keyup', e => { OVW.keys.delete(String(e.key).toLowerCase()); });
   window.addEventListener('blur', () => { OVW.keys.clear(); });
+  // NAI: Shift 를 누르고 있는 동안은 결과 그림에 잡기 손 모양(카메라 잠금이면 빼고), 그림 끌어내기는 막는다 — Shift+끌기 = 판 옮기기
+  const shift = on => { if (OVW.shift === on) return; OVW.shift = on; st.classList.toggle('shift', on && !S.canvasLockCamera); for (const el of OVW.tiles.values()) el.firstChild.draggable = !on; };
+  document.addEventListener('keydown', e => { if (e.key === 'Shift') shift(true); });
+  document.addEventListener('keyup', e => { if (e.key === 'Shift') shift(false); });
+  window.addEventListener('blur', () => shift(false));
 }
 
 /* ── NAI 핀 보드 (빌드 b50892a: 자료 모듈 836168 · 화면 UV·UK·U9·ze·zt·zr·zs·zI · 결과 화면 BO 의 eK·BV · 아톰 Boards·ResolvedPinnedImages) ──

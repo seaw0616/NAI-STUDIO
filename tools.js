@@ -1740,17 +1740,19 @@ async function runUpscale(it, from) {
   }
   const tw = it.w * UPSCALE_X, th = it.h * UPSCALE_X;
   R.gen = true; setGenStatus(`업스케일 ${UPSCALE_X}× 중… ${it.w}×${it.h} → ${tw}×${th} (${upscaleCostLabel(it.w, it.h, from)})`); $('#btnGen').disabled = true;
+  const gid = 'g' + Date.now().toString(36) + uid();   // 한 번에 받은 결과 묶음 (캔버스 결과 화면)
+  // NAI Ex: 캔버스 결과 화면이면 결과 자리(빈 칸 한 장, 2배 크기)를 먼저 놓되 고르지는 않는다(deferFocus) — 다 되면 그 묶음을 고른다
+  if (typeof ovwPendingStart === 'function') ovwPendingStart(gid, 1, tw, th, false);
   try {
     const res = await apiFetch('/img/ai/upscale', { method: 'POST', headers: authHeaders(true),
       body: JSON.stringify({ image: await blobToB64(it.blob), model: UPSCALE_MODEL, declared_blur_sigma: 0 }) });
     if (!res.ok) throw await apiError(res);
     const imgs = await respImages(res);
     if (!imgs.length) throw new Error('업스케일 결과에 이미지가 없습니다');
-    const gid = 'g' + Date.now().toString(36) + uid();   // 한 번에 받은 결과 묶음 (캔버스 결과 화면)
     for (const b of imgs) { const item = await addToHistory(b, it.meta || { parameters: {} }, `업스케일 ${UPSCALE_X}×`, { tool: 'upscale', gid }); if (S.autoSaveOn) autoSave(item); }
     setGenStatus('업스케일 완료'); refreshAnlas().catch(() => {});
   } catch (e) { setGenStatus('오류: ' + e.message); toast(e.message, 'err'); }
-  finally { R.gen = false; $('#btnGen').disabled = false; }
+  finally { R.gen = false; $('#btnGen').disabled = false; if (typeof ovwPendingEnd === 'function') ovwPendingEnd(); }
 }
 /* NAI actions.inpaint: 이 그림을 바탕 그림으로 넣고(앞서 칠한 마스크는 그대로) 그림판 마스크 모드를 연다 */
 async function toolInpaint() { const it = curItem(); if (!it) return; await cvInpaintItem(it.blob, it.meta); }
