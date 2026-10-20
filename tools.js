@@ -1744,7 +1744,7 @@ async function runUpscale(it, from) {
   // NAI Ex: 캔버스 결과 화면이면 결과 자리(빈 칸 한 장, 2배 크기)를 먼저 놓되 고르지는 않는다(deferFocus) — 다 되면 그 묶음을 고른다
   if (typeof ovwPendingStart === 'function') ovwPendingStart(gid, 1, tw, th, false);
   try {
-    const res = await apiFetch('/img/ai/upscale', { method: 'POST', headers: authHeaders(true),
+    const res = await apiFetch('/img/ai/upscale', { method: 'POST', headers: naiReqHeaders(true),
       body: JSON.stringify({ image: await blobToB64(it.blob), model: UPSCALE_MODEL, declared_blur_sigma: 0 }) });
     if (!res.ok) throw await apiError(res);
     const imgs = await respImages(res);
@@ -1811,23 +1811,6 @@ function openDirector() {
     }
   });
 }
-/* 캔버스로 정확히 그 크기에 다시 그린다 (NAI 가 보내기 전에 하는 것과 같은 일). */
-async function resampleBlob(blob, w, h) {
-  const url = URL.createObjectURL(blob);
-  try {
-    const img = await new Promise((res, rej) => {
-      const im = new Image();
-      im.onload = () => res(im); im.onerror = () => rej(new Error('이미지를 읽지 못했습니다'));
-      im.src = url;
-    });
-    const cv = document.createElement('canvas');
-    cv.width = w; cv.height = h;
-    const g = cv.getContext('2d');
-    g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
-    g.drawImage(img, 0, 0, w, h);
-    return await new Promise(r => cv.toBlob(r, 'image/png'));
-  } finally { URL.revokeObjectURL(url); }
-}
 async function runDirector(req, label, srcItem) {
   if (R.gen) { toast('이미 작업 중'); return; }
   R.gen = true; setGenStatus(label + ' 처리 중…'); $('#btnGen').disabled = true;
@@ -1835,21 +1818,21 @@ async function runDirector(req, label, srcItem) {
     /* 보내기 전 크기 맞추기 — NAI 와 같은 범위(104만~314만 화소)로.
        작으면 키워야 품질이 나오고, 크면 줄여야 서버가 거절하지 않는다.
        원본 blob 이 없으면(예: 이미 base64 만 있는 경로) 건드리지 않는다. */
+    /* NAI useDoTool: 크기가 같아도 늘 resizeImageToSize(그림, 가로, 세로)로 다시 그린 PNG 를 보낸다 — 다르면 pica Lanczos3(대조표 B3, 12.23 까지는 캔버스) */
     if (typeof fitForTool === 'function' && srcItem && srcItem.blob && req.width && req.height) {
       const f = fitForTool(req.width, req.height);
-      if (f.w !== req.width || f.h !== req.height) {
-        try {
-          const rb = await resampleBlob(srcItem.blob, f.w, f.h);
-          if (rb) {
-            req.image = await blobToB64(rb);
-            const was = req.width + '×' + req.height;
-            req.width = f.w; req.height = f.h;
-            setGenStatus(`${label} — ${was} → ${f.w}×${f.h} 로 맞춰 보냅니다`);
-          }
-        } catch (e) { logErr('툴 크기 보정 실패(원본 그대로 보냅니다): ' + e.message); }
-      }
+      try {
+        req.image = await naiResizeImageToSize(new Uint8Array(await srcItem.blob.arrayBuffer()), f.w, f.h);
+        if (f.w !== req.width || f.h !== req.height) {
+          const was = req.width + '×' + req.height;
+          req.width = f.w; req.height = f.h;
+          setGenStatus(`${label} — ${was} → ${f.w}×${f.h} 로 맞춰 보냅니다`);
+        }
+      } catch (e) { logErr('툴 크기 보정 실패(원본 그대로 보냅니다): ' + e.message); }
     }
-    const res = await apiFetch('/img/ai/augment-image', { method: 'POST', headers: authHeaders(true), body: JSON.stringify(req) });
+    // NAI rt.request: { req_type, use_new_shared_trial: true, …나머지 } · 머리글 x-correlation-id·x-initiated-at
+    const { req_type: rqt, ...rest } = req;
+    const res = await apiFetch('/img/ai/augment-image', { method: 'POST', headers: naiReqHeaders(true), body: JSON.stringify({ req_type: rqt, use_new_shared_trial: true, ...rest }) });
     if (!res.ok) throw await apiError(res);
     /* 결과에 붙일 메타는 '방금 처리한 그 이미지' 것이어야 한다.
        예전엔 curItem() 으로 지금 히스토리에서 선택된 것을 집어와서, 스마트 툴에

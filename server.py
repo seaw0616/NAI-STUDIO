@@ -51,7 +51,7 @@ VERSION = 17
 # 같은 PC 의 다른 프로그램은 127.0.0.1 에 닿을 수는 있어도 이 값은 모른다.
 SESSION_KEY = secrets.token_urlsafe(24)
 
-RELEASE = "12.23"   # 배포 버전. GitHub 릴리스 태그 "v12.23" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
+RELEASE = "12.24"   # 배포 버전. GitHub 릴리스 태그 "v12.24" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
 # 이 앱이 배포되는 저장소. 비워 두면 ⬆ 업데이트 버튼이 아예 안 뜬다 —
 # 사용자가 ⚙설정에 직접 타이핑해 넣기 전까지는 새 버전이 나온 줄도 모른다.
 # 실제로 그 때문에 옛 버전을 계속 쓰시는 분들이 있었다. 기본값을 박아 둔다.
@@ -135,7 +135,8 @@ UPSTREAMS = {
     "/gtoken": "https://oauth2.googleapis.com/token",  # OAuth 토큰 교환/갱신
 }
 NAI_PREFIXES = ("/img/", "/api/")  # 이 경로에만 저장된 NAI 토큰을 주입
-FORWARD_HEADERS = ("Authorization", "Content-Type", "Accept")
+# x-correlation-id·x-initiated-at: NAI 웹이 그림 요청마다 붙이는 머리글(요청 id 6글자·보낸 시각) — 앱이 붙인 것을 그대로 넘긴다
+FORWARD_HEADERS = ("Authorization", "Content-Type", "Accept", "x-correlation-id", "x-initiated-at")
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 
@@ -2609,7 +2610,7 @@ class Handler(BaseHTTPRequestHandler):
             # file:// 로 연 앱의 "읽기" 만 허용 (_origin_ok 가 쓰기를 걸러낸다)
             self.send_header("Access-Control-Allow-Origin", "null")
         self.send_header("Vary", "Origin")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, Range, X-NST-Key")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, Range, X-NST-Key, x-correlation-id, x-initiated-at")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
     def _send(self, code, body, ctype="application/json", extra=None):
@@ -4004,6 +4005,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, f.read_bytes(), "application/javascript; charset=utf-8", {"Cache-Control": "max-age=86400"})
             else:
                 self._send(204, b"", "application/javascript")
+            return True
+        if path == "/vendor/pica.js":   # pica 9.0.1 (MIT) — NAI 와 같은 Lanczos3 크기 맞추기 (앱이 처음 쓸 때 부른다)
+            f = ROOT / "assets" / "pica.min.js"
+            if f.exists():
+                self._send(200, f.read_bytes(), "application/javascript; charset=utf-8", {"Cache-Control": "max-age=86400"})
+            else:
+                self._json(404, {"message": "assets/pica.min.js 가 없습니다"})
             return True
         if path in ("/tags/extra.json", "/tags/groups.json", "/tags/t5.json", "/tags/koalias.json"):
             # 부가 사전: 영문 보강 태그 / 단부루 태그 그룹 / T5 토크나이저 사전 (없으면 204 — 앱은 없어도 동작)

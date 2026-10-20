@@ -1136,33 +1136,189 @@ async function blobToB64Max(blob, maxSide) {
   const b = await new Promise(res => c.toBlob(res, 'image/png'));
   return blobToB64(b || blob);
 }
-/* i2i·인페인트 기준 그림. fill 을 주면 투명한 곳을 그 색으로 채운다(없으면 투명 그대로).
-   NAI fillImageBackground(빌드 78a367e)와 같은 손질 두 가지:
-     ① 숨은 메타데이터(stealth_pngcomp)가 든 그림이면 알파 254→255 · 1→0 으로 점을 지운다 (16,777,216 화소 이하일 때)
-     ② V5 가 아닌 모델은 투명한 곳을 흰색으로 채운다
-     ③ 크기가 다르면 늘여 맞춘다(NAI 는 Lanczos, 우리는 브라우저 고품질 축소·확대) — 12.12 까지는 가운데를 잘라 맞췄다(대조표 A13).
-        NAI 는 바탕 그림을 넣을 때 생성 크기를 그림에 맞추므로(setResForImage) 늘이는 일은 대개 거의 없다. */
-async function blobToB64Resized(blob, w, h, fill, crop) {   // crop: {x,y,w,h} 를 주면 그 네모만 잘라 w×h 로 (NAI cropImageToSize → resizeImageToSize)
-  const img = await blobToImage(blob);
-  let src = img;
-  if (img.width * img.height <= 0x1000000) {
-    try {
-      const c0 = document.createElement('canvas'); c0.width = img.width; c0.height = img.height;
-      const x0 = c0.getContext('2d', { willReadFrequently: true }); x0.drawImage(img, 0, 0);
-      const d0 = x0.getImageData(0, 0, img.width, img.height);
-      if (stealthDetect(d0) === 'stealth_pngcomp') {
-        const a = d0.data;
-        for (let i = 3; i < a.length; i += 4) { if (a[i] === 254) a[i] = 255; else if (a[i] === 1) a[i] = 0; }
-        x0.putImageData(d0, 0, 0); src = c0;
-      }
-    } catch (e) { logErr('기준 그림 숨은 메타데이터 확인 실패(그대로 보냅니다): ' + e.message); }
+/* ── NAI 보내는 그림 손질 (빌드 b50892a 모듈 939743·217354: decodeImage·removeAlphaMetadata·cropImage·resizeLanczos·resizeNearest·
+   drawImageOver·fillBackground·parseCssColor·encodePng · 모듈 421464 resizeDirectorImage) ──────────────────────────────
+   NAI 는 보내는 그림을 캔버스가 아니라 RGBA 점 배열로 손질한다(캔버스는 반투명한 점의 색을 바꾼다). 크기를 바꿀 때는 pica 9.0.1(MIT)의
+   Lanczos3(기능 wasm·js)로, 실패하면 가장 가까운 점으로 맞춘다. 우리도 같은 셈이다 — PNG 는 캔버스 없이 그대로 풀고(pngRgbaExact),
+   다시 PNG 로 묶을 때도 캔버스를 거치지 않는다(naiEncodePng). PNG 가 아닌 그림(JPEG·WebP)만 NAI 처럼 캔버스로 푼다(NAI S).
+   쓰는 곳: i2i·인페인트 바탕 그림(fillImageBackground) · 집중 영역(cropImageToSize → resizeImageToSize) · V3 바이브 448(레터박스)
+   · 정밀 레퍼런스(resizeDirectorImage) · 디렉터 툴(resizeImageToSize). 12.23 까지는 브라우저 캔버스 «고품질»로 늘였다(대조표 A13·B3). */
+const NAI_IMG = { pica: null, load: null };
+function naiPica() {   // NAI getPicaInstance: pica({ features: ['wasm', 'js'] }) 하나를 같이 쓴다 — 처음 쓸 때 /vendor/pica.js 를 부른다
+  if (NAI_IMG.pica) return Promise.resolve(NAI_IMG.pica);
+  if (!NAI_IMG.load) NAI_IMG.load = new Promise((res, rej) => {
+    if (typeof window.pica === 'function') { res(window.pica); return; }
+    const s = document.createElement('script'); s.src = '/vendor/pica.js'; s.async = true;
+    s.onload = () => (typeof window.pica === 'function' ? res(window.pica) : rej(new Error('pica 를 불러왔지만 쓸 수 없습니다')));
+    s.onerror = () => rej(new Error('pica 를 불러오지 못했습니다 (/vendor/pica.js)'));
+    document.head.appendChild(s);
+  }).then(P => (NAI_IMG.pica = P({ features: ['wasm', 'js'] }))).catch(e => { NAI_IMG.load = null; throw e; });
+  return NAI_IMG.load;
+}
+const naiRound = t => Math.max(1, Math.round(t));   // NAI p
+function naiImg(w, h, data) {   // NAI o
+  const d = data || new Uint8ClampedArray(w * h * 4);
+  if (d.length !== w * h * 4) throw new Error('점 수가 그림 크기와 맞지 않습니다');
+  return { width: w, height: h, data: d };
+}
+/* 그림 → RGBA 점 (NAI decodeImage, 못 푸는 형식은 캔버스 S) */
+async function naiDecode(src) {
+  const u8 = src instanceof Uint8Array ? src : new Uint8Array(await src.arrayBuffer());
+  const exact = await pngRgbaExact(u8);
+  if (exact) return exact;
+  const im = await canvasRgba(src instanceof Blob ? src : new Blob([u8]));
+  return { width: im.width, height: im.height, data: im.data };
+}
+/* NAI v + I: 16,777,216 화소 이하이고 투명도 맨 끝 비트에 «stealth_pngcomp» 가 숨어 있으면 알파 254→255 · 1→0 */
+function naiStripStealth(img) {
+  if (img.width * img.height > 0x1000000 || stealthDetect(img) !== 'stealth_pngcomp') return false;
+  const a = img.data; for (let i = 3; i < a.length; i += 4) { if (a[i] === 254) a[i] = 255; else if (a[i] === 1) a[i] = 0; }
+  return true;
+}
+function naiCrop(t, e, r, n, i) {   // NAI cropImage — 그림 밖은 투명
+  n = naiRound(n); i = naiRound(i); e = Math.round(e); r = Math.round(r);
+  const a = naiImg(n, i), s = t.data, l = a.data;
+  for (let y = 0; y < i; y++) {
+    const sy = r + y; if (sy < 0 || sy >= t.height) continue;
+    const x0 = Math.max(0, -e), x1 = Math.min(n, t.width - e);
+    for (let x = x0; x < x1; x++) { const o = (sy * t.width + e + x) * 4, h = (y * n + x) * 4; l[h] = s[o]; l[h + 1] = s[o + 1]; l[h + 2] = s[o + 2]; l[h + 3] = s[o + 3]; }
   }
-  const c = document.createElement('canvas'); c.width = w; c.height = h;
-  const x = c.getContext('2d');
-  x.imageSmoothingQuality = 'high';
-  if (crop) x.drawImage(src, crop.x, crop.y, crop.w, crop.h, 0, 0, w, h); else x.drawImage(src, 0, 0, w, h);
-  if (fill) { x.globalCompositeOperation = 'destination-over'; x.fillStyle = fill; x.fillRect(0, 0, w, h); x.globalCompositeOperation = 'source-over'; }
-  return c.toDataURL('image/png').split(',')[1];
+  return a;
+}
+function naiResizeNearest(t, e, r) {   // NAI resizeNearest
+  e = naiRound(e); r = naiRound(r);
+  const n = naiImg(e, r), i = t.data, a = n.data;
+  for (let y = 0; y < r; y++) {
+    const sy = Math.min(t.height - 1, Math.floor((y + .5) * t.height / r));
+    for (let x = 0; x < e; x++) { const sx = Math.min(t.width - 1, Math.floor((x + .5) * t.width / e)), l = (sy * t.width + sx) * 4, h = (y * e + x) * 4; a[h] = i[l]; a[h + 1] = i[l + 1]; a[h + 2] = i[l + 2]; a[h + 3] = i[l + 3]; }
+  }
+  return n;
+}
+async function naiResizeLanczos(t, e, r) {   // NAI resizeLanczos (같은 크기면 베낀 것)
+  e = naiRound(e); r = naiRound(r);
+  if (e === t.width && r === t.height) return naiImg(t.width, t.height, new Uint8ClampedArray(t.data));
+  const out = await (await naiPica()).resizeBuffer({ src: new Uint8Array(t.data.buffer, t.data.byteOffset, t.data.byteLength), width: t.width, height: t.height, toWidth: e, toHeight: r, filter: 'lanczos3' });
+  return naiImg(e, r, new Uint8ClampedArray(out.buffer, out.byteOffset, out.byteLength));
+}
+async function naiResize(t, e, r, smooth) {   // NAI D: 부드럽게 아니면 가장 가까운 점 · Lanczos 가 실패하면 기록하고 가장 가까운 점
+  if (smooth === false) return naiResizeNearest(t, e, r);
+  try { return await naiResizeLanczos(t, e, r); } catch (err) { logErr('그림 크기 맞추기(Lanczos) 실패 — 가장 가까운 점으로 맞춥니다: ' + err.message); return naiResizeNearest(t, e, r); }
+}
+function naiDrawOver(t, e, r, n) {   // NAI drawImageOver (곧은 알파로 덮어 그리기)
+  r = Math.round(r); n = Math.round(n);
+  const i = t.data, a = e.data;
+  for (let o = 0; o < e.height; o++) {
+    const s = n + o; if (s < 0 || s >= t.height) continue;
+    for (let x = 0; x < e.width; x++) {
+      const l = r + x; if (l < 0 || l >= t.width) continue;
+      const h = (o * e.width + x) * 4, c = (s * t.width + l) * 4, f = a[h + 3] / 255;
+      if (f === 1) { i[c] = a[h]; i[c + 1] = a[h + 1]; i[c + 2] = a[h + 2]; i[c + 3] = 255; continue; }
+      if (f === 0) continue;
+      const u = i[c + 3] / 255 * (1 - f), d = f + u;
+      i[c] = (a[h] * f + i[c] * u) / d; i[c + 1] = (a[h + 1] * f + i[c + 1] * u) / d; i[c + 2] = (a[h + 2] * f + i[c + 2] * u) / d; i[c + 3] = Math.round(255 * d);
+    }
+  }
+}
+function naiFillBg(t, e) {   // NAI fillBackground (투명한 곳 뒤에 색을 깐다 · 투명 색이면 그대로)
+  const [r, n, i, a] = e; if (a === 0) return;
+  const o = t.data;
+  for (let k = 0; k < o.length; k += 4) {
+    const f = o[k + 3] / 255; if (f === 1) continue;
+    const s = a / 255 * (1 - f), l = f + s;
+    if (l !== 0) { o[k] = (o[k] * f + r * s) / l; o[k + 1] = (o[k + 1] * f + n * s) / l; o[k + 2] = (o[k + 2] * f + i * s) / l; o[k + 3] = Math.round(255 * l); }
+  }
+}
+function naiParseColor(t) {   // NAI parseCssColor
+  const g = { transparent: [0, 0, 0, 0], white: [255, 255, 255, 255], black: [0, 0, 0, 255] };
+  t = String(t).trim().toLowerCase();
+  if (t in g) return [...g[t]];
+  let m = t.match(/^#([0-9a-f]{3,8})$/);
+  if (m) {
+    const h = m[1];
+    if (h.length === 3 || h.length === 4) { const [a, b, c, d] = [...h].map(x => parseInt(x + x, 16)); return [a, b, c, d ?? 255]; }
+    return h.length === 6 || h.length === 8 ? [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16), h.length === 8 ? parseInt(h.slice(6, 8), 16) : 255] : undefined;
+  }
+  m = t.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)$/);
+  if (m) return [Math.min(255, +m[1]), Math.min(255, +m[2]), Math.min(255, +m[3]), m[4] === undefined ? 255 : Math.round(255 * Math.min(1, +m[4]))];
+  return undefined;
+}
+/* RGBA 점 → PNG (캔버스를 거치지 않아 반투명한 점도 그대로) — 줄마다 거르기 0, deflate. CompressionStream 이 없으면 캔버스로 */
+async function naiEncodePng(img) {
+  const { width: w, height: h, data } = img;
+  if (typeof CompressionStream !== 'function') {
+    const c = document.createElement('canvas'); c.width = w; c.height = h; c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(data), w, h), 0, 0);
+    return new Uint8Array(await (await new Promise(r => c.toBlob(r, 'image/png'))).arrayBuffer());
+  }
+  const raw = new Uint8Array(h * (w * 4 + 1));
+  for (let y = 0; y < h; y++) raw.set(data.subarray(y * w * 4, (y + 1) * w * 4), y * (w * 4 + 1) + 1);
+  const z = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer());
+  const chunk = (type, body) => {
+    const out = new Uint8Array(12 + body.length), dv = new DataView(out.buffer), td = new Uint8Array(4 + body.length);
+    for (let i = 0; i < 4; i++) td[i] = type.charCodeAt(i);
+    td.set(body, 4); dv.setUint32(0, body.length); out.set(td, 4); dv.setUint32(8 + body.length, (crc32(td) ^ 0xFFFFFFFF) >>> 0);
+    return out;
+  };
+  const ih = new Uint8Array(13), dv = new DataView(ih.buffer); dv.setUint32(0, w); dv.setUint32(4, h); ih[8] = 8; ih[9] = 6;   // 8비트 RGBA
+  const parts = [new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ih), chunk('IDAT', z), chunk('IEND', new Uint8Array(0))];
+  const out = new Uint8Array(parts.reduce((a, p) => a + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+const naiEncodePngB64 = async img => bufToB64((await naiEncodePng(img)).buffer);
+const naiSrc = src => (typeof src === 'string' ? b64ToU8(src) : src);   // base64 글이면 바이트로
+/* NAI fillImageBackground(그림, 색, 세로, 가로, JPEG, 부드럽게(기본 켬), 레터박스): 숨은 메타 점 지우기 → 크기 맞추기(레터박스면 비율을 지켜 안에 넣고 가운데)
+   → 그 크기 판에 덮어 그리기 → 투명한 곳 뒤에 색 → PNG */
+async function naiFillImageBackground(src, color, h, w, smooth, letterbox) {
+  const l = await naiDecode(naiSrc(src));
+  naiStripStealth(l);
+  const s = smooth !== false, m = w || l.width, u = h || l.height;
+  let c = l, d = 0, S0 = 0;
+  if (w && h) {
+    if (letterbox) {
+      let e = w, a = h;
+      if (l.width / l.height > w / h) a = l.height * w / l.width; else e = l.width * h / l.height;
+      c = await naiResize(l, e, a, s); d = Math.round((w - c.width) / 2); S0 = Math.round((h - c.height) / 2);
+    } else if (l.width !== w || l.height !== h) c = await naiResize(l, w, h, s);
+  }
+  let M = c;
+  if (c.width !== m || c.height !== u || d !== 0 || S0 !== 0) { M = naiImg(m, u); naiDrawOver(M, c, d, S0); }
+  const b = naiParseColor(color);
+  if (b) naiFillBg(M, b); else logErr('그림 바탕 색을 읽지 못했습니다: ' + color);
+  return naiEncodePngB64(M);
+}
+/* NAI resizeImageToSize(그림, 가로, 세로, 부드럽게) — 디렉터 툴·집중 영역 */
+async function naiResizeImageToSize(src, w, h, smooth) { return naiEncodePngB64(await naiResize(await naiDecode(naiSrc(src)), w, h, smooth !== false)); }
+/* NAI removeAlphaMetadata: PNG 머리의 크기가 16,777,216 화소를 넘거나 JPEG 면 그대로 · 숨은 메타가 있으면 점을 지운 PNG */
+async function naiRemoveAlphaMeta(u8) {
+  const png = u8.length >= 24 && PNG_SIG.every((b, i) => u8[i] === b), dv = png ? new DataView(u8.buffer, u8.byteOffset, u8.byteLength) : null;
+  if ((png && dv.getUint32(16) * dv.getUint32(20) > 0x1000000) || (u8[0] === 0xFF && u8[1] === 0xD8 && u8[2] === 0xFF)) return u8;
+  const a = await naiDecode(u8);
+  if (a.width * a.height > 0x1000000 || !naiStripStealth(a)) return u8;
+  return naiEncodePng(a);
+}
+/* NAI resizeDirectorImage(정밀 레퍼런스): 숨은 메타 점 지우기 → 1024×1536·1536×1024·1472×1472 가운데 비율이 가장 가까운 판 →
+   비율을 지켜 Lanczos 로 맞추고 가운데 → 투명한 곳 뒤에 색(투명을 받는 모델은 투명, 아니면 검정) → PNG */
+const DIRECTOR_SIZES = [[1024, 1536], [1536, 1024], [1472, 1472]];
+async function naiDirectorImage(src, color) {
+  const e = await naiDecode(await naiRemoveAlphaMeta(naiSrc(src))), a = e.width / e.height;
+  let t = DIRECTOR_SIZES[0];
+  for (const z of DIRECTOR_SIZES) if (Math.abs(z[0] / z[1] - a) < Math.abs(t[0] / t[1] - a)) t = z;
+  const [o, l] = t, s = o / l; let m = e.width, u = e.height;
+  if (a > s) { m = o; u = Math.round(o / a); } else { u = l; m = Math.round(l * a); }
+  const g = m === e.width && u === e.height ? e : await naiResizeLanczos(e, m, u), f = naiImg(o, l);
+  naiDrawOver(f, g, Math.round((o - m) / 2), Math.round((l - u) / 2));
+  const d = naiParseColor(color || 'black');
+  if (d) naiFillBg(f, d); else logErr('정밀 레퍼런스 바탕 색을 읽지 못했습니다: ' + color);
+  return naiEncodePngB64(f);
+}
+/* i2i·인페인트 기준 그림 — NAI 와 같은 손질: 숨은 메타 점 지우기 → (집중 영역이면 그 네모를 잘라 Lanczos 로 요청 크기에)
+   → 크기가 다르면 Lanczos 로 늘여 맞추기 → 투명한 곳 뒤에 fill 색(V5 는 투명 그대로, 나머지는 흰색) → PNG. 12.12 까지는 가운데를 잘라 맞췄다(대조표 A13). */
+async function blobToB64Resized(blob, w, h, fill, crop) {   // crop: {x,y,w,h} 를 주면 그 네모만 잘라 w×h 로 (NAI cropImageToSize → resizeImageToSize)
+  if (crop) {   // NAI generateInfill zoomArea: removeAlphaMetadata → cropImageToSize → resizeImageToSize, 그 뒤 공통 길의 fillImageBackground
+    const img = await naiDecode(await naiRemoveAlphaMeta(new Uint8Array(await blob.arrayBuffer())));
+    const z = await naiResize(naiCrop(img, crop.x, crop.y, crop.w, crop.h), w, h, true);
+    return naiFillImageBackground(await naiEncodePng(z), fill || 'transparent', h, w, true);
+  }
+  return naiFillImageBackground(new Uint8Array(await blob.arrayBuffer()), fill || 'transparent', h, w, true);
 }
 /* NAI closestMultipleNum: 내림·올림 가운데 가까운 64 배수(같으면 올림) */
 function closest64(v) { const lo = Math.floor(v / 64) * 64, hi = Math.ceil(v / 64) * 64; return v - lo < hi - v ? lo : hi; }
@@ -1195,30 +1351,12 @@ async function setResForImage(blob) {
     }
   }
 }
-async function blobToB64Letterbox(blob) { // Precise Reference용: 허용 캔버스에 레터박스(검정 여백)
-  const img = await blobToImage(blob);
-  const CANV = [[1024, 1536], [1536, 1024], [1472, 1472]];
-  const ar = img.width / img.height;
-  let best = CANV[0], bd = 1e9;
-  for (const c of CANV) { const d = Math.abs(c[0] / c[1] - ar); if (d < bd) { bd = d; best = c; } }
-  const [w, h] = best;
-  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
-  const x = cv.getContext('2d'); x.fillStyle = '#000'; x.fillRect(0, 0, w, h);
-  const r = Math.min(w / img.width, h / img.height);
-  const dw = Math.round(img.width * r), dh = Math.round(img.height * r);
-  x.drawImage(img, Math.round((w - dw) / 2), Math.round((h - dh) / 2), dw, dh);
-  return cv.toDataURL('image/png').split(',')[1];
+async function blobToB64Letterbox(blob, color) { // 정밀 레퍼런스: NAI resizeDirectorImage (허용 판에 레터박스, 바탕 검정 — 투명을 받는 모델은 투명)
+  return naiDirectorImage(new Uint8Array(await blob.arrayBuffer()), color || 'black');
 }
 async function blobToB64(blob) { return bufToB64(await blob.arrayBuffer()); }
-/* V3 바이브용: 비율을 지켜 448×448 안에 넣고 빈 곳은 검게 (NAI fillImageBackground 와 같은 셈) */
-async function b64Letterbox448(b64) {
-  const img = await blobToImage(new Blob([b64ToU8(b64)], { type: 'image/png' }));
-  const N = 448, cv = document.createElement('canvas'); cv.width = N; cv.height = N;
-  const x = cv.getContext('2d'); x.fillStyle = '#000'; x.fillRect(0, 0, N, N); x.imageSmoothingQuality = 'high';
-  const r = Math.min(N / img.width, N / img.height), dw = Math.round(img.width * r), dh = Math.round(img.height * r);
-  x.drawImage(img, Math.round((N - dw) / 2), Math.round((N - dh) / 2), dw, dh);
-  return cv.toDataURL('image/png').split(',')[1];
-}
+/* V3 바이브: NAI fillImageBackground(그림, "black", 448, 448, PNG, 부드럽게, 레터박스) — 비율을 지켜 448×448 안에 Lanczos 로 넣고 빈 곳은 검게 */
+async function b64Letterbox448(b64) { return naiFillImageBackground(b64, 'black', 448, 448, true, true); }
 /* 크기만 알면 되는데 예전엔 그림을 통째로 풀었다(1216×832 한 장에 약 4MB, 뽑을 때마다 화면 일을 막음).
    PNG 는 머리(IHDR)에 가로·세로가 적혀 있어 앞 24바이트만 읽으면 된다. PNG 가 아니면 예전처럼 푼다. */
 async function blobSize(blob) {
@@ -1472,7 +1610,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.23';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.24';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -1670,6 +1808,11 @@ function authHeaders(json) {
   if (json) h['Content-Type'] = 'application/json';
   return h;
 }
+/* NAI 그림 요청 머리글 (빌드 b50892a — 생성·스트리밍·디렉터 툴·업스케일·바이브 인코딩): 요청마다 x-correlation-id(NAI randomShortID: 헷갈리는 l·0 을 뺀
+   글자 6개)와 x-initiated-at(보낸 시각). 서버가 그대로 NAI 로 넘긴다(FORWARD_HEADERS) */
+const NAI_ID_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789';
+function naiShortId(n) { let s = ''; for (let i = 0; i < (n || 6); i++) s += NAI_ID_CHARS.charAt(Math.floor(Math.random() * NAI_ID_CHARS.length)); return s; }
+function naiReqHeaders(json) { return { ...authHeaders(json), 'x-correlation-id': naiShortId(), 'x-initiated-at': new Date().toISOString() }; }
 async function apiFetch(path, opts) {
   if (!R.srvOk) { await probeServer(); setSrvUI(R.srvOk, R.srvInfo); if (!R.srvOk) throw new Error('로컬 서버에 연결할 수 없습니다 — start.bat을 실행하세요'); }
   /* 세션 열쇠. 서버가 켜질 때 만들어 이 페이지 안에만 심어 준 값이다.
@@ -2582,7 +2725,15 @@ async function attachImages(body, ov) {
     toast('인페인트에는 바이브가 쓰이지 않아 빼고 생성했습니다 (NAI 와 같습니다)'); vibes = [];
   }
   if (prefs.length) { // Precise Reference (V4.5) — 바이브와 동시 사용 불가
-    p.director_reference_images = prefs.map(v => v.b64);
+    /* NAI 는 생성할 때마다 넣어 둔 원본에서 resizeDirectorImage(그림, 모델, 투명을 받는 모델이면 "transparent" 아니면 "black") 로 만든다.
+       같은 그림·같은 바탕이면 결과가 같으므로 한 번 만든 것을 기억해 둔다(저장되지 않는 칸). 원본이 없는 옛 항목은 넣을 때 만든 것(검정 바탕) */
+    const pc = caps.transparency ? 'transparent' : 'black';
+    p.director_reference_images = await Promise.all(prefs.map(async v => {
+      if (!v.ob64) return v.b64;
+      const k = '_dir_' + pc;
+      if (!v[k]) Object.defineProperty(v, k, { value: await naiDirectorImage(v.ob64, pc), writable: true, configurable: true, enumerable: false });
+      return v[k];
+    }));
     p.director_reference_descriptions = prefs.map(v => ({ caption: { base_caption: v.type, char_captions: [] }, legacy_uc: false }));
     p.director_reference_strength_values = prefs.map(v => v.strength);
     // NAI applyCharacterReferenceFields: 1 - fidelity 그대로 (예전엔 소수 둘째 자리에서 반올림해 값이 조금 달랐다)
@@ -2685,7 +2836,7 @@ async function ensureVibes(mdl, only) {
     const ie = v.ie;    // await 전에 캡처 — 인코딩 도중 IE 를 바꾸면 캐시 키가 어긋난다
     v.state = '인코딩 중…'; v.stateCls = ''; renderVibes();
     try {
-      const res = await apiFetch('/img/ai/encode-vibe', { method: 'POST', headers: authHeaders(true), body: JSON.stringify({ image: v.b64, model: mdl, information_extracted: ie }) });
+      const res = await apiFetch('/img/ai/encode-vibe', { method: 'POST', headers: naiReqHeaders(true), body: JSON.stringify({ image: v.b64, model: mdl, information_extracted: ie }) });
       if (!res.ok) throw await apiError(res);
       const enc = bufToB64(await res.arrayBuffer());
       v.encs[mdl + '|' + ie] = enc;   // 받은 인코딩은 IE 가 바뀌었어도 그 «모델|IE» 의 것으로 맞다
@@ -3092,12 +3243,75 @@ function hidePreview() {
   if (!R.hist.length || !curItem()) $('#viewerEmpty').hidden = false;
   if (typeof qsSync === 'function') qsSync();   // 생성이 끝났는데 고른 그림이 없으면(실패·취소) 빠른 시작 그림 모음을 다시 보인다
 }
+/* ── NAI 그림 캐시 키 (빌드 b50892a t6.applyCacheTransformation·restoreImageDataForInvalidKeys·makeRequestWithCacheRetry) ──
+   요청의 그림마다 세션 무작위 열쇠(32바이트)로 base64 글의 HMAC-SHA256 을 만들어 «*_cache_secret_key»·«*_cached» 로 붙이고,
+   이번 세션에 이미 보낸 열쇠면 그림 글을 빼고 열쇠만 보낸다(바이브·바탕 그림을 다시 올리지 않아 요청이 작고 빠르다).
+   서버가 400 «INVALID_CACHE_KEYS» 로 답하면 그 그림을 다시 실어 같은 머리글로 한 번 더, 다른 400 이면 이번에 새로 넣은 열쇠를 잊는다.
+   NAI 웹은 multipart 로, 우리는 JSON 으로 보낸다(대조표 A17) — NAI 의 JSON 길(debugLegacyImageGenRequest)도 같은 열쇠를 싣는다.
+   안전장치(우리만): 400 글에 «cache» 가 들어 있으면 이 세션에서는 열쇠를 끄고 그림을 통째로 실어 한 번 더 보낸다(거절은 과금되지 않는다). */
+const NAI_CACHE = { key: null, known: new Set(), off: false };
+async function naiCacheKey(b64) {   // NAI th
+  if (!NAI_CACHE.key) NAI_CACHE.key = crypto.getRandomValues(new Uint8Array(32));
+  const k = await crypto.subtle.importKey('raw', NAI_CACHE.key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return [...new Uint8Array(await crypto.subtle.sign('HMAC', k, new TextEncoder().encode(b64)))].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+async function naiCacheApply(p) {   // NAI applyCacheTransformation (p 는 요청 매개변수 사본) → 되살릴 때 쓸 것
+  const st = { keys: {}, newKeys: new Set(), orig: {} };
+  for (const [f, kf] of [['image', 'image_cache_secret_key'], ['mask', 'mask_cache_secret_key'], ['reference_image', 'reference_image_cache_secret_key']]) {
+    if (!p[f]) continue;
+    st.orig[f] = p[f];
+    const t = await naiCacheKey(p[f]); st.keys[f] = t;
+    if (NAI_CACHE.known.has(t)) { delete p[f]; p[kf] = t; } else { p[kf] = t; NAI_CACHE.known.add(t); st.newKeys.add(t); }
+  }
+  for (const [f, out] of [['reference_image_multiple', 'reference_image_multiple_cached'], ['director_reference_images', 'director_reference_images_cached']]) {
+    if (!(p[f] && p[f].length > 0)) continue;
+    st.orig[f] = [...p[f]]; st.keys[f] = [];
+    const t = [];
+    for (const r of p[f]) {
+      const e = await naiCacheKey(r); st.keys[f].push(e);
+      if (NAI_CACHE.known.has(e)) t.push({ cache_secret_key: e }); else { t.push({ cache_secret_key: e, data: r }); NAI_CACHE.known.add(e); st.newKeys.add(e); }
+    }
+    p[out] = t; delete p[f];
+  }
+  return st;
+}
+function naiCacheRestore(p, st, invalid) {   // NAI restoreImageDataForInvalidKeys — 서버에 없는 열쇠의 그림만 다시 싣는다(열쇠는 그대로)
+  const bad = k => invalid.includes(k);
+  if (st.keys.image && p.image_cache_secret_key && bad(p.image_cache_secret_key)) p.image = st.orig.image;
+  if (st.keys.mask && p.mask_cache_secret_key && bad(p.mask_cache_secret_key)) p.mask = st.orig.mask;
+  if (st.keys.reference_image && p.reference_image_cache_secret_key && bad(p.reference_image_cache_secret_key)) p.reference_image = st.orig.reference_image;
+  for (const [f, out] of [['reference_image_multiple', 'reference_image_multiple_cached'], ['director_reference_images', 'director_reference_images_cached']]) {
+    if (p[out] && st.keys[f]) p[out] = p[out].map((e, r) => (bad(e.cache_secret_key) && !e.data ? { cache_secret_key: e.cache_secret_key, data: st.orig[f] && st.orig[f][r] } : e));
+  }
+}
+/* 생성 요청 보내기 (NAI t6.request·requestStream → makeRequestWithCacheRetry): 본문 { input, model, action, parameters, use_new_shared_trial: true } */
+async function naiSendGen(path, body, headers, extraParams) {
+  const p = JSON.parse(JSON.stringify(body.parameters));
+  const st = NAI_CACHE.off ? null : await naiCacheApply(p);
+  Object.assign(p, extraParams || {});
+  const req = { ...body, parameters: p, use_new_shared_trial: true };
+  const send = () => apiFetch(path, { method: 'POST', headers, body: JSON.stringify(req), signal: R.abort && R.abort.signal });
+  let res = await send();
+  if (!res.ok && res.status === 400 && st) {
+    let j = null; try { j = JSON.parse(await res.clone().text()); } catch (e) { j = null; }
+    if (j && j.message === 'INVALID_CACHE_KEYS' && j.details && j.details.invalidKeys) {
+      naiCacheRestore(p, st, j.details.invalidKeys);
+      res = await send();
+    } else {
+      for (const k of st.newKeys) NAI_CACHE.known.delete(k);
+      if (j && /cache/i.test(String(j.message || '')) && (Object.keys(st.keys).length > 0)) {   // 안전장치(우리만)
+        NAI_CACHE.off = true; NAI_CACHE.known.clear();
+        logErr('NAI 가 그림 캐시 키를 거절해 이 세션에서는 끄고 그림을 통째로 다시 보냅니다: ' + String(j.message).slice(0, 160));
+        req.parameters = { ...JSON.parse(JSON.stringify(body.parameters)), ...(extraParams || {}) };
+        res = await send();
+      }
+    }
+  }
+  return res;
+}
 /* 미리보기 없이 한 번에 받는 방식. 스트림이 막혔을 때 돌아갈 곳이기도 하다. */
 async function generatePlain(body) {
-  const res = await apiFetch('/img/ai/generate-image', {
-    method: 'POST', headers: authHeaders(true),
-    body: JSON.stringify(body), signal: R.abort && R.abort.signal,
-  });
+  const res = await naiSendGen('/img/ai/generate-image', body, naiReqHeaders(true));   // NAI t6.request
   if (!res.ok) throw await apiError(res);   // 거절 = 받아들여지지 않음 = 과금 안 됨
   try { return await respImages(res); }
   catch (e) { e.charged = true; throw e; }  // 200 을 받은 뒤의 실패 = 이미 과금됨
@@ -3115,7 +3329,7 @@ function streamOff(why) {
 /* NAI 가 단계를 반만 알려 주는 샘플러 (빌드 78a367e HALF_STEP_SAMPLERS) */
 const HALF_STEP_SAMPLERS = new Set(['k_dpmpp_2s_ancestral', 'k_dpmpp_sde']);
 async function generateStreaming(body) {
-  const payload = { ...body, parameters: { ...body.parameters, stream: 'msgpack' } };
+  const payload = { ...body, parameters: { ...body.parameters, stream: 'msgpack' } };   // NAI t6.requestStream (보낼 때 naiSendGen 이 캐시 키·use_new_shared_trial)
   const pp = payload.parameters, steps = pp.steps;
   const nS = pp.n_samples || 1;
   /* 진행도는 NAI requestStream 과 같은 셈이다: 배치 전체 단계 수(반 단계 샘플러는 반, i2i 는 세기만큼,
@@ -3127,10 +3341,7 @@ async function generateStreaming(body) {
   if (payload.action === 'infill' && pp.img2img && pp.img2img.strength) total = Math.ceil(total * pp.img2img.strength);
   const skip = S.rawIntermediates ? 0 : 5, denom = Math.max(1, total - nS * skip);
   const seen = new Array(nS).fill(0);   // 장마다 마지막으로 보여 준 단계 − skip (NAI h[])
-  const res = await apiFetch('/img/ai/generate-image-stream', {
-    method: 'POST', headers: { ...authHeaders(true), Accept: 'application/x-msgpack' },
-    body: JSON.stringify(payload), signal: R.abort && R.abort.signal,
-  });
+  const res = await naiSendGen('/img/ai/generate-image-stream', body, { ...naiReqHeaders(true), Accept: 'application/x-msgpack' }, { stream: 'msgpack' });
   if (!res.ok) {
     const err = await apiError(res);
     /* 이 상태값들은 "요청을 받지도 않았다" 는 뜻이다 — 스트림 경로만 사라졌을 뿐

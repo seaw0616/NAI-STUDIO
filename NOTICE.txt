@@ -37,6 +37,29 @@ NAI Studio — 서드파티 고지
    커뮤니티에서 정리·공유된 목록을 사용했습니다. 원 작성자를 특정하지 못했습니다.
    출처를 아시는 분은 알려주시면 표기하겠습니다.
 
+8) pica 9.0.1
+   https://github.com/nodeca/pica   —   MIT License
+   assets/pica.min.js 로 원본 그대로 포함. NovelAI 웹과 같게, 보내는 그림의 크기를 바꿀 때
+   Lanczos3 필터로 다시 그리는 데 사용합니다.
+
+   (The MIT License)
+   Copyright (C) 2014-2017 by Vitaly Puzrin
+   Permission is hereby granted, free of charge, to any person obtaining a copy
+   of this software and associated documentation files (the "Software"), to deal
+   in the Software without restriction, including without limitation the rights
+   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   copies of the Software, and to permit persons to whom the Software is
+   furnished to do so, subject to the following conditions:
+   The above copyright notice and this permission notice shall be included in
+   all copies or substantial portions of the Software.
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+   THE SOFTWARE.
+
 6·7 번 데이터의 권리자께서 삭제를 요청하시면 즉시 배포본에서 제거하겠습니다.
 
 이 프로그램은 NovelAI, Danbooru, YouTube, Google 과 아무런 제휴 관계가 없습니다.

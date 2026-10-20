@@ -20,6 +20,7 @@ APP_FILES = [
     ('canvas.js', '.'),
     ('style.css', '.'),
     ('assets/hls.min.js', 'assets'),
+    ('assets/pica.min.js', 'assets'),
     ('assets/t5_vocab.json.gz', 'assets'),
     ('assets/tag_groups.json.gz', 'assets'),
     ('assets/tags_extra.json.gz', 'assets'),
