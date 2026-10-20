@@ -19,6 +19,7 @@ APP_FILES = [
     ('scenes.js', '.'),
     ('canvas.js', '.'),
     ('layout.js', '.'),
+    ('model3d.js', '.'),
     ('style.css', '.'),
     ('assets/hls.min.js', 'assets'),
     ('assets/pica.min.js', 'assets'),
@@ -29,6 +30,17 @@ APP_FILES = [
     ('LICENSE', '.'),
     ('NOTICE.txt', '.'),
 ]
+# 12.26: 그림판 3D 모델 레이어 라이브러리 (server.py THREE_VENDOR_FILES 와 같은 목록 — 점검.py 가 맞대 본다)
+THREE_FILES = [
+    'build/three.module.min.js', 'build/three.core.min.js',
+    'jsm/loaders/GLTFLoader.js', 'jsm/loaders/TGALoader.js', 'jsm/loaders/MMDLoader.js', 'jsm/utils/BufferGeometryUtils.js',
+    'jsm/controls/OrbitControls.js', 'jsm/controls/TransformControls.js',
+    'jsm/animation/MMDAnimationHelper.js', 'jsm/animation/MMDPhysics.js', 'jsm/animation/CCDIKSolver.js',
+    'jsm/libs/mmdparser.module.js', 'jsm/shaders/MMDToonShader.js', 'jsm/libs/ammo.wasm.js', 'jsm/libs/ammo.wasm.wasm',
+    'vrm/three-vrm.module.min.js', 'jszip/jszip.min.js',
+]
+for _p in THREE_FILES:
+    APP_FILES.append(('assets/three/' + _p, 'assets/three/' + _p.rsplit('/', 1)[0]))
 
 # 태그 사전 씨앗은 저장소에 넣기엔 크고(5.5MB) 자동으로 받아지는 것이라 선택 사항이다.
 # 있으면 넣어서 첫 실행 다운로드를 건너뛰게 하고, 없으면 그냥 빌드한다.

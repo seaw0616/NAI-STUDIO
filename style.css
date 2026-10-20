@@ -288,8 +288,12 @@ select.style-sel.sm { width: auto; max-width: 180px; padding: 3px 24px 3px 8px; 
 .phl mark { color: transparent; border-radius: 6px; }
 .phl mark.hl-chunk { background: color-mix(in srgb, var(--cc, var(--acc)) 28%, transparent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--cc, var(--acc)) 55%, transparent); }
 .phl mark.hl-wild { background: color-mix(in srgb, var(--gold) 22%, transparent); }
-/* 12.16 NAI «|»(섞기)·«||»(무작위 고르기) 색칠 — NAI 는 글자를 굵게·제목 색으로 칠한다. 우리는 글자 자리를 지키려고 뒤에 진한 바탕만 칠한다 */
-.phl mark.hl-bar, .phl mark.hl-bar2 { background: color-mix(in srgb, var(--txt) 34%, transparent); border-radius: 2px; }
+/* NAI «|»(섞기)·«||»(무작위 고르기) 색칠 — NAI 처럼 그 글자를 굵게·제목 색으로 (12.26).
+   입력 칸 위에 같은 글을 한 겹 더 깔고(phl-top) 막대 글자만 보이게 칠한다. 굵게는 글자 폭이 바뀌지 않게 테두리 획으로 */
+.phl mark.hl-bar, .phl mark.hl-bar2 { background: none; }
+.phl.phl-top { z-index: 2; background: transparent; }
+.phl.phl-top mark, .phl.phl-top .hl-emph { background: none !important; box-shadow: none !important; }
+.phl.phl-top mark.hl-bar, .phl.phl-top mark.hl-bar2 { color: var(--acc); -webkit-text-stroke: .6px var(--acc); }
 [data-theme="light"] .phl mark.hl-chunk, [data-theme="pink"] .phl mark.hl-chunk, [data-theme="menhera"] .phl mark.hl-chunk, [data-theme="sakura"] .phl mark.hl-chunk, [data-theme="mint"] .phl mark.hl-chunk { background: color-mix(in srgb, var(--cc, var(--acc)) 20%, transparent); }
 
 /* ── 가중치 강조/비강조 ({} 와 N::>1 은 올림 · [] 와 N::<1 은 내림) ──
@@ -921,7 +925,7 @@ input.sc-name-in:hover, input.sc-name-in:focus { border-bottom-color: var(--acc)
 .cv-lay { display: flex; align-items: center; gap: 6px; padding: 4px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
 .cv-lay.on { border-color: var(--acc); background: var(--accT); }
 .cv-thumb { flex: 0 0 auto; border-radius: 4px; border: 1px solid var(--line2); }
-.cv-lname { flex: 1; font-size: .82rem; min-width: 0; }
+.cv-lname { flex: 1; font-size: .82rem; min-width: 0; word-break: keep-all; }
 .cv-lbtn { display: inline-flex; gap: 2px; }
 .cv-bot { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--line); background: var(--bg1); flex-wrap: wrap; }
 .cv-tool { min-width: 40px; font-size: 1.05rem; }
@@ -934,7 +938,46 @@ input.sc-name-in:hover, input.sc-name-in:focus { border-bottom-color: var(--acc)
 .cvr-grid { display: grid; grid-template-columns: 90px 170px 90px; gap: 6px; align-items: center; justify-content: center; margin: 8px 0; }
 .cvr-grid input { width: 90px; text-align: center; }
 .cvr-grid canvas { width: 170px; height: 170px; border: 1px solid var(--line2); border-radius: 4px; }
-@media (max-width: 900px) { .cv-layers { width: 150px; flex-basis: 150px; } .cv-pop { right: 12px; } }
+/* 그림판 3D 레이어 (12.26, NAI TP·C5·Is·If·T7·IT) */
+.cv-mid { position: relative; }
+.cv-m3d { position: absolute; z-index: 1; overflow: hidden; cursor: default; }
+.cv-m3d canvas { position: static; }
+.cv-side { position: absolute; left: 10px; top: 10px; bottom: 10px; z-index: 3; display: flex; flex-direction: column; gap: 6px; pointer-events: none; min-height: 0; }
+.cv-side[hidden] { display: none; }
+.cv-panel { pointer-events: auto; background: var(--bg2); border: 1px solid var(--line2); border-radius: 3px; display: flex; flex-direction: column; width: 200px; flex: 1 1 0; min-height: 0; overflow: hidden; }
+.cv-ptitle { font-size: .75rem; padding: 8px 10px 4px; opacity: .7; flex-shrink: 0; }
+.cv-plist { overflow-y: auto; padding: 4px 6px 6px; flex: 1; min-height: 0; }
+.cv-psec { flex-shrink: 0; padding-bottom: 6px; max-height: 50%; overflow-y: auto; }
+.cv-psec.bordered { border-bottom: 1px solid var(--line2); }
+.cv-bone { display: flex; align-items: center; justify-content: space-between; padding: 3px 8px; font-size: .7rem; border-radius: 2px; cursor: pointer; opacity: .8; }
+.cv-bone:hover { background: var(--line2); opacity: 1; }
+.cv-bone.on { background: var(--line2); opacity: 1; color: #ff4400; }
+.cv-bone.phys { opacity: .4; }
+.cv-btag { font-size: .6rem; opacity: .5; margin-left: 4px; flex-shrink: 0; }
+.cv-empty { font-size: .7rem; opacity: .5; padding: 8px; text-align: center; }
+.cv-mrow { display: flex; align-items: center; gap: 4px; padding: 2px 6px; }
+.cv-mlab { font-size: .65rem; opacity: .8; min-width: 60px; max-width: 80px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cv-mrow input[type=range] { flex: 1; min-width: 0; height: 4px; margin: 0; }
+.cv-mrow output { font-size: .6rem; opacity: .5; min-width: 28px; text-align: right; }
+.cv-mlist { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line2); border-radius: 3px; padding: 2px 4px; flex-wrap: wrap; }
+.cv-mchip { display: inline-flex; align-items: center; gap: 2px; padding: 2px 6px; border-radius: 2px; opacity: .6; }
+.cv-mchip:hover, .cv-mchip.on { background: var(--line2); opacity: 1; }
+.cv-mname { font-size: .72rem; background: none; border: 0; color: inherit; cursor: pointer; padding: 0; white-space: nowrap; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+.cv-mdel { background: none; border: 0; color: inherit; cursor: pointer; padding: 0 2px; opacity: .5; font-size: .7rem; }
+.cv-mdel:hover { opacity: 1; }
+.cv-seg, .cv-seg2 { display: inline-flex; gap: 2px; border: 1px solid var(--line2); border-radius: 3px; padding: 2px; flex-wrap: wrap; }
+.cv-m3dset { display: flex; flex-direction: column; gap: 6px; }
+.cv-m3dset .rng { margin: 0; }
+.cv-sh { font-size: .78rem; opacity: .75; margin-top: 2px; }
+.cv-sh.sub { font-size: .72rem; margin-top: 0; }
+.cv-anim { position: fixed; left: 50%; bottom: 64px; transform: translateX(-50%); z-index: 94; display: flex; align-items: center; gap: 8px; background: var(--bg2); border: 1px solid var(--line2); border-radius: 3px; padding: 4px 8px; box-shadow: var(--shadow); }
+.cv-anim[hidden] { display: none; }
+.cv-anim select { font-size: .72rem; padding: 2px 4px; max-width: 140px; }
+.cv-aname { font-size: .72rem; opacity: .7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px; }
+.cv-aspd { display: inline-flex; align-items: center; gap: 4px; }
+.cv-aspd output { font-size: .65rem; opacity: .7; min-width: 30px; text-align: center; }
+.cv-aspd input { width: 60px; }
+@media (max-width: 900px) { .cv-layers { width: 150px; flex-basis: 150px; } .cv-pop { right: 12px; } .cv-panel { width: 160px; } }
 
 /* NAI Pixel Snap 결과는 점이 번지지 않게 그린다 (imageRendering pixelated) */
 .pixelated { image-rendering: pixelated; }
@@ -1160,8 +1203,13 @@ body.nl-on .nl-off { display: none !important; }
 .nl-row { display: flex; flex-direction: row; align-items: center; min-width: 0; }
 .nl-row.bar { flex: 0 0 auto; padding: 12px 12px 8px; background: var(--bg1); border-bottom: 1px solid var(--line); }
 .nl-flex { min-width: 0; display: flex; align-self: stretch; align-items: center; }
-.nl-nb { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 8px; background: none; border: 1px solid transparent; color: var(--txt); font-size: 16px; }
-.nl-nb:hover, .nl-nb.on { background: var(--bg2); border-color: var(--line); color: var(--acc); }
+/* NAI SidebarButton $square: 44×40 · 둥글기 4 · 글자 16/600 · 바탕 bg3(ghost 는 투명) · 올리면 bg3 에 글자색 8% 섞음(ghost 는 bg3) */
+.nl-nb { position: relative; display: inline-flex; flex-direction: row; align-items: center; justify-content: center; gap: 4px; white-space: nowrap; width: 44px; height: 40px; padding: 0;
+  border-radius: 4px; background: var(--bg3); border: none; box-shadow: none; color: var(--txt); font-size: 16px; font-weight: 600; line-height: 20px; cursor: pointer; transition: background-color .15s; }
+.nl-nb:hover:not(:disabled) { background: color-mix(in srgb, var(--txt) 8%, var(--bg3)); }
+.nl-nb-ghost { background: transparent; }
+.nl-nb-ghost:hover:not(:disabled) { background: var(--bg3); }
+.nl-nb:disabled { opacity: .4; }
 .nl-menu-btn.alert::after { content: ""; position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 6px var(--gold); }
 .nl-sep { flex: 0 0 auto; width: 100%; border-bottom: 1px solid var(--line); }
 .nl-divider { flex: 0 0 auto; width: 100%; height: 1px; background: var(--line); }
@@ -1185,6 +1233,15 @@ body.nl-on .nl-off { display: none !important; }
 .nl-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); white-space: nowrap; }
 .nl-chip-in { width: 54px; padding: 1px 4px; font-size: 12px; background: transparent; border: 1px solid transparent; border-radius: 4px; color: var(--txt); }
 .nl-chip-in:hover, .nl-chip-in:focus { border-color: var(--line2); background: var(--bg2); }
+/* NAI 요약 칩 Sampler: 이름 단추(SubtleButton) + 위로 열리는 목록(react-select 메뉴: 바탕 bg2 · 모서리 0 · 테두리 그림자 · 항목 8px 12px ·
+   고른 것 bg1·제목색 · 올리면 bg1 60%) */
+.nl-chip-sub { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nl-smenu { position: fixed; z-index: 9999; min-width: 170px; max-height: 250px; overflow-y: auto; background: var(--bg2); border-radius: 0; outline: none;
+  box-shadow: 0 0 0 1px color-mix(in srgb, color-mix(in srgb, #fff 14%, var(--bg3)) 60%, transparent), 0 4px 11px rgba(0, 0, 0, .2); }
+.nl-smenu-o { display: block; width: 100%; padding: 8px 12px; text-align: left; background: none; border: 0; border-radius: 0; box-shadow: none; color: var(--txt); font: inherit; cursor: pointer; white-space: nowrap; }
+.nl-smenu-o.focus { background: color-mix(in srgb, var(--bg1) 60%, transparent); }
+.nl-smenu-o.on { background: var(--bg1); color: var(--gold); }
+.nl-smenu-o:disabled { opacity: .45; cursor: default; }
 .nl-chip-sel { max-width: 160px; padding: 1px 4px; font-size: 12px; background: transparent; border: 1px solid transparent; border-radius: 4px; color: var(--txt); }
 .nl-chip-sel:hover, .nl-chip-sel:focus { border-color: var(--line2); background: var(--bg2); }
 .nl-chip-b { padding: 1px 5px; border-radius: 4px; background: none; border: 0; color: var(--txt); font-size: 12px; }
@@ -1208,7 +1265,6 @@ body.nl-on .nl-off { display: none !important; }
 .nl-el { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
 .nl-el.fill { flex: 1 1 auto; min-height: 0; }
 .nl-el.fill > .card { flex: 1 1 auto; min-height: 0; }
-.nl-el-head { font-size: 12px; font-weight: 700; color: var(--dim); }
 .nl-el[data-nl-el="anlas-balance"], .nl-el[data-nl-el="ai-settings-reset"] { flex-direction: row; gap: 0; }
 .nl-el[data-nl-el="seed"], .nl-el[data-nl-el="banner-stack"] { gap: 6px; }
 .nl-el[data-nl-el="model-mode-row"] { gap: 8px; }
@@ -1278,3 +1334,222 @@ body.nl-on .vstage.nl-has-top .varbar { top: 72px; }
 .nl-menu-pop .top-actions { gap: 6px; }
 .nl-menu-pop .pill .lbl { display: inline !important; }
 .nl-menu-pop .yt-now { max-width: none; }
+
+/* ═══ NAI 크기 칸(resolution)·장수 칸(image-count) — NAI sc-191592bb(NB·NV·N$·NX·NY·NH·NG)·jn·Radio(sc-b1657a5f) 값 그대로 ═══ */
+.nres, .ncount { display: flex; flex-direction: column; gap: 8px; margin: 6px 0; }
+.nres-top { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; }
+.nres-title { font-size: 1rem; font-weight: 600; }
+.nres-box { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 8px; border-radius: 4px; background: var(--bg3); color: var(--txt); border: 1px solid transparent; box-sizing: border-box; }
+.nres-box.edit, .nres-box:focus-within { border-color: color-mix(in srgb, var(--bg3), #fff 10%); }
+.nres-box input { font-size: 16px; font-weight: 400; line-height: 20px; background: transparent; border: none; outline: none; color: inherit; text-align: center; width: 5ch; padding: 0; opacity: .7; -moz-appearance: textfield; appearance: textfield; box-shadow: none; min-width: 0; height: auto; }
+.nres-box.edit input, .nres-box input:focus { opacity: 1; }
+.nres-box input::-webkit-outer-spin-button, .nres-box input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.nres-x { display: flex; align-items: center; justify-content: center; padding: 0 2px; background: transparent; border: none; color: inherit; font: inherit; line-height: 1; cursor: pointer; opacity: .5; }
+.nres-x:hover { opacity: 1; }
+.nres-bot { display: flex; flex-direction: row; align-items: center; gap: 8px; }
+.nres-cat { flex: 0 0 auto; width: auto; min-width: 114px; height: 40px; border-radius: 8px; font-size: 1rem; }
+.nres-shape, .ncount #batchSeg { display: flex; flex-direction: row; align-items: center; gap: 4px; height: 40px; padding: 4px; border-radius: 8px; background: var(--bg2); border: 1px solid var(--bg3); width: 100%; box-sizing: border-box; margin: 0; }
+.nres-shape { flex: 1 1 0; width: auto; min-width: 0; }
+.nres-shape button, .ncount #batchSeg button { display: flex; align-items: center; justify-content: center; border-radius: 4px; font-size: 16px; font-weight: 600; line-height: 20px; color: var(--txt); background: transparent; border: none; cursor: pointer; flex: 1 1 0; height: 100%; min-width: 0; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; box-shadow: none; }
+.nres-shape button.on, .ncount #batchSeg button.on { background: var(--bg3); }
+.nres-shape button:hover:not(:disabled), .ncount #batchSeg button:hover:not(:disabled) { background: color-mix(in srgb, var(--bg3), #fff 5%); }
+.nres-shape button:disabled { opacity: .4; cursor: default; }
+.nres-shape i { display: block; border: 2px solid currentColor; border-radius: 2px; box-sizing: border-box; }
+.nres-shape .rs-land { width: 18px; height: 12px; } .nres-shape .rs-port { width: 12px; height: 18px; } .nres-shape .rs-sq { width: 14px; height: 14px; }
+/* NAI 모델 줄(model-mode-row) — sc-284f5e94 NT·NI·NA·NE·NP, Effort 는 compact Radio(단추 폭 72) */
+.nmm { display: flex; flex-direction: row; flex-wrap: wrap; gap: 8px; margin: 2px 0 6px; }
+.nmm-pill { display: flex; flex-direction: row; align-items: center; gap: 8px; height: 36px; padding: 4px 4px 4px 12px; border-radius: 8px; border: 1px solid var(--bg3); flex: 0 0 auto; min-width: 0; box-sizing: border-box; }
+.nmm-pill[hidden] { display: none; }
+.nmm-lbl { font-size: 16px; font-weight: 400; line-height: 20px; color: var(--txt); white-space: nowrap; }
+.nmm-sel { width: auto; max-width: 100%; height: 28px; border-radius: 4px; background: var(--bg3); border: none; font-weight: 600; font-size: 14px; padding: 0 24px 0 10px; }
+.nmm-mode { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 4px; background: var(--bg3); color: var(--txt); font-size: 14px; font-weight: 600; line-height: 18px; white-space: nowrap; border: none; cursor: pointer; }
+.nmm-ic { font-size: 13px; line-height: 1; }
+.nmm-eff { display: flex; flex-direction: row; align-items: center; gap: 2px; height: 28px; padding: 2px; border-radius: 8px; background: var(--bg2); box-sizing: border-box; }
+.nmm-eff button { width: 72px; height: 100%; border-radius: 4px; border: none; background: transparent; color: var(--txt); font-size: 14px; font-weight: 600; line-height: 18px; cursor: pointer; padding: 0; box-shadow: none; }
+.nmm-eff button.on { background: var(--bg3); }
+.nmm-eff button:hover:not(.on) { background: color-mix(in srgb, var(--bg3), #fff 5%); }
+/* ═══ NAI 휴대폰 화면 (폭 900 이하) — sc-3c3a4083(Hz·HB·HV·HH·HG·Hq·HW·H$·HY·HK·HZ·HQ·HJ·H0) · sc-54e3e4b9(VH·VG·Vq) · sc-12741845(V$·VX·VY·VK) 값 그대로 ═══ */
+.nlm-root { flex-direction: column; }
+.nlm-stage { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.nlm-out { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+/* 휴대폰 머리 줄 (NAI ImageGenNavbar: 바탕 bg2 · 아래 테두리 bg3 · 줄 여백 8px 10px 6px · 사이 4 · 단추는 SidebarButtonSmall 28px · Anlas 작게 4px 12px) */
+.nlm-nav { flex: 0 0 auto; display: flex; flex-direction: column; background: var(--bg2); border-bottom: 1px solid var(--bg3); }
+.nlm-navrow { display: flex; flex-direction: row; align-items: center; gap: 4px; padding: 8px 10px 6px; }
+.nlm-flex { flex: 1 1 0; min-width: 0; }
+.nlm-navrow .nl-nb { width: auto; height: 28px; padding: 4px 12px; font-size: 14px; line-height: 18px; }
+/* Anlas 칸: 3단 배치는 예전 알약 «◈ 숫자» 그대로, NAI 배치에서는 NAI AnlasBalance —
+   [Anlas: 숫자 Anla 아이콘](bg2 · 테두리 bg3 · 8px 0 0 8px · 9px 12px · 14px/600) + [＋](StepButton 9px 14px · 0 8px 8px 0) · 휴대폰은 4px 12px · «Anlas:» 숨김 · ＋ 4px 14px */
+.anl-box { display: inline-flex; align-items: stretch; }
+#anlas { display: inline-flex; align-items: center; gap: 4px; }
+#anlas .anl-k { display: none; }
+#anlas .anl-i { order: -1; }
+.anl-plus { display: none; }
+body.nl-on #anlas { gap: 0; padding: 9px 12px; background: var(--bg2); border: 1px solid var(--bg3); border-radius: 8px 0 0 8px; color: var(--txt); font-size: 14px; font-weight: 600; box-shadow: none; white-space: nowrap; }
+body.nl-on #anlas .anl-k { display: inline; }
+body.nl-on #anlas .anl-n { margin-left: 6px; color: var(--gold); }
+body.nl-on #anlas .anl-i { order: 0; margin-left: 2px; color: var(--gold); }
+body.nai-icons #anlas .anl-i[data-nic] { width: 10px; height: 10px; }
+body.nl-on .anl-plus { display: flex; align-items: center; justify-content: center; padding: 9px 14px; border-radius: 0 8px 8px 0; background: var(--bg3); border: 1px solid var(--bg3); border-left: none; color: var(--txt); cursor: pointer; box-shadow: none; }
+body.nl-on .anl-plus:hover { background: color-mix(in srgb, var(--txt) 8%, var(--bg3)); }
+body.nai-icons .anl-plus [data-nic] { width: 14px; height: 14px; }
+body.nl-on .nlm-navrow #anlas { padding: 4px 12px; }
+body.nl-on .nlm-navrow #anlas .anl-k { display: none; }
+body.nl-on .nlm-navrow .anl-plus { padding: 4px 14px; }
+.nlm-opus { padding: 0 10px 6px; max-width: 680px; margin: 0 auto; width: 100%; box-sizing: border-box; }
+.nlm-opus:not(:has(> :not([hidden]))) { display: none; }   /* NAI ef: 막대가 없으면(:empty) 숨김 */
+body.nl-mob .nl-menu-pop { position: static !important; top: auto !important; left: auto !important; width: auto !important; max-height: 60vh; border: 0; border-top: 1px solid var(--bg3); border-radius: 0; box-shadow: none; }
+body.nl-mob #toasts { bottom: calc(84px + env(safe-area-inset-bottom)); }   /* 우리 알림 글이 아래 줄(생성 단추)을 가리지 않게 */
+body.nai-icons .nl-pen[data-nic] { width: 16px; height: 18px; }
+body.nai-icons .nl-ham[data-nic] { width: 16px; height: 16px; }
+body.nai-icons .nl-pcol[data-nic] { width: 14px; height: 14px; }
+.nlm-sheetwrap { position: absolute; inset: 0; pointer-events: none; z-index: 190; }
+.nlm-back { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
+.nlm-sheet { position: absolute; bottom: 0; left: 0; right: 0; max-height: 100%; max-width: 680px; margin: 0 auto; pointer-events: auto; display: flex; flex-direction: column;
+  background: var(--bg2); border: 1px solid var(--bg3); border-bottom: none; border-top-left-radius: 8px; border-top-right-radius: 8px; box-shadow: 0 -4px 24px rgba(0, 0, 0, .35); overflow: hidden; height: 56px; }
+.nlm-head { position: relative; flex: 0 0 auto; touch-action: none; cursor: grab; }
+.nlm-grip { display: flex; justify-content: center; align-items: center; height: 20px; }
+.nlm-handle { width: 36px; height: 4px; border-radius: 2px; background: var(--bg3); }
+.nlm-tabs { display: flex; flex-direction: row; flex-wrap: nowrap; justify-content: center; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--bg3); }
+.nlm-tab { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; white-space: nowrap; background: none; border: none; border-bottom: 2px solid transparent; cursor: pointer;
+  padding: 8px 12px 10px; font-size: .875rem; font-weight: 600; color: var(--txt); opacity: .55; margin-bottom: -1px; border-radius: 0; box-shadow: none; }
+.nlm-tab.on { opacity: 1; border-bottom-color: var(--acc); }
+.nlm-tabt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nlm-peek { position: absolute; top: 20px; left: 0; right: 0; height: 36px; display: flex; flex-direction: row; align-items: center; gap: 12px; padding: 0 18px; background: var(--bg2); }
+.nlm-ptx { flex: 1 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .875rem; opacity: .7; }
+.nlm-ptx.faded { opacity: .45; }
+.nlm-up { flex: 0 0 auto; opacity: .6; font-size: 10px; }
+body.nai-icons .nlm-up[data-nic] { width: 12px; height: 6px; }
+.nlm-pages { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.nlm-pager { display: flex; flex-direction: row; width: 300%; height: 100%; }
+.nlm-page { flex: 0 0 calc(100% / 3); min-width: 0; height: 100%; overflow-y: auto; overscroll-behavior: contain; padding: 12px; box-sizing: border-box; }
+.nlm-col { display: flex; flex-direction: column; gap: 16px; }
+.nlm-chunks { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+.nlm-bottom { flex: 0 0 auto; position: relative; z-index: 199; background: var(--bg2); }
+.nlm-brow { display: flex; flex-direction: row; align-items: stretch; gap: 8px; padding: 10px 10px calc(10px + env(safe-area-inset-bottom)); max-width: 680px; margin: 0 auto; }
+.nlm-bbtn { flex: 0 0 auto; width: 48px; height: auto; display: flex; align-items: center; justify-content: center; background: var(--bg3); border: 1px solid var(--line); border-radius: 3px; color: var(--txt); font-size: 18px; padding: 0; cursor: pointer; }
+.nlm-bbtn.on { border-color: var(--acc); }
+body.nai-icons .nlm-bbtn [data-nic] { width: 18px; height: 18px; }
+.nlm-gen { flex: 1 1 0; min-width: 0; }
+.nlm-gen .genbar { margin: 0; }
+.nlm-drawer { position: absolute; inset: 0; z-index: 200; display: flex; flex-direction: column; background: var(--bg2); transform: translateY(100%); visibility: hidden;
+  transition: transform .22s cubic-bezier(.22, 1, .36, 1), visibility 0s linear .22s; }
+.nlm-drawer.open { transform: none; visibility: visible; transition: transform .22s cubic-bezier(.22, 1, .36, 1); }
+.nlm-dhead { flex: 0 0 auto; display: flex; flex-direction: row; align-items: center; justify-content: space-between; padding: calc(14px + env(safe-area-inset-top)) 18px 12px; border-bottom: 1px solid var(--bg3); }
+.nlm-dtitle { font-size: 1.125rem; font-weight: 700; }
+.nlm-dx { padding: 10px; margin: -10px; background: none; border: none; color: var(--txt); cursor: pointer; font-size: 14px; box-shadow: none; }
+body.nai-icons .nlm-dx [data-nic] { width: 14px; height: 14px; }
+.nlm-dbody { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding: 16px 16px calc(20px + env(safe-area-inset-bottom)); }
+.nlm-dbody.set { padding-left: 4px; padding-right: 4px; }
+.nlm-dbody.hist { padding: 0; display: flex; flex-direction: column; }
+.nlm-scol { display: flex; flex-direction: column; gap: 8px; max-width: 680px; margin: 0 auto; width: 100%; }
+/* NAI 아이콘 그림(서버가 NAI 공개 웹앱에서 받아 확인한 것)을 받았을 때: data-nic 칸을 그 모양으로 칠한다 (NAI ib: 20px · mask contain · 아이콘 색) */
+body.nai-icons [data-nic] { font-size: 0 !important; line-height: 0; display: inline-block; flex: 0 0 auto; width: 20px; height: 20px; background-color: currentColor; border: none !important; border-radius: 0 !important;
+  -webkit-mask: var(--nic) center / contain no-repeat; mask: var(--nic) center / contain no-repeat; vertical-align: middle; }
+body.nai-icons .nl-tab-ico[data-nic], body.nai-icons .nmm-ic[data-nic] { width: 14px; height: 14px; }
+body.nai-icons .nai-reset [data-nic] { width: 1rem; height: 1rem; }
+/* NAI «Reset Settings»(ai-settings-reset): 아이콘만, padding 4 · 배경 없음 · 흐리게(.7) */
+.nai-reset { padding: 4px; width: auto; background: none; border: none; opacity: .7; color: var(--txt); font-size: 1rem; line-height: 1; cursor: pointer; box-shadow: none; }
+.nai-reset:hover { opacity: 1; }
+
+/* ── NAI 이미지 입력 칸 (NAI 배치에서만 — 3단 배치는 예전 모양) ──
+   Dv 카드(Db): 줄 · 가운데 · 사이 10 · bg2 · 테두리 bg3 · 둥글기 8 · 12 / 이어 붙임: 좌우 8 들임 · 8px 12px · 아래 테두리 없음 · 8 8 0 0 · bg3 50%→투명 그라데이션
+   Dx 왼쪽(사이 10) · Dw 아이콘 20 · DS 제목 600(개수 0.875rem·.6·400) · DM 설명 0.875rem·.7 · Dk 단추(사이 4) */
+body:not(.nl-on) .nin-x, body:not(.nl-on) .pref-desc { display: none !important; }
+body.nl-on .pref-type, body.nl-on .nin-hid { display: none !important; }
+body:not(.nl-on) .vibe-slot .vtog { order: -1; }   /* 3단 배치: 예전처럼 켜기 단추가 위 */
+.nin-card { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; background: var(--bg2); border: 1px solid var(--bg3); border-radius: 8px; padding: 12px; }
+.nin-card.nin-conj { margin: 0 8px; padding: 8px 12px; border-bottom: none; border-radius: 8px 8px 0 0;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--bg3) 50%, transparent) 0%, transparent 100%), var(--bg2); }
+.nin-l { display: flex; flex-direction: row; align-items: center; gap: 10px; min-width: 0; }
+.nin-ico { flex: 0 0 auto; display: flex; align-items: center; font-size: 18px; }
+body.nai-icons .nin-ico[data-nic] { width: 20px; height: 20px; }
+.nin-tt { min-width: 0; }
+.nin-t { display: flex; flex-direction: row; align-items: baseline; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; color: var(--txt); }
+.nin-cnt { font-size: .875rem; opacity: .6; font-weight: 400; }
+.nin-cnt b { font-weight: 400; }
+.nin-cnt b.nin-warn { color: var(--gold); }
+.nin-s { font-size: .875rem; opacity: .7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nin-act { flex: 0 0 auto; display: flex; flex-direction: row; align-items: center; gap: 4px; }
+/* NAI SidebarButtonSmall: 높이 28 · 4px 12px · 14px/18px (정사각이면 폭 44) */
+.nl-nb.nin-sm { width: auto; height: 28px; padding: 4px 12px; font-size: 14px; line-height: 18px; }
+.nl-nb.nin-sm.nin-sq { width: 44px; }
+body.nai-icons .nin-bi[data-nic] { width: 16px; height: 16px; }
+body.nl-on .nin-act .btn { display: inline-flex; align-items: center; justify-content: center; height: 28px; padding: 4px 12px; margin: 0; font-size: 14px; line-height: 18px;
+  background: transparent; border: none; border-radius: 4px; box-shadow: none; color: var(--txt); }
+body.nl-on .nin-act .btn:hover:not(:disabled) { background: var(--bg3); }
+body.nai-icons .nin-dots[data-nic] { width: 16px; height: 12px; transform: rotate(90deg); }
+/* DI 목록 상자(테두리 bg3 · 둥글기 8 · 넘침 숨김) · DA 위쪽 설정 칸(bg2 · 아래 테두리 · 8 · 사이 8 · 0.875rem) */
+.nin-box { display: flex; flex-direction: column; border: 1px solid var(--bg3); border-radius: 8px; overflow: hidden; }
+.nin-da { display: flex; flex-direction: column; gap: 8px; padding: 8px; font-size: .875rem; background: var(--bg2); border-bottom: 1px solid var(--bg3); }
+.nin-da .panel-notes { margin: 0; }
+body.nl-on #panelVibe, body.nl-on #panelPref, body.nl-on #panelI2i { display: flex; flex-direction: column; border-radius: 8px; }
+body.nl-on #panelVibe > .row, body.nl-on #panelPref > .row { display: none; }
+/* 목록 한 칸(NAI DT): DE(bg2 · 아래 테두리 · 12) · DR 줄(사이 12) · DP 왼쪽(작은 그림 DH: 10 · 둥글기 4 · contain · 100×100 이상 + 아래 단추 줄 DL) · Dj 오른쪽 */
+body.nl-on .nin-box .vibe-slot { display: grid; grid-template-columns: 100px minmax(0, 1fr); grid-template-rows: 1fr auto; grid-template-areas: "th ct" "sd ct";
+  column-gap: 12px; row-gap: 10px; align-items: start; margin: 0; padding: 12px; background: var(--bg2); border: 0; border-bottom: 1px solid var(--bg3); border-radius: 0; }
+body.nl-on .nin-box .vibe-slot:last-child { border-bottom: none; }
+body.nl-on .nin-box .vibe-slot .vthumb { grid-area: th; align-self: stretch; width: 100px; height: auto; min-height: 100px; box-sizing: border-box; padding: 10px; border-radius: 4px; object-fit: contain; background: var(--bg2); }
+body.nl-on .nin-box .vibe-slot .vctl { grid-area: ct; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+body.nl-on .nin-box .vibe-slot.off .vthumb, body.nl-on .nin-box .vibe-slot.off .vctl { opacity: .5; }
+body.nl-on .nin-box .vibe-slot .vside { grid-area: sd; display: flex; flex-direction: row; gap: 4px; width: 100%; align-self: end; }
+body.nl-on .nin-box .vibe-slot .vside > button { flex: 1 1 0; min-width: 0; height: 28px; padding: 4px 12px; display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: none; border-radius: 4px; box-shadow: none; color: var(--txt); }
+body.nl-on .nin-box .vibe-slot .vside > button:hover { background: var(--bg3); }
+body.nl-on .nin-box .vibe-slot .vtog.on { background: var(--bg3); color: var(--txt); }
+body.nl-on .nin-box .vibe-slot .vtog.on:hover { background: color-mix(in srgb, var(--txt) 8%, var(--bg3)); }
+body.nai-icons .vibe-slot .vside [data-nic] { width: 14px; height: 14px; }
+/* 이름 칸(DB: bg2 · 둥글기 4 · 2px 5px · 들어가면 테두리 bg3 · bg1) · 내보내기(ExportIcon 12, 정사각 바탕 없음) · 인코딩(값 + Anla 아이콘) */
+body.nl-on .nin-box .vibe-slot .vtop { display: flex; flex-direction: row; justify-content: space-between; align-items: center; gap: 8px; margin: 0 0 -8px; }
+body.nl-on .nin-box .vibe-slot .vname { flex: 1 1 0; min-width: 0; padding: 2px 5px; font-size: inherit; color: var(--txt); background: var(--bg2); border: 1px solid transparent; border-radius: 4px; box-shadow: none; }
+body.nl-on .nin-box .vibe-slot .vname:focus { outline: none; border-color: var(--bg3); box-shadow: 0 0 0 1px var(--bg3); background: var(--bg1); }
+body.nl-on .nin-box .vact .btn { display: inline-flex; align-items: center; justify-content: center; gap: 2px; height: 28px; padding: 4px 12px; margin: 0; font-size: 14px; font-weight: 600;
+  background: var(--bg3); border: none; border-radius: 4px; box-shadow: none; color: var(--txt); }
+body.nl-on .nin-box .vact .btn.vexp { width: 44px; background: transparent; }
+body.nl-on .nin-box .vact .btn.vexp:hover { background: var(--bg3); }
+body.nai-icons .vact .vexp [data-nic] { width: 12px; height: 12px; }
+body.nai-icons .vact .venc-a[data-nic] { width: 10px; height: 10px; }
+body.nl-on .nin-box .vibe-slot .vctl > .row:last-child { font-size: .875rem; }
+/* 정밀 레퍼런스 설명 고르기 (NAI Select: 높이 40 · 둥글기 8 · 1rem · 아이콘 16 + 이름) */
+.pref-desc { display: flex; align-items: center; gap: 8px; width: 100%; height: 40px; padding: 0 10px 0 12px; font-size: 1rem; text-align: left; cursor: pointer;
+  color: var(--txt); background: var(--bg1); border: 1px solid var(--line); border-radius: 8px; box-shadow: none; }
+.pref-desc-t { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pref-desc-c { flex: 0 0 auto; opacity: .7; font-size: 12px; }
+body.nai-icons .pref-desc [data-nic], body.nai-icons .nl-smenu-i[data-nic] { width: 16px; height: 16px; }
+.nl-smenu-o { display: flex; align-items: center; gap: 8px; }
+/* 바탕 그림 (NAI jl·DJ·ja): 빈 칸 = 카드 · 그림이 있으면 D0(왼쪽 작은 그림 D1 · 제목 D3/D5 · 단추 줄 D6) + D4(슬라이더 칸) */
+body.nl-on #panelI2i:not(.nin-e) .nin-iempty, body.nl-on #panelI2i.nin-e .nin-top, body.nl-on #panelI2i.nin-e .i2i { display: none; }
+body.nl-on #panelI2i .i2i .drop, body.nl-on #panelI2i .i2i-ctl > .row { display: none; }
+.nin-top { position: relative; padding: 12px; background: var(--bg2); border: 1px solid var(--bg3); border-bottom: none; border-radius: 8px 8px 0 0; }
+.nin-th { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); border-radius: 4px; overflow: hidden; z-index: 1; }
+.nin-thin { position: relative; width: 100%; height: 100%; border-radius: 4px; overflow: hidden; }
+.nin-thimg { display: block; width: 100%; height: 100%; }
+.nin-thmask { position: absolute; left: 0; top: 0; width: 100%; height: 100%; opacity: .7; image-rendering: pixelated; }
+.nin-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.nin-trow { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; }
+.nin-tl { display: flex; flex-direction: row; align-items: center; gap: 4px; min-width: 0; }
+.nin-t2 { font-size: 16px; font-weight: 600; line-height: 20px; color: var(--txt); }
+.nin-back { display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: none; border-radius: 4px; background: none; box-shadow: none; color: var(--txt); cursor: pointer; transition: background-color .15s; }
+.nin-back:hover { background: var(--bg3); }
+body.nai-icons .nin-backi[data-nic] { width: 12px; height: 12px; }
+.nin-tools { display: flex; flex-direction: row; gap: 8px; }
+.nin-sp { flex: 1 1 0; }
+body.nl-on #panelI2i .i2i { display: block; }
+body.nl-on #panelI2i .i2i-ctl { display: flex; flex-direction: column; gap: 8px; padding: 16px 12px 12px; background: var(--bg2); border: 1px solid var(--bg3); border-radius: 0 0 8px 8px; }
+
+/* ── NAI 슬라이더 (Du, sc-9c059465) — NAI 배치 안에서만: 제목 16px/600/28px · [숫자 칸 56×28(bg0 · 테두리 bg3 · 둥글기 4 · 16px/600 가운데) · 막대 높이 28(길 12 · bg0 · 테두리 bg3 · 둥글기 4 / 손잡이 16×28 · bg3 · 둥글기 4)] ── */
+.du-n { display: none; }
+.du-row { display: contents; }
+body.nl-on #nlRoot .rng[data-du] { display: flex; flex-direction: column; gap: 8px; margin: 0; font-size: inherit; color: var(--txt); }
+body.nl-on #nlRoot .rng[data-du] > output { display: none; }
+body.nl-on #nlRoot .rng[data-du] .du-t { font-size: 16px; font-weight: 600; line-height: 28px; color: var(--txt); }
+body.nl-on #nlRoot .rng[data-du] .du-row { display: flex; flex-direction: row; align-items: center; gap: 8px; }
+body.nl-on #nlRoot .rng[data-du] .du-n { display: block; flex: 0 0 auto; width: 56px; height: 28px; box-sizing: border-box; margin: 0; padding: 0 4px; font-size: 16px; font-weight: 600; line-height: 20px; text-align: center;
+  color: var(--txt); background: var(--bg0); border: 1px solid var(--bg3); border-radius: 4px; outline: none; box-shadow: none; -moz-appearance: textfield; appearance: textfield; }
+body.nl-on #nlRoot .rng[data-du] .du-n::-webkit-outer-spin-button, body.nl-on #nlRoot .rng[data-du] .du-n::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+body.nl-on #nlRoot .rng[data-du] .du-n:disabled { opacity: .5; }
+body.nl-on #nlRoot .rng[data-du] input[type=range] { flex: 1 1 0; min-width: 0; width: auto; height: 28px; margin: 0; padding: 0; -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer; }
+body.nl-on #nlRoot .rng[data-du] input[type=range]:disabled { opacity: .5; cursor: default; }
+body.nl-on #nlRoot .rng[data-du] input[type=range]::-webkit-slider-runnable-track { height: 12px; border-radius: 4px; background: var(--bg0); border: 1px solid var(--bg3); }
+body.nl-on #nlRoot .rng[data-du] input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; box-sizing: border-box; width: 16px; height: 28px; margin-top: -8px; border-radius: 4px; background: var(--bg3); border: 1px solid var(--bg3); box-shadow: none; }
+body.nl-on #nlRoot .rng[data-du] input[type=range]::-moz-range-track { height: 12px; border-radius: 4px; background: var(--bg0); border: 1px solid var(--bg3); }
+body.nl-on #nlRoot .rng[data-du] input[type=range]::-moz-range-thumb { box-sizing: border-box; width: 16px; height: 28px; border-radius: 4px; background: var(--bg3); border: 1px solid var(--bg3); }

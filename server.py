@@ -51,7 +51,7 @@ VERSION = 17
 # 같은 PC 의 다른 프로그램은 127.0.0.1 에 닿을 수는 있어도 이 값은 모른다.
 SESSION_KEY = secrets.token_urlsafe(24)
 
-RELEASE = "12.25"   # 배포 버전. GitHub 릴리스 태그 "v12.25" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
+RELEASE = "12.26"   # 배포 버전. GitHub 릴리스 태그 "v12.26" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
 # 이 앱이 배포되는 저장소. 비워 두면 ⬆ 업데이트 버튼이 아예 안 뜬다 —
 # 사용자가 ⚙설정에 직접 타이핑해 넣기 전까지는 새 버전이 나온 줄도 모른다.
 # 실제로 그 때문에 옛 버전을 계속 쓰시는 분들이 있었다. 기본값을 박아 둔다.
@@ -1603,6 +1603,159 @@ def nai_ornaments(force=False):
             return {"ok": False, "build": _nai_orn["build"], "defs": "", "err": _nai_orn["err"]}
 
 
+# ── NAI 아이콘 ──────────────────────────────────────────────────────────────────
+# 그림 생성 화면의 아이콘(탭·접힌 띠·크기 모양·생성 설정 기본값·Anime 모드)은 NAI 그림 파일이라 이 저장소에 넣지 않는다.
+# 장식 무늬와 같게 사용자 PC 에서 novelai.net 공개 웹앱 스크립트로 «아이콘 이름 → 그림 파일»을 찾고(아이콘 = mask-image 로 칠하는 칸),
+# 그 SVG 를 받아 모양 태그만 있는지 확인한 뒤 /nai-icon/<이름>.svg 로 내준다. 못 받으면 앱은 그림 글자를 그대로 쓴다.
+NAI_ICONS = ("Img2ImgIcon", "PersonIcon", "VibeTransferIcon", "HistoryIcon", "PreciseReferenceIcon", "TextIcon", "SettingsIcon",
+             "ArrowLeftIcon", "ArrowRightIcon", "ResLandscapeIcon", "ResPortraitIcon", "ResSquareIcon", "DotResetIcon", "SakuraIcon",
+             "ArrowUpIcon", "CrossIcon", "PenTipIcon", "HamburgerAltIcon", "AnlaIcon", "PlusIcon",
+             "ImportIcon", "PenIcon", "DeleteIcon", "InpaintIcon", "SmallChevronLeftIcon", "ExportIcon", "DotDotDotIcon", "CheckIcon", "SmallCrossIcon",
+             "PreciseReferenceStyleIcon", "PreciseReferenceStyleAndCharacterIcon")
+# NAI 가 react-icons 로 그리는 아이콘(그림 파일이 아니라 스크립트 안의 모양 글) — Furry 모드 발바닥(FaPaw)
+NAI_RI_ICONS = ("FaPaw",)
+_nai_ic = {"t": 0.0, "build": "", "files": {}, "err": ""}
+_nai_ic_lock = threading.Lock()
+_NAI_IC_DIR = DATA / "cache" / "nai_icons"
+_SVG_TAGS = {"svg", "g", "path", "circle", "ellipse", "rect", "line", "polyline", "polygon", "defs", "clipPath", "mask", "linearGradient",
+             "radialGradient", "stop", "title", "desc", "use", "symbol"}
+
+
+def nai_icon_find(texts):
+    """NAI 스크립트 글들에서 아이콘 이름 → 그림 파일 경로(/_next/static/media/….svg). 하나라도 못 찾으면 RuntimeError (조용히 넘기지 않는다)."""
+    src = next((t for t in texts if '"SakuraIcon",0,' in t), None)
+    if src is None:
+        raise RuntimeError("NAI 스크립트에서 아이콘 묶음(SakuraIcon)을 찾지 못했습니다 (NAI 사이트가 바뀐 것 같습니다)")
+    media, obj = {}, {}
+    for t in texts:
+        for m in re.finditer(r'(\d+),[\w$]+=>\{[\w$]+\.q\("(/_next/static/media/[\w.-]+\.svg)"\)\}', t):
+            media.setdefault(m.group(1), m.group(2))
+        for m in re.finditer(r'let ([\w$]+)=\{src:[\w$]+\.i\((\d+)\)\.default,width:\d+,height:\d+[^}]*\};[\w$]+\.s\(\["default",0,\1\],(\d+)\)', t):
+            obj.setdefault(m.group(3), m.group(2))
+        # 모듈 하나에 그림 하나인 꼴: 번호,t=>{"use strict";let e={src:t.i(그림).default,…};t.s(["default",0,e])}
+        for m in re.finditer(r'(\d+),[\w$]+=>\{"use strict";let ([\w$]+)=\{src:[\w$]+\.i\((\d+)\)\.default,width:\d+,height:\d+[^}]*\};[\w$]+\.s\(\["default",0,\2\]\)\}', t):
+            obj.setdefault(m.group(1), m.group(3))
+    out, miss = {}, []
+    for nm in NAI_ICONS:
+        p = None
+        m = re.search(r'"%s",0,([\w$]+)' % nm, src)
+        k = m and re.search(r'(?<![\w$.])%s=\(0,[\w$]+\.default\)\([\w$]+\)\.withConfig\(\{componentId:"[^"]+"\}\)`([^`]*)`' % re.escape(m.group(1)), src)
+        if k:
+            u = re.search(r'mask-image: url\(\$\{([\w$]+)\.default\.src\}\)', k.group(1))
+            if u:
+                i = re.search(r'(?<![\w$.])%s=[\w$]+\.i\((\d+)\)' % re.escape(u.group(1)), src)
+                p = i and media.get(obj.get(i.group(1), ""))
+            else:
+                u = re.search(r'mask-image: url\(\$\{([\w$]+)\.src\}\)', k.group(1))
+                i = u and re.search(r'(?<![\w$.])%s=\{src:[\w$]+\.i\((\d+)\)\.default' % re.escape(u.group(1)), src)
+                p = i and media.get(i.group(1))
+        if p:
+            out[nm] = p
+        else:
+            miss.append(nm)
+    if miss:
+        raise RuntimeError("NAI 아이콘 그림 파일을 찾지 못했습니다: " + ", ".join(miss))
+    return out
+
+
+def nai_ri_icon_find(texts):
+    """NAI 스크립트의 react-icons 아이콘(예: "FaPaw",0,function(c){return(0,t.GenIcon)({tag:"svg",attr:{viewBox:"0 0 512 512"},child:[{tag:"path",attr:{d:"…"}}]})(c)})
+    → 이름: SVG 글. 하나라도 못 찾거나 모양 글이 경로 글자가 아니면 RuntimeError."""
+    out, miss = {}, []
+    for nm in NAI_RI_ICONS:
+        m = None
+        for t in texts:
+            m = re.search(r'"%s",0,function\([\w$]+\)\{return\(0,[\w$]+\.GenIcon\)\(\{tag:"svg",attr:\{viewBox:"([\d .]+)"\},child:\[\{tag:"path",attr:\{d:"([^"]{1,20000})"\}\}\]\}\)' % nm, t)
+            if m:
+                break
+        if not m or not re.fullmatch(r"[MmLlHhVvCcSsQqTtAaZz0-9.,\-\s]+", m.group(2)):
+            miss.append(nm)
+            continue
+        out[nm] = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="%s"><path d="%s"/></svg>' % (m.group(1), m.group(2))).encode("utf-8")
+    if miss:
+        raise RuntimeError("NAI 아이콘 모양 글을 찾지 못했습니다: " + ", ".join(miss))
+    return out
+
+
+def nai_svg_check(body):
+    """받은 아이콘이 모양 태그만 있는 SVG 인지 확인한다 (스크립트·바깥 주소·이벤트 속성이 있으면 쓰지 않는다)."""
+    s = body.decode("utf-8", "replace")
+    if "<svg" not in s[:600]:
+        raise RuntimeError("아이콘 파일이 SVG 가 아닙니다")
+    tags = set(re.findall(r"</?\s*([A-Za-z][\w:-]*)", s))
+    bad = sorted(t for t in tags if t not in _SVG_TAGS)
+    low = s.lower()
+    if bad or re.search(r"\son\w+\s*=", low) or "javascript:" in low or "<!entity" in low or "<!doctype" in low or "xml-stylesheet" in low \
+            or re.search(r"href\s*=\s*[\"'](?!#)", low) or re.search(r"url\(\s*(?![\"']?#)", low) or "@import" in low:
+        raise RuntimeError("아이콘 파일에 쓰면 안 되는 것이 섞여 쓰지 않습니다%s" % (": " + ", ".join(bad[:5]) if bad else ""))
+    return body
+
+
+def _nai_texts(paths):
+    """NAI 첫 화면이 부르는 스크립트를 모두 받아 글 목록으로 (못 받은 것은 빼고, 하나도 못 받으면 RuntimeError)."""
+    def one(p):
+        try:
+            rq = urllib.request.Request("https://novelai.net" + p, headers={"User-Agent": UA})
+            with urllib.request.urlopen(rq, timeout=40) as rr:
+                return rr.read(16 * 1024 * 1024).decode("utf-8", "replace")
+        except Exception:
+            return None
+    import concurrent.futures as _cf
+    with _cf.ThreadPoolExecutor(6) as ex:
+        texts = [t for t in ex.map(one, paths) if t]
+    if not texts:
+        raise RuntimeError("NAI 스크립트를 하나도 받지 못했습니다")
+    return texts
+
+
+def nai_icons(force=False):
+    """NAI 아이콘 준비 → {"ok", "build", "icons": {이름: "/nai-icon/이름.svg"}, "err"}. 받아 둔 것이 하루 안이면 그대로 쓴다."""
+    with _nai_ic_lock:
+        now = time.time()
+        if _nai_ic["files"] and not force and now - _nai_ic["t"] < 86400:
+            return {"ok": True, "build": _nai_ic["build"], "icons": {k: "/nai-icon/%s.svg" % k for k in _nai_ic["files"]}, "err": ""}
+        try:
+            build, paths = _nai_page()
+            mfile = DATA / "cache" / ("nai_icons_%s.json" % re.sub(r"[^\w.-]", "_", build)[:80])
+            files = None
+            if not force and mfile.exists():
+                try:
+                    man = json.loads(mfile.read_text(encoding="utf-8"))
+                    if set(man) == set(NAI_ICONS) | set(NAI_RI_ICONS) and all((_NAI_IC_DIR / f).is_file() for f in man.values()):
+                        files = man
+                except Exception as e:
+                    err_add({"msg": "NAI 아이콘 준비 기록을 읽지 못해 다시 받습니다: %s" % e, "where": "nai_icons"})
+            if files is None:
+                texts = _nai_texts(paths)
+                found, ri = nai_icon_find(texts), nai_ri_icon_find(texts)
+                _NAI_IC_DIR.mkdir(parents=True, exist_ok=True)
+                files = {}
+                for nm, body in ri.items():   # react-icons 모양 글로 만든 SVG 도 같은 검사를 거친다
+                    (_NAI_IC_DIR / ("ri_%s.svg" % nm)).write_bytes(nai_svg_check(body))
+                    files[nm] = "ri_%s.svg" % nm
+                for nm, p in found.items():
+                    fn = p.rsplit("/", 1)[-1]
+                    if not re.fullmatch(r"[\w.-]+\.svg", fn):
+                        raise RuntimeError("아이콘 파일 이름이 이상합니다: %s" % fn)
+                    rq = urllib.request.Request("https://novelai.net" + p, headers={"User-Agent": UA})
+                    with urllib.request.urlopen(rq, timeout=30) as r:
+                        body = nai_svg_check(r.read(512 * 1024))
+                    (_NAI_IC_DIR / fn).write_bytes(body)
+                    files[nm] = fn
+                try:
+                    for old in mfile.parent.glob("nai_icons_*.json"):
+                        if old != mfile:
+                            old.unlink()
+                    mfile.write_text(json.dumps(files, ensure_ascii=False), encoding="utf-8")
+                except Exception as e:
+                    err_add({"msg": "NAI 아이콘 준비 기록 저장 실패: %s" % e, "where": "nai_icons"})
+            _nai_ic.update(t=now, build=build, files=files, err="")
+            return {"ok": True, "build": build, "icons": {k: "/nai-icon/%s.svg" % k for k in files}, "err": ""}
+        except Exception as e:
+            _nai_ic["err"] = str(e)[:200]
+            return {"ok": False, "build": _nai_ic["build"], "icons": {}, "err": _nai_ic["err"]}
+
+
 # ── NAI Pixel Snap (도트 그림 다듬기) ─────────────────────────────────────────────
 # NAI 는 Pixel Snap 을 서버가 아니라 브라우저 안 작업자(Worker)에서 돌린다(웹GL·웹GPU·WASM, Anlas 안 듦).
 # 작업자 파일은 NAI 저작물이라 이 저장소에 넣지 않는다. 사용자 PC 에서 novelai.net 이 공개로 내주는 그 파일들(작업자 시작 파일·
@@ -2026,7 +2179,19 @@ def _chk(name, ok, detail="", level="err"):
     return {"name": name, "ok": bool(ok), "detail": str(detail)[:300], "level": level}
 
 
-SRC_FILES = ("server.py", "app.js", "tools.js", "tags.js", "scenes.js", "canvas.js", "layout.js", "index.html", "style.css")
+SRC_FILES = ("server.py", "app.js", "tools.js", "tags.js", "scenes.js", "canvas.js", "layout.js", "model3d.js", "index.html", "style.css")
+
+# 12.26: 그림판 3D 모델 레이어가 쓰는 공개 라이브러리 (assets/three — NOTICE.txt, 바이트 대조는 점검.py)
+#  three.js r182 본체·GLTF·궤도·옮기기 손잡이·TGA · three.js r171 MMD 부품·mmd-parser·ammo(물리) · three-vrm 3.5.5 · JSZip 3.10.1
+#  /vendor/three/<이 목록의 경로> 로만 내준다 (목록에 없는 경로는 404)
+THREE_VENDOR_FILES = (
+    "build/three.module.min.js", "build/three.core.min.js",
+    "jsm/loaders/GLTFLoader.js", "jsm/loaders/TGALoader.js", "jsm/loaders/MMDLoader.js", "jsm/utils/BufferGeometryUtils.js",
+    "jsm/controls/OrbitControls.js", "jsm/controls/TransformControls.js",
+    "jsm/animation/MMDAnimationHelper.js", "jsm/animation/MMDPhysics.js", "jsm/animation/CCDIKSolver.js",
+    "jsm/libs/mmdparser.module.js", "jsm/shaders/MMDToonShader.js", "jsm/libs/ammo.wasm.js", "jsm/libs/ammo.wasm.wasm",
+    "vrm/three-vrm.module.min.js", "jszip/jszip.min.js",
+)
 
 
 def _src_stamp():
@@ -2777,6 +2942,20 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if path == "/nai-ornaments":   # NAI 결과 화면 장식 무늬 정의 — 사용자 PC 에서 NAI 웹앱 스크립트로 뽑는다
             self._json(200, nai_ornaments(bool((qs.get("force") or [""])[0])))
+            return True
+        if path == "/nai-icons":   # NAI 아이콘 준비 — 사용자 PC 에서 NAI 공개 웹앱으로 아이콘 그림을 찾아 받아 둔다
+            self._json(200, nai_icons(bool((qs.get("force") or [""])[0])))
+            return True
+        if path.startswith("/nai-icon/"):   # 받아 둔 NAI 아이콘 (준비 목록에 있는 이름만)
+            nm = path[len("/nai-icon/"):]
+            nm = nm[:-4] if nm.endswith(".svg") else nm
+            fn = (_nai_ic["files"] or {}).get(nm, "")
+            f = _NAI_IC_DIR / fn if fn else None
+            if not fn or not re.fullmatch(r"[\w.-]+\.svg", fn) or not f.is_file():
+                self._json(404, {"message": "not found"})
+                return True
+            self._send(200, f.read_bytes(), "image/svg+xml", {"Cache-Control": "max-age=86400", "X-Content-Type-Options": "nosniff",
+                                                              "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'"})
             return True
         if path == "/nai-pixelsnap":   # NAI Pixel Snap 작업자 준비 — 사용자 PC 에서 NAI 공개 사이트 파일을 받아 둔다
             self._json(200, nai_pixelsnap(bool((qs.get("force") or [""])[0])))
@@ -4028,6 +4207,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, f.read_bytes(), "application/javascript; charset=utf-8", {"Cache-Control": "max-age=86400"})
             else:
                 self._send(204, b"", "application/javascript")
+            return True
+        if path.startswith("/vendor/three/"):   # 12.26: 그림판 3D 레이어 라이브러리 (목록에 있는 것만)
+            rel = path[len("/vendor/three/"):]
+            if rel not in THREE_VENDOR_FILES:
+                self._json(404, {"message": "없는 3D 라이브러리 파일입니다: " + rel[:120]})
+                return True
+            f = ROOT / "assets" / "three" / rel
+            if not f.exists():
+                self._json(404, {"message": "assets/three/%s 가 없습니다" % rel})
+                return True
+            ctype = "application/wasm" if rel.endswith(".wasm") else "application/javascript; charset=utf-8"
+            self._cached(_asset_bytes(f), ctype, _etag_of(f), {"X-Content-Type-Options": "nosniff"})
             return True
         if path == "/vendor/pica.js":   # pica 9.0.1 (MIT) — NAI 와 같은 Lanczos3 크기 맞추기 (앱이 처음 쓸 때 부른다)
             f = ROOT / "assets" / "pica.min.js"

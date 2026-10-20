@@ -14,7 +14,7 @@
    그 안에 칸(element)·줄(row)·묶음(group)·탭(tabs)을 놓는다 (배치 틀 모듈 builtInPresets, 그리는 쪽 GQ·Gr·Gm·Gu·Gh·GT·GD·Gz·GH·G$·GA).
    · NAI 설정 «Page Layout»(디버그 설정 화면)의 기본값은 "classic" 인데, 그 이름의 배치가 목록에 없어 Layout A 로 그린다
      (GQ: builtInPresets.find(id) ?? layoutA). 곧 NAI 실제 그림 생성 화면은 Layout A 다.
-   · 우리 앱은 «NAI Studio 3단 배치»(classic, 예전부터 쓰던 화면)가 기본이고, ⚙ «화면 배치»에서 Layout A~E 를 고른다.
+   · 우리 앱도 NAI 처럼 기본값 "classic" 을 Layout A 로 그린다(12.26). ⚙ «화면 배치»에서 Layout A~E 와 예전 3단 배치('3col')를 고른다.
    · 패널: 넓이(가장자리 8px 를 끌어서 바꿈, 최소·최대) · 접기(세로 띠 rail 이나 작은 단추 icon) · 창이 좁으면 shrinkPriority 가 낮은 것부터 접힘(Gr)
      — 저절로 접힌 패널은 띠·단추를 누르면 떠서 열리고 바깥을 누르면 닫힌다. 넓이·접기·묶음 접기·묶음 높이·고른 탭은 배치마다 기억한다(NAI ImageLayoutOverlay).
    · 묶음: 제목 · 여백(inset) · 접기(접으면 요약 칩 H4) · 높이 끌기(dragTop·dragBottom) · 스크롤(scroll) · 탭: 탭 단추에 개수 배지(H8) · 접힌 띠에 배지(H7)
@@ -22,7 +22,7 @@
      스텝·샘플러(「절약」 모드가 아닐 때) · Rescale · 노이즈 스케줄 · 레거시 칸
    · 결과 화면 단추 줄은 배치마다 위·아래·왼쪽·오른쪽에 놓는다(options.bars, 없으면 기본 Fz). 넘치면 덜 중요한 단추부터 ⋯ 메뉴로(우선순위 FU).
      NAI 처럼 보고 있는 그림이 없으면 단추 줄을 숨긴다(그림 단추는 그림이 있어야 나오고, 위 단추 줄은 hideWithout:"image").
-   · 폭 900 이하(NAI MOBILE_WIDTH — NAI 는 휴대폰 화면을 따로 그린다)이거나 메인 화면이 아니면 3단 배치로 돌아간다.
+   · 폭 900 이하(NAI MOBILE_WIDTH)면 NAI 휴대폰 화면(mobilePreset — 결과 화면·프롬프트 시트·아래 줄·설정/히스토리 서랍, 12.26)으로, 메인 화면이 아니면 3단 배치로 돌아간다.
    우리 앱의 칸은 원래 자리에 표시(주석 노드)를 남기고 옮겼다가 그 자리로 되돌린다. 칸의 동작 코드는 그대로 쓴다.
    NAI 에 없는 우리 기능(옵션·인핸스 기본값·짤뽑·자동 저장)은 «이미지 설정» 칸이 있는 패널의 스크롤 묶음 끝에 둔다. */
 
@@ -52,16 +52,22 @@ const NL_WIDGETS = {
 const NL_TEXT = { 'image.settings': '설정', 'image.history': '히스토리', 'image.imageInputs': '이미지 입력', 'image.imageSettings': '이미지 설정',
   'image.aiSettings': 'AI 설정', 'image.advancedSettings': '고급 설정', 'Nav + Settings': '메뉴 + 설정', 'History + Inputs': '히스토리 + 입력', Prompt: '프롬프트',
   Image: '이미지', Characters: '캐릭터', Vibes: '바이브', References: '레퍼런스', Settings: '설정' };
-const NL_ICON = { img2img: '🖼', person: '👤', 'vibe-transfer': '🎨', history: '🕘', reference: '🪞', prompt: '✎', settings: '⚙' };
+const NL_ICON = { img2img: '🖼', person: '👤', 'vibe-transfer': '🎨', history: '🕘', reference: '🪞', prompt: '✎', settings: '⚙' };   // 아이콘 그림을 못 받았을 때
+const NL_NIC = { img2img: 'Img2ImgIcon', person: 'PersonIcon', 'vibe-transfer': 'VibeTransferIcon', history: 'HistoryIcon', reference: 'PreciseReferenceIcon', prompt: 'TextIcon', settings: 'SettingsIcon' };   // NAI H9
 const NL_PANEL_MIN = 200;     // NAI Gm: minWidth 이 없으면 200
 const NL_RAIL = 40;           // 접힌 띠 폭 (NAI Gv)
 const NL_STAGE_MIN = 360;     // 창이 좁을 때 결과 화면에 남길 폭 (NAI Gr 의 +360)
 const NL_MOBILE = 900;        // NAI MOBILE_WIDTH
+/* NAI 휴대폰 화면(폭 900 이하 — NAI GQ: g ? mobilePreset : 고른 배치): 결과 화면 하나 + 프롬프트 시트(HO) + 아래 줄(VV) + 설정·히스토리 서랍(VQ·VZ).
+   배치 틀·설정 서랍 칸은 NAI b50892a mobilePreset·mobileSettingsItems 그대로 */
+const NL_MOBILE_PRESET = {"schemaVersion":1,"id":"mobile","name":"Mobile","columns":[{"kind":"stage","items":[{"kind":"element","id":"results-viewer"}]}]};
+const NL_MOBILE_SETTINGS = [{"kind":"group","inset":true,"gap":16,"items":[{"kind":"element","id":"dev-tools"},{"kind":"element","id":"model-mode-row"}]},{"kind":"group","title":"image.imageSettings","inset":"open-bottom","items":[{"kind":"element","id":"resolution"},{"kind":"element","id":"image-count"}]},{"kind":"group","inset":true,"items":[{"kind":"group","title":"image.aiSettings","headerElement":"ai-settings-reset","items":[{"kind":"element","id":"steps"},{"kind":"element","id":"guidance"},{"kind":"row","gap":20,"items":[{"kind":"element","id":"seed"},{"kind":"element","id":"sampler"}]},{"kind":"group","title":"image.advancedSettings","collapsible":true,"collapsed":true,"items":[{"kind":"element","id":"cfg-rescale"},{"kind":"element","id":"noise-schedule"},{"kind":"element","id":"legacy-uc"}]}]}]}];
 
 const NL = { on: false, id: '', pieces: null, marks: new Map(), park: null, root: null, menuPop: null, menuOpen: false, squeezed: new Set(), floatId: '',
   drag: false, sig: '', rq: 0, bars: null, iconSide: { left: false, right: false }, noUcDetach: false, rzT: 0, obs: null, seen: false };
 
-const nlPreset = () => NL_PRESETS.find(p => p.id === S.pageLayout) || null;
+// NAI GQ: builtInPresets.find(id) ?? layoutA — 목록에 없는 이름(기본값 "classic" 포함)은 Layout A. '3col' 만 우리 3단 배치
+const nlPreset = () => (S.pageLayout === '3col' ? null : NL_PRESETS.find(p => p.id === S.pageLayout) || NL_PRESETS[0]);
 function nlOv(pid) {
   if (!S.layoutOverlay || typeof S.layoutOverlay !== 'object' || Array.isArray(S.layoutOverlay)) S.layoutOverlay = {};
   const o = S.layoutOverlay[pid];
@@ -115,10 +121,10 @@ function nlPieceNodes() {
   const q = s => document.querySelector(s), up = (s, sel) => { const e = q(s); return e ? e.closest(sel) : null; };
   const seedBody = up('#seed', '.card-body');
   return {
-    'anlas-balance': [q('#anlas')],
-    'model-mode-row': [up('#model', '.row'), q('#effortSeg'), q('#furryRow')],   // NAI 모델·모드(Anime/Furry)·생성 모드(Effort)
-    'resolution': [up('#sizePreset', '.row')],
-    'image-count': [q('#batchSeg')],
+    'anlas-balance': [q('#anlasBox')],
+    'model-mode-row': [q('#modelRow')],   // NAI 모델·모드(Anime/Furry)·생성 모드(Effort)
+    'resolution': [q('#resBox')],
+    'image-count': [q('#countBox')],
     // NAI 프롬프트 칸에는 프롬프트 설정(퀄리티 태그·UC 프리셋·투명 배경)이 같이 있다
     'prompt': [q('#promptCard'), up('#quality', 'label'), up('#ucPreset', 'label'), q('#transpRow')],
     'characters': [up('#btnAddChar', '.chead'), q('#charList'), q('#charWarn')],
@@ -139,7 +145,6 @@ function nlPieceNodes() {
     'x-extras': [up('#quality', 'details.card'), up('#enhStr', 'details.card'), up('#autoCount', '.card'), up('#autoSaveOn', 'details.card')],
   };
 }
-const NL_HEAD = { 'input-image': '이미지→이미지', 'vibe-transfer': '바이브', 'character-references': 'Precise Reference' };
 function nlMark(n) {   // 원래 자리에 표시를 남긴다 (한 번만)
   if (!n || NL.marks.has(n)) return;
   const m = document.createComment('nl'); n.parentNode.insertBefore(m, n); NL.marks.set(n, m);
@@ -151,39 +156,40 @@ function nlPieces() {
   for (const [id, nodes] of Object.entries(defs)) {
     const xs = nodes.filter(Boolean);
     if (!xs.length) { logErr('화면 배치: 칸 «' + id + '» 를 찾지 못했습니다'); continue; }
-    const w = nlH('div', 'nl-el'); w.dataset.nlEl = id;
-    if (NL_HEAD[id]) w.appendChild(nlH('div', 'nl-el-head', NL_HEAD[id]));
+    const w = nlH('div', 'nl-el'); w.dataset.nlEl = id;   // 이미지 입력 칸 제목은 칸 안 NAI 머리 카드(nlInputsEnter)가 맡는다
     out.set(id, { nodes: xs, wrap: w });
   }
   NL.pieces = out; return out;
 }
 
 /* ── 켜기·끄기 ── */
-function nlWanted() { return S.mode === 'main' && !!nlPreset() && window.innerWidth > NL_MOBILE; }
+function nlWanted() { return S.mode === 'main' && !!nlPreset(); }
+const nlCur = () => (window.innerWidth <= NL_MOBILE ? NL_MOBILE_PRESET : nlPreset());   // NAI GQ: 휴대폰 폭이면 mobilePreset
 function nlSync() {
   const want = nlWanted();
-  if (NL.on && (!want || NL.id !== S.pageLayout)) nlExit();
+  if (NL.on && (!want || NL.id !== nlCur().id)) nlExit();
   if (want && !NL.on) nlEnter();
   else if (NL.on) nlRefresh();
 }
 function nlEnter() {
-  const p = nlPreset(); if (!p) return;
-  const pieces = nlPieces();
+  const p = nlCur(); if (!p) return;
+  const mob = p.id === 'mobile', pieces = nlPieces();
   NL.park = NL.park || Object.assign(nlH('div', 'nl-park'), { hidden: true });
   document.body.appendChild(NL.park);
   for (const { nodes, wrap } of pieces.values()) { for (const n of nodes) { nlMark(n); wrap.appendChild(n); } NL.park.appendChild(wrap); }
-  // 머리 줄(메뉴·모드 탭·도구 단추)은 NAI 처럼 ☰ 메뉴 안으로
+  // 머리 줄(메뉴·모드 탭·도구 단추)은 NAI 처럼 ☰ 메뉴 안으로 (휴대폰 화면도 — NAI ImageGenNavbar 는 펜 · Anlas · ☰ 한 줄, ☰ 메뉴는 그 줄 아래로 펼침)
   const tb = $('#topbar');
   if (tb) { nlMark(tb); NL.menuPop = NL.menuPop || Object.assign(nlH('div', 'nl-menu-pop'), { id: 'nlMenuPop', hidden: true }); NL.menuPop.appendChild(tb); document.body.appendChild(NL.menuPop); }
-  NL.root = nlH('div', 'nl-root'); NL.root.id = 'nlRoot';
+  NL.root = nlH('div', 'nl-root' + (mob ? ' nlm-root' : '')); NL.root.id = 'nlRoot';
   $('#layout').appendChild(NL.root);
-  document.body.classList.add('nl-on');
+  document.body.classList.add('nl-on'); document.body.classList.toggle('nl-mob', mob);
   NL.on = true; NL.id = p.id; NL.floatId = ''; NL.menuOpen = false;
   // NAI 의 이미지 입력 칸은 탭으로 고르지 않고 칸마다 보인다
   for (const id of ['#panelI2i', '#panelVibe', '#panelPref']) { const e = $(id); if (e) e.hidden = false; }
   NL.noUcDetach = nlHasOpt(p, 'prompt', 'disableUcDetach');
   if (typeof applyUcLayout === 'function') applyUcLayout();
   nlBarsBuild(p);
+  nlInputsEnter();   // NAI 이미지 입력 칸 머리 카드·단추 자리
   nlRender();
   if (!NL.obs) nlObserveAlerts();
   if (typeof ovwSync === 'function') setTimeout(ovwSync, 0);
@@ -192,12 +198,15 @@ function nlExit() {
   if (!NL.on) return;
   nlMenuShow(false);
   nlBarsRestore();
+  nlInputsExit();
+  for (const lb of document.querySelectorAll('label.rng[data-du]')) nlDuUndo(lb);
   for (const { nodes } of NL.pieces.values()) for (const n of nodes) nlBack(n);
   const tb = $('#topbar'); if (tb) nlBack(tb);
   if (NL.root) NL.root.remove(); NL.root = null;
   if (NL.park) NL.park.remove();
   if (NL.menuPop) NL.menuPop.remove();
-  document.body.classList.remove('nl-on');
+  document.body.classList.remove('nl-on', 'nl-mob');
+  if (NL.m) { for (const k in NL.m.anim) cancelAnimationFrame(NL.m.anim[k]); if (NL.m.ro) NL.m.ro.disconnect(); NL.m.ro = null; NL.m.els = {}; }
   // 배치 때 붙인 표시를 지운다 (3단 배치에서는 효과가 없지만 남겨 두지 않는다)
   for (const e of [...document.querySelectorAll('.nl-off')]) e.classList.remove('nl-off');
   { const pr = $('#promptCard'); if (pr) { pr.classList.remove('nl-lines', 'nl-fill'); pr.style.removeProperty('--nl-minl'); pr.style.removeProperty('--nl-maxl'); } }
@@ -235,7 +244,8 @@ function nlScrollBack(list) {
   }
 }
 function nlRender() {
-  const p = nlPreset(); if (!p || !NL.root) return;
+  const p = NL.on ? nlCur() : null; if (!p || !NL.root) return;
+  if (p.id === 'mobile') { nlMobRender(p); return; }
   const keep = nlScrollKeep();
   nlParkIn(NL.root); NL.root.innerHTML = '';
   NL.squeezed = nlSqueezed(p);
@@ -296,16 +306,22 @@ function nlPanel(p, c, side) {
   col.appendChild(nlPanelBody(p, c, side, false, () => setCollapsed(true)));
   return col;
 }
+/* 아이콘 칸: NAI 아이콘 그림을 받았으면(body.nai-icons) 그 그림으로, 아니면 그림 글자로 (NAI H9 · 아이콘이 없으면 ArrowLeft/Right) */
+function nlIco(cls, icon, side, tag) {
+  const e = nlH(tag || 'span', cls, NL_ICON[icon] || (side === 'right' ? '◀' : '▶'));
+  const n = NL_NIC[icon] || (side === 'right' ? 'ArrowLeftIcon' : 'ArrowRightIcon');
+  e.dataset.nic = ''; e.style.setProperty('--nic', `var(--nic-${n})`); return e;
+}
 function nlRailBtn(p, c, side, name, onClick) {   // NAI Gv: 40px 띠 — 아이콘 · 세로 제목 · 배지(H7)
   const b = nlH('button', 'nl-rail'); b.type = 'button'; b.dataset.side = side; b.title = name + ' 열기';
-  b.appendChild(nlH('span', 'nl-rail-ico', NL_ICON[c.icon] || (side === 'right' ? '◀' : '▶')));
+  b.appendChild(nlIco('nl-rail-ico', c.icon, side));
   b.appendChild(nlH('span', 'nl-rail-t', name));
   const bd = nlH('span', 'nl-rail-bd'); bd.dataset.ids = [...new Set(nlIds(c.items))].join(','); b.appendChild(bd);
   b.onclick = onClick; return b;
 }
 function nlIconBtn(c, side, name, onClick) {   // NAI collapseStyle "icon": 위쪽 18px·옆 7px 에 뜬 30px 단추
   const w = nlH('div', 'nl-iconw'); w.dataset.side = side;
-  const b = nlH('button', 'nl-icon', NL_ICON[c.icon] || (side === 'right' ? '◀' : '▶')); b.type = 'button'; b.title = name + ' 열기';
+  const b = nlH('button', 'nl-icon'); b.appendChild(nlIco('nl-icon-ico', c.icon, side)); b.type = 'button'; b.title = name + ' 열기';
   b.onclick = onClick; w.appendChild(b); return w;
 }
 function nlPanelBody(p, c, side, floating, collapse) {
@@ -364,17 +380,20 @@ function nlItems(p, items, path, ctx, into) {
 function nlElement(p, it, ctx) {
   if (!nlVisible(it.id)) return null;
   switch (it.id) {
-    case 'nav-back': {   // NAI: 펜 단추 = 고른 그림을 풀기(SelectedImageResult 비움)
-      const b = nlH('button', 'nl-nb', '✒'); b.type = 'button'; b.title = '고른 그림 풀기 — 결과를 고르지 않은 상태로 (NAI 펜 단추)';
+    case 'nav-back': {   // NAI: 펜 단추(PenTipIcon 16×18, 바탕 없음) = 고른 그림을 풀기(SelectedImageResult 비움)
+      const b = nlH('button', 'nl-nb nl-nb-ghost'); b.appendChild(nlmIco('PenTipIcon', '✒', 'nl-pen')); b.type = 'button'; b.title = '고른 그림 풀기 — 결과를 고르지 않은 상태로 (NAI 펜 단추)';
+      b.setAttribute('aria-label', '고른 그림 풀기');
       b.onclick = () => { R.cur = -1; if (typeof clearViewer === 'function') clearViewer(); if (typeof histMarkCur === 'function') histMarkCur(-1); }; return b;
     }
-    case 'nav-menu': {
-      const b = nlH('button', 'nl-nb nl-menu-btn', '☰'); b.type = 'button'; b.title = '메뉴 — 모드 탭·도구·설정';
+    case 'nav-menu': {   // NAI: HamburgerAltIcon 16×16
+      const b = nlH('button', 'nl-nb nl-menu-btn'); b.appendChild(nlmIco('HamburgerAltIcon', '☰', 'nl-ham')); b.type = 'button'; b.title = '메뉴 — 모드 탭·도구·설정'; b.setAttribute('aria-label', '메뉴');
       b.onclick = e => { e.stopPropagation(); nlMenuShow(!NL.menuOpen, b); }; NL.menuBtn = b; nlMenuBadge(); return b;
     }
     case 'panel-collapse': {
       if (!ctx.collapse) return null;
-      const b = nlH('button', 'nl-nb', ctx.side === 'right' ? '▸' : '◂'); b.type = 'button'; b.title = '패널 접기'; b.onclick = ctx.collapse; return b;
+      // NAI: SidebarButton ghost square + ArrowRight(오른쪽 패널)·ArrowLeft 14×14
+      const b = nlH('button', 'nl-nb nl-nb-ghost'); b.appendChild(nlmIco(ctx.side === 'right' ? 'ArrowRightIcon' : 'ArrowLeftIcon', ctx.side === 'right' ? '▸' : '◂', 'nl-pcol'));
+      b.type = 'button'; b.title = '패널 접기'; b.setAttribute('aria-label', '패널 접기'); b.onclick = ctx.collapse; return b;
     }
     case 'spacer': return null;
     case 'divider': return nlH('div', 'nl-divider');
@@ -515,7 +534,7 @@ function nlTabs(p, it, ctx) {   // NAI GH·G$
   const bar = nlH('div', 'nl-tabbar');
   for (const { t, i } of vis) {
     const b = nlH('button', 'nl-tab' + (i === sel ? ' on' : '')); b.type = 'button';
-    if (t.icon && NL_ICON[t.icon]) b.appendChild(nlH('span', 'nl-tab-ico', NL_ICON[t.icon]));
+    if (t.icon && NL_ICON[t.icon]) b.appendChild(nlIco('nl-tab-ico', t.icon));
     b.appendChild(nlH('span', '', nlText(t.title)));
     const bd = nlH('span', 'nl-tab-bd'); bd.dataset.ids = nlIds(t.items).filter(x => NL_TABBADGE[x] && nlVisible(x)).join(','); b.appendChild(bd);
     b.onclick = () => { if (i === sel) return; nlOvPut(p.id, 'activeTabs', it.id, i); nlRender(); };
@@ -538,6 +557,42 @@ function nlChipIn(id, v, min, max, step, title) {   // 칩 안 숫자 칸 — �
   return i;
 }
 const nlDot = () => nlH('span', 'nl-dot');
+/* NAI react-select 메뉴 (요약 칩 Sampler: 위로 열림·위 5 · 정밀 레퍼런스 설명: 자리를 보고 아래/위) — 화면에 고정·높이 최대 250·
+   항목을 누르면 바로 닫힘·Esc·바깥 누르면 닫힘·↑↓ Enter. items: [{v, label, icon?, fb?, disabled?}] */
+function nlMenu(anchor, items0, cur, onPick, opt = {}) {
+  const old = document.getElementById('nlSMenu'); if (old) { const same = old._anchor === anchor; if (old._close) old._close(); else old.remove(); if (same) return; }   // 같은 단추를 다시 누르면 닫기만
+  const m = nlH('div', 'nl-smenu'); m.id = 'nlSMenu'; m.tabIndex = -1; m.setAttribute('role', 'listbox'); if (opt.label) m.setAttribute('aria-label', opt.label);
+  m._anchor = anchor; if (opt.minWidth) m.style.minWidth = Math.max(170, opt.minWidth) + 'px';
+  const items = items0.map(o => {
+    const b = nlH('button', 'nl-smenu-o' + (o.v === cur ? ' on' : '')); b.type = 'button'; b.disabled = !!o.disabled; b.dataset.v = o.v; b.setAttribute('role', 'option');
+    if (o.icon) b.appendChild(nlmIco(o.icon, o.fb || '', 'nl-smenu-i'));
+    b.appendChild(nlH('span', '', o.label));
+    b.onclick = () => { close(); if (o.v !== cur) onPick(o.v); };
+    m.appendChild(b); return b;
+  });
+  document.body.appendChild(m);
+  const r = anchor.getBoundingClientRect(), up = opt.placement === 'top' || (opt.placement === 'auto' && innerHeight - r.bottom < Math.min(250, m.offsetHeight) + 8 && r.top > innerHeight - r.bottom);
+  m.style.left = Math.max(4, Math.min(r.left, innerWidth - m.offsetWidth - 4)) + 'px';
+  if (up) m.style.bottom = (innerHeight - r.top + (opt.placement === 'top' ? 5 : 4)) + 'px'; else m.style.top = (r.bottom + 4) + 'px';   // NAI: Sampler 칩은 위로·위 5
+  let k = Math.max(0, items.findIndex(b => b.classList.contains('on')));
+  const focus = (i, scroll = true) => { k = (i + items.length) % items.length; items.forEach((b, j) => b.classList.toggle('focus', j === k)); if (scroll) items[k].scrollIntoView({ block: 'nearest' }); };
+  focus(k);
+  m.onpointermove = e => { const i = items.indexOf(e.target.closest('.nl-smenu-o')); if (i >= 0 && i !== k) focus(i, false); };   // react-select: 올린 항목이 고른 자리
+  const out = e => { if (!m.contains(e.target) && !anchor.contains(e.target)) close(); };
+  const key = e => {
+    if (e.key === 'Escape') { e.preventDefault(); close(); anchor.focus(); }
+    else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); focus(k + (e.key === 'ArrowDown' ? 1 : -1)); }
+    else if (e.key === 'Enter') { e.preventDefault(); items[k].click(); }
+  };
+  function close() { m.remove(); document.removeEventListener('pointerdown', out, true); document.removeEventListener('keydown', key, true); removeEventListener('resize', close); }
+  m._close = close;
+  document.addEventListener('pointerdown', out, true); document.addEventListener('keydown', key, true); addEventListener('resize', close);
+}
+function nlSamplerMenu(anchor, src) {   // NAI 요약 칩 Sampler (aria «Select a sampler» · 위로)
+  if (!src || src.disabled) { const old = document.getElementById('nlSMenu'); if (old && old._close) old._close(); return; }
+  nlMenu(anchor, [...src.options].filter(o => !o.hidden).map(o => ({ v: o.value, label: o.textContent, disabled: o.disabled })), src.value,
+    v => { src.value = v; src.dispatchEvent(new Event('change', { bubbles: true })); }, { placement: 'top', label: 'Select a sampler' });
+}
 const NL_CHIP = {
   steps: () => { const fx = fixedOf(S.model); return nlChipBox('Steps', nlChipIn('steps', fx ? fx.steps : S.steps, 1, 50, 1, 'Steps')); },
   guidance: () => {
@@ -551,10 +606,10 @@ const NL_CHIP = {
     else { b.textContent = '🌱'; b.title = '보고 있는 그림의 시드 쓰기'; b.disabled = !(it && it.seed != null); b.onclick = e => { e.preventDefault(); if (it && it.seed != null && window.fixSeed) { window.fixSeed(it.seed); syncUI(); } }; }
     return nlChipBox('시드', b);
   },
-  sampler: () => {
-    const c = capsOf(S.model), s = nlH('select', 'nl-chip-sel'), src = $('#sampler');
-    if (src) { s.innerHTML = src.innerHTML; s.value = src.value; s.disabled = src.disabled; }
-    s.onchange = () => { if (!src) return; src.value = s.value; src.dispatchEvent(new Event('change', { bubbles: true })); };
+  sampler: () => {   // NAI H4 sampler: «Sampler» + 이름 단추(SubtleButton) — 누르면 위로 목록이 뜬다(react-select: 위쪽·고정·높이 최대 250·폭 170 이상)
+    const src = $('#sampler'), op = src && src.selectedOptions[0];
+    const s = nlH('button', 'nl-chip-b nl-chip-sub', op ? op.textContent : ''); s.type = 'button'; s.disabled = !src || src.disabled; s.title = 'Sampler 고르기';
+    s.onclick = e => { e.preventDefault(); e.stopPropagation(); nlSamplerMenu(s, src); };
     const b = nlChipBox('Sampler', s);
     if ((MODELS[S.model] || {}).ver === 30 && S.autoSmea !== false) b.appendChild(nlDot());   // NAI: SMEA(자동 SMEA)가 켜져 있으면 점 — V3 만 SMEA 가 있다
     return b;
@@ -623,11 +678,14 @@ function nlRefresh(fromRender) {
   nlPaintBadges();
   nlMenuBadge();
   nlBarsPaint(curItem());
+  nlInputsPaint();
+  if (NL.id === 'mobile') nlMobPaint();
 }
 function nlRefreshSoon() { if (!NL.on || NL.rq) return; NL.rq = setTimeout(() => { NL.rq = 0; nlRefresh(); }, 0); }
 /* 다른 곳(이미지 입력 칩 등)에서 칸을 열어 달라고 할 때: 그 칸이 든 패널·접힌 묶음·탭을 연다 */
 function nlReveal(elId) {
-  const p = nlPreset(); if (!NL.on || !p) return false;
+  const p = NL.on ? nlCur() : null; if (!p) return false;
+  if (p.id === 'mobile') return nlMobReveal(elId);
   const ov = nlOv(p.id); let found = null;
   const walk = (items, path, chain) => {
     (items || []).forEach((it, i) => {
@@ -651,13 +709,338 @@ function nlReveal(elId) {
   return true;
 }
 
+/* ═══ NAI 휴대폰 화면 (폭 900 이하) ═══
+   프롬프트 시트(HO): 내린(peek 56)·중간(mid)·끝까지(full) 높이(HN), 머리를 끌거나 누르면 바뀌고 놓으면 가까운 높이로(빠르기 반영),
+   탭 셋(프롬프트·참고 그림·청크)은 옆으로 넘기는 쪽(pager), 내린 상태에서는 프롬프트 한 줄 미리 보기 · 뒤 어둡게(최대 .45)
+   아래 줄(VV): ⚙ 설정 · 생성 단추 · 🕘 히스토리 / 설정·히스토리 서랍(VW): 아래에서 올라오고 제목·✕
+   생성을 시작하면 시트를 내리고 서랍을 닫는다 · 바탕 그림이 새로 들어오면 «참고 그림» 쪽으로 중간까지 */
+const NLM_SPRING = { damping: 22, stiffness: 220, mass: 0.7 };   // NAI HD
+function nlmHeights(H) { const t = H > 0 ? Math.max(136, Math.min(Math.round(0.75 * H), H - 160)) : 340; return { peek: 56, mid: t, full: Math.max(t + 60, H > 0 ? H : 560) }; }   // NAI HN
+function nlmIco(name, fallback, cls) { const e = nlH('span', cls || '', fallback); e.dataset.nic = ''; e.style.setProperty('--nic', `var(--nic-${name})`); return e; }
+function nlmSpring(key, from, to, apply) {   // NAI animate(값, 목표, 용수철 HD)
+  const M = NL.m; cancelAnimationFrame(M.anim[key] || 0);
+  if (typeof ovwReduced === 'function' && ovwReduced()) { M.vel[key] = 0; apply(to); return; }
+  let x = from, v = M.vel[key] || 0, last = performance.now();
+  const step = now => {
+    const dt = Math.min(0.032, Math.max(0.001, (now - last) / 1000)); last = now;
+    v += (-NLM_SPRING.stiffness * (x - to) - NLM_SPRING.damping * v) / NLM_SPRING.mass * dt; x += v * dt;
+    if (Math.abs(v) < 0.5 && Math.abs(x - to) < 0.5) { M.vel[key] = 0; M.anim[key] = 0; apply(to); return; }
+    M.vel[key] = v; apply(x); M.anim[key] = requestAnimationFrame(step);
+  };
+  M.anim[key] = requestAnimationFrame(step);
+}
+function nlmSetH(h) {
+  const M = NL.m, E = M.els; M.h = h; if (!E.sheet) return;
+  const hs = nlmHeights(M.H);
+  E.sheet.style.height = h + 'px';
+  E.back.style.opacity = String(Math.min(0.45, Math.max(0, (h - hs.peek) / Math.max(1, hs.mid - hs.peek) * 0.45)));
+  E.back.style.pointerEvents = h > hs.peek + 8 ? 'auto' : 'none';
+  const po = Math.max(0, Math.min(1, 1 - (h - 56) / 40));   // NAI: 높이 56→96 이면 미리 보기 1→0
+  E.peek.style.opacity = String(po); E.peek.style.pointerEvents = po > 0.5 ? 'auto' : 'none';
+}
+function nlmGo(state, instant) {
+  const M = NL.m; M.state = state; const to = nlmHeights(M.H)[state];
+  if (instant) { cancelAnimationFrame(M.anim.h || 0); M.vel.h = 0; nlmSetH(to); } else nlmSpring('h', M.h, to, nlmSetH);
+}
+function nlmSetX(x) { const M = NL.m; M.x = x; if (M.els.pager) M.els.pager.style.transform = `translateX(${x}px)`; }
+function nlmPage(i, instant) {
+  const M = NL.m; M.page = Math.max(0, Math.min(2, i));
+  if (M.els.tabs) [...M.els.tabs.children].forEach((b, k) => b.classList.toggle('on', k === M.page));
+  const to = -M.page * M.W; if (instant) nlmSetX(to); else nlmSpring('x', M.x, to, nlmSetX);
+}
+function nlmSnap(v) { const M = NL.m, hs = nlmHeights(M.H), x = M.h - 0.05 * v; nlmGo(Object.keys(hs).reduce((a, b) => (Math.abs(hs[b] - x) < Math.abs(hs[a] - x) ? b : a))); }
+function nlmOpen(key, on) {
+  const M = NL.m; M[key] = !!on; if (on) M[key === 'set' ? 'hist' : 'set'] = false;
+  for (const d of (NL.root ? NL.root.querySelectorAll('.nlm-drawer') : [])) d.classList.toggle('open', !!M[d.dataset.k]);
+  for (const b of (NL.root ? NL.root.querySelectorAll('.nlm-bbtn') : [])) b.classList.toggle('on', !!M[b.dataset.k]);
+}
+function nlmDrawer(key, title, fill) {   // NAI VW: 아래에서 올라오는 서랍 (제목·✕)
+  const d = nlH('div', 'nlm-drawer' + (NL.m[key] ? ' open' : '')); d.dataset.k = key;
+  const hd = nlH('div', 'nlm-dhead'); hd.appendChild(nlH('div', 'nlm-dtitle', title));
+  const x = nlH('button', 'nlm-dx'); x.type = 'button'; x.setAttribute('aria-label', title + ' 닫기'); x.title = '닫기'; x.appendChild(nlmIco('CrossIcon', '✕')); x.onclick = () => nlmOpen(key, false);
+  hd.appendChild(x); d.appendChild(hd);
+  const body = nlH('div', 'nlm-dbody ' + key); fill(body); d.appendChild(body);
+  return d;
+}
+function nlMobRender(p) {
+  const keep = nlScrollKeep();
+  nlParkIn(NL.root); NL.root.innerHTML = ''; NL.sig = nlVisSig();
+  const M = NL.m = NL.m || { state: 'peek', page: 0, h: 56, x: 0, W: 0, H: 0, vel: {}, anim: {}, set: false, hist: false, i2i: !!R.i2iBlob, els: {} };
+  if (M.ro) M.ro.disconnect();
+  const ctx = { insideTitled: false, insideScroll: false };
+  const stage = nlH('div', 'nlm-stage'), out = nlH('div', 'nlm-out');   // NAI H3 · H5
+  // 머리 줄 (NAI ImageGenNavbar: 펜 · 빈칸 · Anlas(작게) · 빈칸 · ☰ / 그 아래 Opus 사용량 막대 / ☰ 메뉴는 줄 아래로 펼침)
+  const nav = nlH('div', 'nlm-nav'), nrow = nlH('div', 'nlm-navrow');
+  for (const id of ['nav-back', '', 'anlas-balance', '', 'nav-menu']) { const e = id ? nlElement(p, { kind: 'element', id }, ctx) : nlH('div', 'nlm-flex'); if (e) nrow.appendChild(e); }
+  nav.appendChild(nrow);
+  { const op = $('#opusBar'), ow = nlH('div', 'nlm-opus'); if (op) ow.appendChild(op); nav.appendChild(ow); }   // NAI ef: 막대가 없으면 빈 칸이라 숨김
+  if (NL.menuPop) nav.appendChild(NL.menuPop);
+  stage.appendChild(nav);
+  const rv = nlElement(p, { kind: 'element', id: 'results-viewer' }, ctx); if (rv) out.appendChild(rv);
+  // 프롬프트 시트 (HO)
+  const wrap = nlH('div', 'nlm-sheetwrap'), back = nlH('div', 'nlm-back'), sheet = nlH('div', 'nlm-sheet');
+  back.onclick = () => nlmGo('peek');
+  const head = nlH('div', 'nlm-head'), grip = nlH('div', 'nlm-grip'); grip.appendChild(nlH('div', 'nlm-handle')); head.appendChild(grip);
+  const tabs = nlH('div', 'nlm-tabs');
+  [['프롬프트', 'characters'], ['참고 그림', 'input-image,vibe-transfer,character-references'], ['청크', '']].forEach(([t, ids], i) => {
+    const b = nlH('button', 'nlm-tab' + (i === M.page ? ' on' : '')); b.type = 'button'; b.appendChild(nlH('span', 'nlm-tabt', t));
+    if (ids) { const bd = nlH('span', 'nl-tab-bd'); bd.dataset.ids = ids; b.appendChild(bd); }
+    b.onclick = () => { if (M.tabBlock) { M.tabBlock = false; return; } nlmPage(i); };
+    tabs.appendChild(b);
+  });
+  head.appendChild(tabs);
+  const peek = nlH('div', 'nlm-peek'), ptx = nlH('div', 'nlm-ptx'); peek.appendChild(ptx); peek.appendChild(nlmIco('ArrowUpIcon', '▴', 'nlm-up'));
+  peek.onclick = () => nlmGo('mid'); head.appendChild(peek);
+  head.onpointerdown = e => { cancelAnimationFrame(M.anim.h || 0); M.vel.h = 0; M.tabBlock = false; M.drag = { id: e.pointerId, y0: e.clientY, h0: M.h, ly: e.clientY, lt: performance.now(), v: 0, moved: false }; };
+  head.onpointermove = e => {
+    const d = M.drag; if (!d || d.id !== e.pointerId) return;
+    if (!d.moved && Math.abs(e.clientY - d.y0) > 5) { d.moved = true; M.tabBlock = true; try { head.setPointerCapture(e.pointerId); } catch (er) { /* 이미 놓은 포인터 */ } }
+    const hs = nlmHeights(M.H); nlmSetH(Math.min(hs.full, Math.max(hs.peek, d.h0 - (e.clientY - d.y0))));
+    const now = performance.now(), dt = now - d.lt; if (dt > 0) d.v = 0.6 * d.v + (e.clientY - d.ly) / dt * 400; d.ly = e.clientY; d.lt = now;
+  };
+  head.onpointerup = head.onpointercancel = e => {
+    const d = M.drag; if (!d || d.id !== e.pointerId) return; M.drag = null;
+    if (!d.moved) { if (e.target.closest('button')) return; nlmGo(M.state === 'peek' ? 'mid' : 'peek'); return; }
+    nlmSnap(d.v);
+  };
+  const pages = nlH('div', 'nlm-pages'), pager = nlH('div', 'nlm-pager');
+  const pg = (kids, pad) => { const d = nlH('div', 'nlm-page'); if (pad) d.style.paddingBottom = pad + 'px'; const c = nlH('div', 'nlm-col'); for (const k of kids) if (k) c.appendChild(k); d.appendChild(c); pager.appendChild(d); return d; };
+  pg([nlElement(p, { kind: 'element', id: 'prompt' }, ctx), nlElement(p, { kind: 'element', id: 'characters' }, ctx)], 80);   // NAI H0: Ne·L7, 아래 80
+  pg(['input-image', 'vibe-transfer', 'character-references'].map(id => nlElement(p, { kind: 'element', id }, ctx)));   // NAI HU
+  { const box = nlH('div', 'nlm-chunks'); box.appendChild(nlH('div', 'hint', '프롬프트 청크를 만들고 고칩니다. 프롬프트 칸 아래 칩을 누르면 그 청크가 들어갑니다.'));
+    const b = nlH('button', 'btn sm', '🧩 청크 관리'); b.type = 'button'; b.onclick = () => { if (typeof openChunkManager === 'function') openChunkManager(); }; box.appendChild(b); pg([box]); }
+  pages.appendChild(pager);
+  sheet.appendChild(head); sheet.appendChild(pages);
+  sheet.addEventListener('focusin', e => {   // NAI: 터치 화면(iOS 빼고)에서 글 칸에 들어가면 끝까지
+    if (/iP(hone|ad|od)/.test(navigator.userAgent) || !(navigator.maxTouchPoints > 0)) return;
+    if (e.target.closest('textarea, input, [contenteditable="true"]')) { M.state = 'full'; cancelAnimationFrame(M.anim.h || 0); nlmSetH(nlmHeights(wrap.clientHeight).full); }
+  });
+  sheet.addEventListener('input', () => nlMobPaint());
+  nlmTouch(pages);
+  wrap.appendChild(back); wrap.appendChild(sheet); out.appendChild(wrap); stage.appendChild(out);
+  // 설정·히스토리 서랍 (VQ · VZ)
+  stage.appendChild(nlmDrawer('set', '설정', body => { const c = nlH('div', 'nlm-scol'); nlItems(p, NL_MOBILE_SETTINGS, 'mobile-settings', { insideTitled: false, insideScroll: true }, c); nlExtras(c); body.appendChild(c); }));
+  stage.appendChild(nlmDrawer('hist', '히스토리', body => { const h = nlElement(p, { kind: 'element', id: 'history' }, ctx); if (h) body.appendChild(h); }));
+  // 아래 줄 (VV): 사용량 · ⚙ 설정 · 생성 · 🕘 히스토리
+  const bot = nlH('div', 'nlm-bottom'), bs = nlElement(p, { kind: 'element', id: 'banner-stack' }, ctx); if (bs) bot.appendChild(bs);
+  const row = nlH('div', 'nlm-brow');
+  const bb = (k, ico, fb, label) => { const b = nlH('button', 'nlm-bbtn' + (M[k] ? ' on' : '')); b.type = 'button'; b.dataset.k = k; b.title = label; b.setAttribute('aria-label', label); b.appendChild(nlmIco(ico, fb)); b.onclick = () => nlmOpen(k, !M[k]); return b; };
+  const gen = nlH('div', 'nlm-gen'), ge = nlElement(p, { kind: 'element', id: 'generate' }, ctx); if (ge) gen.appendChild(ge);
+  row.appendChild(bb('set', 'SettingsIcon', '⚙', '설정')); row.appendChild(gen); row.appendChild(bb('hist', 'HistoryIcon', '🕘', '히스토리'));
+  bot.appendChild(row);
+  NL.root.appendChild(stage); NL.root.appendChild(bot);
+  M.els = { wrap, back, sheet, peek, ptx, tabs, pager, pages };
+  M.ro = new ResizeObserver(() => {   // NAI: 바깥 높이가 바뀌면 높이 셈을 다시 (끝까지면 바로, 아니면 용수철로) · 쪽 폭을 다시
+    const H = wrap.clientHeight, W = pages.clientWidth;
+    if (H !== M.H) { M.H = H; if (M.state === 'full') nlmSetH(nlmHeights(H).full); else nlmGo(M.state); }
+    if (W !== M.W) { M.W = W; nlmSetX(-M.page * W); }
+  });
+  M.ro.observe(wrap); M.ro.observe(pages);
+  M.H = wrap.clientHeight; M.W = pages.clientWidth; nlmSetH(M.state === 'full' ? nlmHeights(M.H).full : nlmHeights(M.H)[M.state]); nlmSetX(-M.page * M.W);
+  nlScrollBack(keep);
+  nlRefresh(true);
+}
+function nlmTouch(el) {   // NAI: 손가락으로 옆으로 넘기면 쪽 바꾸기, 위아래는 쪽 맨 위에서만 시트 높이
+  const M = NL.m; let t = null;
+  el.addEventListener('touchstart', e => {
+    if (e.touches.length !== 1) { t = null; return; }
+    const p = e.touches[0], inp = e.target.closest('input[type="range"], select') || (e.target.closest('textarea, input, [contenteditable="true"]') && e.target.closest('textarea, input, [contenteditable="true"]').contains(document.activeElement));
+    t = { x0: p.clientX, y0: p.clientY, lx: p.clientX, ly: p.clientY, lt: performance.now(), v: 0, mode: inp ? 'native' : 'undecided', ex: p.clientX, ey: p.clientY, px: M.x, h0: M.h };
+  }, { passive: true });
+  el.addEventListener('touchmove', e => {
+    if (!t || e.touches.length !== 1) return;
+    const p = e.touches[0], dx = p.clientX - t.x0, dy = p.clientY - t.y0;
+    if (t.mode === 'undecided') {
+      const pageEl = el.querySelectorAll('.nlm-page')[M.page];
+      if (Math.abs(dx) > 24 && Math.abs(dx) > 1.2 * Math.abs(dy)) { t.mode = 'page'; t.ex = p.clientX; t.px = M.x; cancelAnimationFrame(M.anim.x || 0); }
+      else if (dy > 12 && Math.abs(dy) > Math.abs(dx) && (pageEl ? pageEl.scrollTop : 0) <= 1) { t.mode = 'sheet'; t.ey = p.clientY; t.h0 = M.h; cancelAnimationFrame(M.anim.h || 0); }
+      else if (Math.abs(dy) > 12) t.mode = 'native';
+    }
+    const now = performance.now(), dt = now - t.lt;
+    if (t.mode === 'page') {
+      e.preventDefault(); const W = Math.max(1, M.W), lo = -2 * W; let x = t.px + (p.clientX - t.ex);
+      if (x > 0) x *= 0.25; if (x < lo) x = lo + (x - lo) * 0.25; nlmSetX(x); if (dt > 0) t.v = 0.6 * t.v + (p.clientX - t.lx) / dt * 400;
+    } else if (t.mode === 'sheet') {
+      e.preventDefault(); const hs = nlmHeights(M.H); nlmSetH(Math.min(hs.full, Math.max(hs.peek, t.h0 - (p.clientY - t.ey)))); if (dt > 0) t.v = 0.6 * t.v + (p.clientY - t.ly) / dt * 400;
+    }
+    t.lx = p.clientX; t.ly = p.clientY; t.lt = now;
+  }, { passive: false });
+  const end = () => { const s = t; t = null; if (!s) return; if (s.mode === 'page') nlmPage(Math.round(-(M.x + 0.05 * s.v) / Math.max(1, M.W))); else if (s.mode === 'sheet') nlmSnap(s.v); };
+  el.addEventListener('touchend', end); el.addEventListener('touchcancel', end);
+}
+function nlMobPaint() {   // 내린 시트의 프롬프트 한 줄 (NAI: 비었으면 «눌러서 프롬프트 넣기»)
+  const M = NL.m; if (!M || !M.els.ptx) return;
+  const v = (typeof getMainPrompt === 'function' ? String(getMainPrompt() || '') : '').replace(/\n/g, ' ').trim();
+  M.els.ptx.textContent = v || '눌러서 프롬프트를 넣으세요…'; M.els.ptx.classList.toggle('faded', !v);
+}
+function nlMobGenStart() { if (!NL.on || NL.id !== 'mobile' || !NL.m) return; if (NL.m.state !== 'peek') nlmGo('peek'); nlmOpen('set', false); nlmOpen('hist', false); }
+function nlMobI2I() {
+  const M = NL.m, has = !!R.i2iBlob; if (!M) return;
+  if (NL.on && NL.id === 'mobile' && has && !M.i2i) { nlmPage(1); if (M.state === 'peek') nlmGo('mid'); }
+  M.i2i = has;
+}
+function nlMobReveal(elId) {   // 휴대폰 화면: 그 칸이 든 시트 쪽(중간까지)이나 설정 서랍을 연다
+  const M = NL.m; if (!M) return false;
+  if (['prompt', 'characters'].includes(elId)) { nlmPage(0); if (M.state === 'peek') nlmGo('mid'); }
+  else if (['input-image', 'vibe-transfer', 'character-references'].includes(elId)) { nlmPage(1); if (M.state === 'peek') nlmGo('mid'); }
+  else if (elId === 'history') nlmOpen('hist', true);
+  else if (nlIds(NL_MOBILE_SETTINGS).includes(elId)) nlmOpen('set', true);
+  else return false;
+  return true;
+}
+
+/* ── NAI 이미지 입력 칸 (input-image jl · vibe-transfer Nl · character-references DG) ──
+   NAI 배치에서만 보인다(3단 배치는 예전 모양). 칸 위에 NAI 머리 카드(Dv: 아이콘·제목·개수·설명·단추)를 두고, 우리 단추(＋ 넣기·⋯·라이브러리·ZIP)와
+   강도 정규화·안내 글을 NAI 자리로 옮긴다(nlMark → 나갈 때 nlBack). 바탕 그림은 비었으면 카드, 있으면 작은 그림·단추 줄 카드(D0) + 슬라이더 칸(D4),
+   마스크가 있으면 인페인트 카드(ja: ‹ Inpaint · 펜·넣기·지우기 · 인페인트 세기). */
+const NIN_SUB = { i2i: '올린 그림을 바탕으로 새로 그립니다.', vibe: '그림의 느낌을 가져와 새 그림에 씁니다.', pref: '캐릭터나 화풍을 따라 할 그림을 넣습니다.' };
+function nlInBtn(icon, fb, title, cls, onclick) {   // NAI SidebarButton(cls 없음: 44×40) · SidebarButtonSmall(nin-sm) · 정사각(nin-sq) · 바탕 없음(nl-nb-ghost)
+  const b = nlH('button', 'nl-nb ' + (cls || '')); b.type = 'button'; b.title = title; b.setAttribute('aria-label', title);
+  b.appendChild(nlmIco(icon, fb, 'nin-bi')); if (onclick) b.onclick = onclick; return b;
+}
+function nlInCard(icon, fb, title, sub) {   // NAI Dv (Db 카드 · Dx 왼쪽 · Dw 아이콘 · DS 제목(+개수) · DM 설명 · Dk 단추)
+  const c = nlH('div', 'nin-card'), l = nlH('div', 'nin-l'), tt = nlH('div', 'nin-tt'), t = nlH('div', 'nin-t'), n = nlH('span', 'nin-cnt'), s = nlH('div', 'nin-s', sub), a = nlH('div', 'nin-act');
+  t.appendChild(nlH('span', '', title)); t.appendChild(n); l.appendChild(nlmIco(icon, fb, 'nin-ico')); tt.appendChild(t); tt.appendChild(s); l.appendChild(tt);
+  c.appendChild(l); c.appendChild(a);
+  return { c, n, s, a };
+}
+function nlInMove(n, into) { if (!n || !into) return; nlMark(n); into.appendChild(n); (NL.inMoved = NL.inMoved || []).push(n); }
+function nlInputsEnter() {
+  const pI = $('#panelI2i'), pV = $('#panelVibe'), pP = $('#panelPref'); if (!pI || !pV || !pP) return;
+  if (!NL.inp) {
+    const I = NL.inp = {};
+    // 바탕 그림: 빈 카드
+    I.iE = nlInCard('Img2ImgIcon', '🖼', 'Image2Image', NIN_SUB.i2i); I.iE.c.classList.add('nin-x', 'nin-iempty');
+    I.iE.a.appendChild(nlInBtn('ImportIcon', '⤒', '그림 넣기', '', () => $('#i2iDrop').click()));
+    I.iE.a.appendChild(nlInBtn('PenIcon', '✏', '빈 그림판에 그리기', '', () => $('#btnPaintNew').click()));
+    // 바탕 그림: 그림이 있을 때 (D0 — 왼쪽 작은 그림 · 제목 · 단추 줄)
+    const top = I.iTop = nlH('div', 'nin-x nin-top'), th = I.th = nlH('div', 'nin-th'), thIn = I.thIn = nlH('div', 'nin-thin');
+    I.thImg = nlH('img', 'nin-thimg'); I.thImg.alt = 'preview'; I.thMask = nlH('img', 'nin-thmask'); I.thMask.alt = 'mask';
+    thIn.appendChild(I.thImg); thIn.appendChild(I.thMask); th.appendChild(thIn);
+    const col = nlH('div', 'nin-col'), trow = nlH('div', 'nin-trow'), tl = nlH('div', 'nin-tl');
+    I.back = nlH('button', 'nin-back'); I.back.type = 'button'; I.back.title = '인페인트 그만두기 (마스크 지우기)'; I.back.setAttribute('aria-label', 'Image2Image');
+    I.back.appendChild(nlmIco('SmallChevronLeftIcon', '‹', 'nin-backi'));
+    I.back.onclick = () => { if (typeof clearMask === 'function') clearMask(); R.i2iMarked = null; if (typeof updateI2IUI === 'function') updateI2IUI(); };
+    I.ttl = nlH('div', 'nin-t2', 'Image2Image'); tl.appendChild(I.back); tl.appendChild(I.ttl); trow.appendChild(tl);
+    const tools = nlH('div', 'nin-tools');
+    I.bInp = nlInBtn('InpaintIcon', '🖌', '인페인트 — 칠한 곳만 다시 그립니다', 'nin-sm', () => $('#btnMask').click()); I.bInp.appendChild(nlH('span', '', 'Inpaint'));
+    I.bPen = nlInBtn('PenIcon', '✏', '그림판에서 고치기', 'nin-sm nin-sq', () => (typeof hasMask === 'function' && hasMask() ? $('#btnMask') : $('#btnEditI2i')).click());
+    const bImp = nlInBtn('ImportIcon', '⤒', '다른 그림 넣기', 'nin-sm nin-sq', () => $('#i2iDrop').click());
+    const bDel = nlInBtn('DeleteIcon', '✕', '바탕 그림 빼기', 'nin-sm nin-sq', () => $('#btnI2iClear').click());
+    tools.appendChild(I.bInp); tools.appendChild(I.bPen); tools.appendChild(bImp); tools.appendChild(nlH('div', 'nin-sp')); tools.appendChild(bDel);
+    col.appendChild(trow); col.appendChild(tools); top.appendChild(th); top.appendChild(col);
+    // 바이브 · 정밀 레퍼런스: 머리 카드 + 목록 상자(DI: 위쪽 설정 칸 DA)
+    I.vH = nlInCard('VibeTransferIcon', '≋', 'Vibe Transfer', NIN_SUB.vibe); I.vH.c.classList.add('nin-x', 'nin-head');
+    I.vAdd = nlInBtn('PlusIcon', '＋', '바이브 넣기', 'nin-sm', () => $('#vibeAdd').click());
+    I.vImp = nlInBtn('ImportIcon', '⤒', '바이브 넣기', '', () => $('#vibeAdd').click());
+    I.vBox = nlH('div', 'nin-x nin-box'); I.vDA = nlH('div', 'nin-da');
+    I.pH = nlInCard('PreciseReferenceIcon', '◎', 'Precise Reference', NIN_SUB.pref); I.pH.c.classList.add('nin-x', 'nin-head');
+    I.pAdd = nlInBtn('ImportIcon', '⤒', '레퍼런스 넣기', 'nin-sm', () => $('#prefAdd').click());
+    I.pImp = nlInBtn('ImportIcon', '⤒', '레퍼런스 넣기', '', () => $('#prefAdd').click());
+    I.pBox = nlH('div', 'nin-x nin-box'); I.pDA = nlH('div', 'nin-da');
+    pI.insertBefore(top, pI.firstChild); pI.insertBefore(I.iE.c, pI.firstChild);
+    pV.insertBefore(I.vBox, pV.firstChild); pV.insertBefore(I.vH.c, pV.firstChild); I.vBox.appendChild(I.vDA);
+    pP.insertBefore(I.pBox, pP.firstChild); pP.insertBefore(I.pH.c, pP.firstChild); I.pBox.appendChild(I.pDA);
+  }
+  const I = NL.inp;
+  // 우리 단추·칸을 NAI 자리로 (나갈 때 제자리로)
+  nlInMove($('#vibeLibBtn'), I.vH.a); nlInMove($('#vibeMore') && $('#vibeMore').closest('.viewpop-wrap'), I.vH.a);
+  I.vH.a.appendChild(I.vAdd); I.vH.a.appendChild(I.vImp);
+  nlInMove($('#vibeNormalize') && $('#vibeNormalize').closest('label'), I.vDA); nlInMove($('#vibeNotes'), I.vDA); nlInMove($('#vibeList'), I.vBox);
+  nlInMove($('#prefZip'), I.pH.a); I.pH.a.appendChild(I.pAdd); I.pH.a.appendChild(I.pImp);
+  nlInMove($('#prefNotes'), I.pDA); nlInMove($('#prefList'), I.pBox);
+  { const vm = $('#vibeMore'); if (vm && !vm.dataset.nin) { vm.dataset.nin = vm.innerHTML; vm.innerHTML = ''; vm.appendChild(nlmIco('DotDotDotIcon', '⋯', 'nin-dots')); }
+    const zb = $('#prefZip'); if (zb && !zb.dataset.nin) { zb.dataset.nin = zb.innerHTML; zb.innerHTML = ''; zb.appendChild(nlmIco('ExportIcon', '⬇', 'nin-bi')); }
+    const lb = $('#vibeLibBtn'); if (lb && !lb.dataset.nin) { lb.dataset.nin = lb.innerHTML; lb.innerHTML = '📚'; } }
+  nlInputsPaint();
+}
+function nlInputsExit() {
+  for (const n of (NL.inMoved || []).reverse()) nlBack(n);
+  NL.inMoved = [];
+  for (const id of ['#vibeMore', '#prefZip', '#vibeLibBtn']) { const b = $(id); if (b && b.dataset.nin != null) { b.innerHTML = b.dataset.nin; delete b.dataset.nin; } }
+}
+function nlMaskThumb() {   // 마스크 작은 그림 (NAI infillMaskThumbnail: 칠한 칸 흰색) — 1/8 칸 자료나 옛 마스크 그림에서
+  const m8 = R.mask8;
+  if (m8 && m8.data && m8.w8 && m8.h8) {
+    const c = document.createElement('canvas'); c.width = m8.w8; c.height = m8.h8; const x = c.getContext('2d'), d = x.createImageData(m8.w8, m8.h8);
+    for (let i = 0; i < m8.data.length; i++) if (m8.data[i]) { d.data[i * 4] = d.data[i * 4 + 1] = d.data[i * 4 + 2] = 255; d.data[i * 4 + 3] = 255; }
+    x.putImageData(d, 0, 0); return c.toDataURL();
+  }
+  return R.maskCanvas && R.maskCanvas.toDataURL ? R.maskCanvas.toDataURL() : '';
+}
+function nlInputsPaint() {
+  if (!NL.on || !NL.inp) return;
+  const I = NL.inp, pI = $('#panelI2i'), has = !!R.i2iBlob, inp = has && typeof hasMask === 'function' && hasMask();
+  pI.classList.toggle('nin-e', !has); pI.classList.toggle('nin-i', has && !inp); pI.classList.toggle('nin-p', inp);
+  if (has) {
+    // NAI DQ: 생성 크기 비율로 88 상자 안 · D0 왼쪽 여백 = 폭 + 24 · DY: 작은 그림을 ±2° 안에서 살짝 기울인다(그림마다 다르게)
+    const W = +S.width || 1, H = +S.height || 1, r = W / H, tw = Math.round(r >= 1 ? 88 : 88 * r), thh = Math.round(r >= 1 ? 88 / r : 88);
+    I.th.style.width = tw + 'px'; I.th.style.height = thh + 'px'; I.iTop.style.paddingLeft = (tw + 24) + 'px';
+    if (I.thBlob !== R.i2iBlob) { if (I.thUrl) URL.revokeObjectURL(I.thUrl); I.thBlob = R.i2iBlob; I.thUrl = URL.createObjectURL(R.i2iBlob); I.thImg.src = I.thUrl; }
+    const b = (R.i2iBlob.size || 0) % 400; I.thIn.style.transform = `rotate(${b < 200 ? (b + 1) / 100 : -(b - 199) / 100}deg)`;
+    const mk = inp ? nlMaskThumb() : ''; I.thMask.hidden = !mk; if (mk && I.thMask.src !== mk) I.thMask.src = mk;
+    I.ttl.textContent = inp ? 'Inpaint' : 'Image2Image'; I.back.hidden = !inp;
+    I.bInp.hidden = inp || !((MODELS[modelOf(S.model)] || {}).inpaint);   // NAI: 인페인트를 받는 모델에서만
+  }
+  // 바이브
+  const v4 = ((MODELS[modelOf(S.model)] || {}).ver || 0) >= 40, nv = R.vibes.length, on = R.vibes.filter(v => !v.off).length;
+  I.vH.c.classList.toggle('nin-conj', nv > 0); I.vH.s.hidden = nv > 0; I.vBox.hidden = !nv;
+  I.vH.n.innerHTML = nv ? `(<b class="${on > 16 ? 'nin-warn' : ''}">${on}</b>${on !== nv ? '/' + nv : ''})` : '';
+  I.vAdd.hidden = !nv; I.vImp.hidden = !!nv; I.vDA.hidden = !(nv && v4) && !($('#vibeNotes') && !$('#vibeNotes').hidden);
+  { const nz = $('#vibeNormalize'); if (nz) nz.closest('label').classList.toggle('nin-hid', !v4); }   // NAI: 강도 정규화는 인코딩 바이브 모델(V4 이상)에서만
+  // 정밀 레퍼런스
+  const np = R.prefs.length;
+  I.pH.c.classList.toggle('nin-conj', np > 0); I.pH.s.hidden = np > 0; I.pBox.hidden = !np;
+  I.pAdd.hidden = !np; I.pImp.hidden = !!np; I.pDA.hidden = !($('#prefNotes') && !$('#prefNotes').hidden);
+  nlDuAll(NL.root);
+}
+/* NAI 슬라이더(Du, sc-9c059465): 제목 줄 + [숫자 칸 56×28 · 막대(길 12 · 손잡이 16×28)] — 우리 .rng(제목 글 · output · range)를 그 꼴로.
+   output 은 그대로 두고(앱이 값을 적는 곳) NAI 배치에서는 숨긴다. 숫자 칸은 output·막대 값을 따라가고, 숫자 칸에 쓴 값은 막대에 넣어 원래 동작(input·change)을 부른다.
+   data-uncap 칸(바이브·레퍼런스 세기 등 — NAI uncap·allowNegative)은 막대 범위 밖 값도 «du-value» 로 알린다. 3단 배치에서는 숫자 칸을 숨기고 예전 모양 그대로. */
+function nlDu(lb) {
+  const rg = lb.querySelector('input[type=range]'); if (!rg || lb.dataset.du) return;
+  lb.dataset.du = '1';
+  const out = lb.querySelector('output'), t = nlH('span', 'du-t'), row = nlH('span', 'du-row'), num = nlH('input', 'du-n');
+  for (const n of [...lb.childNodes]) if (n !== out && n !== rg && !(n.nodeType === 1 && n.matches('input, select, button'))) t.appendChild(n);
+  num.type = 'number'; num.step = rg.step || 'any'; if (!lb.hasAttribute('data-uncap')) { num.min = rg.min; num.max = rg.max; }
+  num.setAttribute('aria-label', t.textContent.trim());
+  lb.insertBefore(t, lb.firstChild); row.appendChild(num); row.appendChild(rg); lb.appendChild(row);
+  const shown = () => { const o = out && out.textContent.trim(); return o !== '' && o != null && !isNaN(+o) ? o : rg.value; };
+  const show = () => { if (document.activeElement !== num) num.value = shown(); };
+  show();
+  rg.addEventListener('input', show); rg.addEventListener('change', show);
+  if (out) { lb._duObs = new MutationObserver(show); lb._duObs.observe(out, { childList: true, characterData: true, subtree: true }); }
+  const apply = () => {
+    let v = +num.value; if (num.value === '' || !isFinite(v)) { show(); return; }
+    const lo = +rg.min, hi = +rg.max, unc = lb.hasAttribute('data-uncap');
+    if (!unc) v = Math.min(hi, Math.max(lo, v));
+    rg.value = String(Math.min(hi, Math.max(lo, v)));
+    rg.dispatchEvent(new Event('input', { bubbles: true })); rg.dispatchEvent(new Event('change', { bubbles: true }));
+    if (unc) rg.dispatchEvent(new CustomEvent('du-value', { detail: v }));
+    num.value = unc ? String(v) : shown();
+  };
+  num.addEventListener('change', apply);
+  num.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); num.blur(); } });
+}
+function nlDuAll(root) { if (root) for (const lb of root.querySelectorAll('label.rng:not([data-du])')) nlDu(lb); }
+/* NAI 배치를 나갈 때: 슬라이더를 원래 꼴(제목 글 · output · range)로 되돌린다 — 3단 배치의 칸 자리·순번이 그대로여야 한다 */
+function nlDuUndo(lb) {
+  if (!lb.dataset.du) return;
+  const t = lb.querySelector(':scope > .du-t'), row = lb.querySelector(':scope > .du-row'), rg = row && row.querySelector('input[type=range]');
+  if (t) { while (t.firstChild) lb.insertBefore(t.firstChild, t); t.remove(); }
+  if (rg) lb.appendChild(rg);
+  if (row) row.remove();
+  if (lb._duObs) { lb._duObs.disconnect(); lb._duObs = null; }
+  delete lb.dataset.du;
+}
+
 /* ── ☰ 메뉴: 머리 줄 전부(앱 이름·서버 상태·모드 탭·도구 단추·설정) ── */
 function nlMenuShow(on, btn) {
   const pop = NL.menuPop; if (!pop) return;
   NL.menuOpen = !!on && NL.on;
   pop.hidden = !NL.menuOpen;
   if (NL.menuBtn) NL.menuBtn.classList.toggle('on', NL.menuOpen);
-  if (!NL.menuOpen) return;
+  if (!NL.menuOpen || NL.id === 'mobile') return;   // 휴대폰 화면: 머리 줄 바로 아래에 펼친다 (자리 셈 없음)
   // NAI: 메뉴 단추가 든 패널 폭으로, 그 줄 바로 아래에
   const b = btn || NL.menuBtn, panel = b && b.closest('.nl-panel'), bar = b && (b.closest('.nl-row.bar') || b);
   if (!panel || !bar) return;
@@ -807,8 +1190,9 @@ document.addEventListener('mousedown', e => {
 window.addEventListener('resize', () => {
   clearTimeout(NL.rzT);
   NL.rzT = setTimeout(() => {
-    if (NL.on !== nlWanted()) { nlSync(); return; }
+    if (NL.on !== nlWanted() || (NL.on && NL.id !== nlCur().id)) { nlSync(); return; }
     if (!NL.on) return;
+    if (NL.id === 'mobile') { nlFitBars(); return; }
     const p = nlPreset(); if (p && nlSigSqueeze(p)) nlRender(); else { nlFitBars(); nlMenuShow(NL.menuOpen); }
   }, 120);
 });

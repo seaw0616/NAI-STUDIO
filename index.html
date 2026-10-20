@@ -26,6 +26,8 @@ try {
   document.documentElement.dataset.theme = _q || _s.theme || 'violet';
 } catch (e) {}
 </script>
+<!-- 그림판 3D 모델 레이어(model3d.js)가 처음 쓸 때 불러오는 공개 라이브러리 자리 (assets/three, 서버 /vendor/three/) -->
+<script type="importmap">{"imports":{"three":"/vendor/three/build/three.module.min.js","three/addons/":"/vendor/three/jsm/","@pixiv/three-vrm":"/vendor/three/vrm/three-vrm.module.min.js"}}</script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -51,7 +53,7 @@ try {
     <button id="ytNowNext" class="ic" title="다음 곡">⏭</button>
   </div>
   <nav class="top-actions">
-    <button id="anlas" class="pill gold" title="Anlas 잔량">◈ —</button>
+    <span id="anlasBox" class="anl-box"><button id="anlas" class="pill gold" title="Anlas 잔량"><span class="anl-k">Anlas:</span><span class="anl-n">—</span><span class="anl-i" data-nic style="--nic:var(--nic-AnlaIcon)">◈</span></button><button id="anlasPlus" class="anl-plus" type="button" title="Anlas 사기 — NAI 사이트를 엽니다" aria-label="Anlas 사기"><span data-nic style="--nic:var(--nic-PlusIcon)">＋</span></button></span>
     <button id="btnTagSearch" class="pill" title="태그 검색 (Ctrl+K)">🔎<span class="lbl"> 태그</span></button>
     <button id="btnArtist" class="pill" title="작가 태그 찾아보기 — 단부루 실제 그림 샘플·비슷한 작가 추천">🎨<span class="lbl"> 작가</span></button>
     <button id="btnAiPrompt" class="pill" title="AI 프롬프트 생성 — 한국어 장면 설명을 단부루 태그로 (Gemini)">✨<span class="lbl"> AI</span></button>
@@ -136,25 +138,31 @@ try {
   <aside id="left" class="col">
     <div class="card">
       <div class="card-body tight">
-        <div class="row nowrap">
-          <select id="model" style="flex:1"></select>
-          <span id="modelKind" class="kind"></span>
+        <div class="nmm" id="modelRow">
+          <div class="nmm-pill"><span class="nmm-lbl">모델</span><select id="model" class="nmm-sel" aria-label="모델 고르기"></select><span id="modelKind" class="kind" hidden></span></div>
+          <div class="nmm-pill" id="furryRow" hidden><span class="nmm-lbl">모드</span><button type="button" id="modeBtn" class="nmm-mode"></button><input type="checkbox" id="furryMode" hidden></div>
+          <div class="nmm-pill" id="effortSeg" hidden title="NAI 의 생성 모드(Effort). 「절약」은 Anlas·Opus 사용량을 덜 쓰는 대신, 스텝 14·샘플러·네거티브 프리셋(Heavy)이 고정되고 직접 쓴 네거티브는 쓰이지 않습니다."><span class="nmm-lbl">생성 모드</span><div class="nmm-eff"><button data-e="high">보통</button><button data-e="medium">절약</button></div></div>
         </div>
-        <div class="seg mini" id="effortSeg" hidden title="NAI 의 생성 모드(Effort). 「절약」은 더 빠르고 Anlas·Opus 사용량을 덜 쓰는 대신, 스텝 14·샘플러·네거티브 프리셋(Heavy)이 고정되고 직접 쓴 네거티브는 쓰이지 않습니다.">
-          <span class="seg-label">생성 모드</span><button data-e="high">보통</button><button data-e="medium">절약</button>
-        </div>
-        <div class="row nowrap">
-          <select id="sizePreset" style="flex:1;min-width:0"></select>
-          <div class="wh" style="width:132px;flex-shrink:0">
-            <input type="number" id="w" step="64" min="64" max="2048" title="가로"><span>×</span>
-            <input type="number" id="h" step="64" min="64" max="2048" title="세로">
+        <div class="nres" id="resBox">
+          <div class="nres-top">
+            <div class="nres-title">크기</div>
+            <div class="nres-box" id="resWH">
+              <input type="number" id="w" step="64" min="64" aria-label="가로" title="가로">
+              <button type="button" id="btnSwap" class="nres-x" title="가로·세로 바꾸기">×</button>
+              <input type="number" id="h" step="64" min="64" aria-label="세로" title="세로">
+            </div>
           </div>
-          <button id="btnSwap" class="ic" title="가로/세로 바꾸기">⇄</button>
+          <div class="nres-bot">
+            <select id="sizeCat" class="nres-cat" aria-label="크기 분류"></select>
+            <div class="nres-shape" id="sizeShape">
+              <button type="button" data-s="Landscape" title="가로"><i class="rs-land" data-nic style="--nic:var(--nic-ResLandscapeIcon)"></i></button><button type="button" data-s="Portrait" title="세로"><i class="rs-port" data-nic style="--nic:var(--nic-ResPortraitIcon)"></i></button><button type="button" data-s="Square" title="정사각"><i class="rs-sq" data-nic style="--nic:var(--nic-ResSquareIcon)"></i></button>
+            </div>
+          </div>
         </div>
+        <div class="ncount" id="countBox"><div class="nres-title">장수</div>
         <div class="seg mini" id="batchSeg" title="한 번에 생성할 장수">
-          <span class="seg-label">장수</span>
           <button data-n="1" class="on">1</button><button data-n="2">2</button><button data-n="3">3</button><button data-n="4">4</button><button data-n="5">5</button><button data-n="6">6</button><button data-n="7">7</button><button data-n="8">8</button>
-        </div>
+        </div></div>
       </div>
     </div>
 
@@ -214,6 +222,7 @@ try {
             <div class="i2i-ctl">
               <label class="rng">Strength <output id="strengthV"></output><input type="range" id="strength" min="0.01" max="0.99" step="0.01"></label>
               <label class="rng">Noise <output id="noiseV"></output><input type="range" id="noise" min="0" max="0.99" step="0.01"></label>
+              <label class="rng" hidden>Strength <output id="inpStrengthV"></output><input type="range" id="inpStrength" min="0.01" max="1" step="0.01" title="인페인트 세기 (NAI inpaintImg2ImgStrength — 바탕 그림 세기와 따로, 기본 1)"></label>
               <div class="row"><button id="btnPaintNew" class="btn sm" title="빈 그림판을 지금 해상도로 열어 직접 그립니다 — 저장하면 바탕 그림이 됩니다 (NAI 바탕 그림 칸의 펜)">✏ 새로 그리기</button><button id="btnEditI2i" class="btn sm" hidden title="바탕 그림을 그림판에서 고칩니다 — 색칠·지우기·그림 넣기·캔버스 늘리기 (NAI 편집)">✏ 편집</button><button id="btnMask" class="btn sm" title="그림판 마스크 모드 — 칠한 곳만 다시 그립니다. 그림에 색을 칠하거나 캔버스를 늘려(아웃페인트) 그릴 수도 있습니다 (NAI 인페인트)">🖌 인페인트</button><button id="btnI2iClear" class="btn sm danger">✕</button><span id="maskState" class="hint"></span></div>
             </div>
           </div>
@@ -249,7 +258,7 @@ try {
           <div class="grid2"><label class="ck"><input type="checkbox" id="smea"> SMEA</label><label class="ck"><input type="checkbox" id="smeaDyn"> SMEA DYN</label></div>
         </div>
         <div id="v4Box" hidden><label class="ck"><input type="checkbox" id="legacyUc"> 레거시 프롬프트 컨디셔닝</label></div>
-        <div class="row" style="justify-content:flex-end"><button id="btnAiReset" class="btn xs ghost" title="NAI «Reset Settings»와 같습니다. 스텝·가이던스·샘플러·Variety+ 같은 생성 설정과 시드를 이 모델의 기본값으로 되돌립니다. 크기·장수·프롬프트·네거티브·캐릭터는 그대로 둡니다.">↺ 생성 설정 기본값으로</button></div>
+        <div class="row" style="justify-content:flex-end"><button id="btnAiReset" class="nai-reset" aria-label="생성 설정 기본값으로" title="생성 설정 기본값으로 (NAI «Reset Settings») — 스텝·가이던스·샘플러·Variety+ 같은 생성 설정과 시드를 이 모델의 기본값으로 되돌립니다. 크기·장수·프롬프트·네거티브·캐릭터는 그대로 둡니다."><span data-nic style="--nic:var(--nic-DotResetIcon)">↺</span></button></div>
       </div>
     </details>
 
@@ -261,7 +270,6 @@ try {
         <div class="grid2"><label class="ck"><input type="checkbox" id="variety"> Variety+</label><label class="ck"><input type="checkbox" id="decrisper"> Decrisper</label></div>
         <label class="ck" title="켜면 프롬프트 칸에 커서를 둘 때 아래에 청크 칩 띠가 뜹니다. 기본은 꺼져 있습니다 — 글 쓰는 데 걸리적거린다는 얘기가 있었습니다."><input type="checkbox" id="chunkFloatOn"> 청크 칩 띠 띄우기 <span class="hint">(프롬프트 칸을 누르면 청크 칩이 아래에 뜹니다)</span></label>
         <label class="ck" title="{tag}·[tag]·1.2::tag:: 같은 가중치 표기를 프롬프트 칸에서 색으로 보여줍니다. 올린 건 빨강, 내린 건 파랑이고 진할수록 세게 준 것입니다. 청크 칩 색은 그대로 같이 보입니다."><input type="checkbox" id="emphHl"> 가중치 강조 표시 <span class="hint">({tag} · 1.2::tag::)</span></label>
-        <label class="ck" id="furryRow" hidden title="프롬프트 맨 앞에 fur dataset, 을 붙입니다 (NAI 의 Furry mode 와 같습니다)."><input type="checkbox" id="furryMode"> Furry 모드 <span class="hint">fur dataset</span></label>
         <label class="ck" id="transpRow" hidden title="배경을 투명하게 (V5 전용). 인물만 남기고 알파 채널로 뽑습니다."><input type="checkbox" id="transparent"> 투명 배경 <span class="hint">V5 전용</span></label>
         <label class="ck" title="NAI 웹과 동일: 프롬프트에 nsfw가 없으면 네거티브 맨 앞에 'nsfw, ' 자동 추가"><input type="checkbox" id="autoNsfw"> 네거티브에 nsfw 자동 추가 (NAI 웹과 동일)</label>
         <label class="ck" title="(a/b/c) 와 a/b/c 를 랜덤 선택으로 씁니다. fate/zero, (fate/apocrypha), k/da 처럼 슬래시가 이름에 들어간 정상 태그가 깨지므로 기본은 꺼둡니다. &lt;a|b|c&gt; 와 &lt;조각이름&gt; 은 이 설정과 무관하게 항상 동작합니다."><input type="checkbox" id="slashWild"> 슬래시 와일드카드 (a/b/c) 사용 — 태그가 깨질 수 있음</label>

@@ -60,6 +60,43 @@ NAI Studio — 서드파티 고지
    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
    THE SOFTWARE.
 
+아래 9~13 번은 그림판 3D 모델 레이어(model3d.js)가 쓰며, assets/three 에 원본 그대로 들어 있습니다.
+MIT License 인 것은 위 8) 의 허가 글과 같은 조건이고, 저작권 표시는 각 줄에 적었습니다.
+
+9) three.js r182 (본체·GLTFLoader·TGALoader·BufferGeometryUtils·OrbitControls·TransformControls)
+   three.js r171 (MMDLoader·MMDAnimationHelper·MMDPhysics·CCDIKSolver·MMDToonShader 와 함께 실린 ammo.wasm·mmdparser)
+   https://github.com/mrdoob/three.js   —   MIT License
+   Copyright © 2010-2025 three.js authors
+
+10) @pixiv/three-vrm 3.5.5
+   https://github.com/pixiv/three-vrm   —   MIT License
+   Copyright (c) 2019-2026 pixiv Inc.
+
+11) JSZip 3.10.1 (MIT 또는 GPLv3 가운데 MIT 로 씀, 안에 든 pako 도 MIT)
+   https://github.com/Stuk/jszip   —   MIT License
+   Copyright (c) 2009-2016 Stuart Knightley, David Duponchel, Franz Buchinger, António Afonso
+
+12) mmd-parser (three.js r171 examples/jsm/libs/mmdparser.module.js)
+   https://github.com/takahirox/mmd-parser   —   MIT License
+   Copyright (c) 2016 Takahiro
+
+13) ammo.js (Bullet 물리 엔진을 옮긴 것, three.js r171 examples/jsm/libs/ammo.wasm.*)
+   https://github.com/kripken/ammo.js   —   zlib License
+   Copyright (c) 2011 ammo.js contributors
+   This software is provided 'as-is', without any express or implied
+   warranty.  In no event will the authors be held liable for any damages
+   arising from the use of this software.
+   Permission is granted to anyone to use this software for any purpose,
+   including commercial applications, and to alter it and redistribute it
+   freely, subject to the following restrictions:
+   1. The origin of this software must not be misrepresented; you must not
+      claim that you wrote the original software. If you use this software
+      in a product, an acknowledgment in the product documentation would be
+      appreciated but is not required.
+   2. Altered source versions must be plainly marked as such, and must not be
+      misrepresented as being the original software.
+   3. This notice may not be removed or altered from any source distribution.
+
 6·7 번 데이터의 권리자께서 삭제를 요청하시면 즉시 배포본에서 제거하겠습니다.
 
 이 프로그램은 NovelAI, Danbooru, YouTube, Google 과 아무런 제휴 관계가 없습니다.

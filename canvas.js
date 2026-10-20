@@ -26,8 +26,15 @@
    · 색조 조정(색상 −180~180° · 채도·밝기 −100~100%) · 마스크 표시 설정(색·불투명도·테두리·무늬)
    · 그림 파일을 끌어다 놓거나 붙여 넣으면 새 레이어(지금 레이어가 마스크면 그 모양을 마스크로)
    · 되돌리기 기록은 200MB 까지 · 다시 열면 같은 그림이면 레이어가 그대로
+     (NAI canvas-state-cache: 저장할 때 저장한 그림의 SHA-256 으로 IndexedDB 에 남겨 앱을 다시 켜도, 최근 5개 · 같은 앱 안에서는 닫기만 해도 이어서)
    · 저장: 일반 = 레이어를 합친 그림 / 마스크 = 1/8 마스크 + 레이어를 합친 바탕 그림 + 집중 영역
-   NAI 와 다르게 한 것: 3D 모델 레이어는 아직 없다(대조표 D1-13) · 화면 그리기는 WebGL 대신 2D 캔버스(결과 픽셀은 같은 셈)
+   · 3D 모델 레이어 (12.26, NAI 빌드 b50892a — 관리자·도구·파일 읽기는 model3d.js): 레이어 목록의 «＋ 3D» · 모델 넣기(glb·gltf·vrm·pmx·pmd·zip·그림)
+     · 도구 모델 변형(T)·포즈(P) · 이동·회전·크기 · 3D 설정(투영·시야각·조명·빛 방향·그림자·품질·뼈대 보이기·물리) · 뼈대 목록 · 표정·모프 · 동작 재생
+     · 3D 레이어를 고르면 그 자리에 움직이는 3D 화면이 뜬다(NAI TP — 바탕은 테마에 따라 흰색·검은색, 바닥 격자·축, WASDQE 로 카메라 이동)
+     · 3D 레이어는 되돌리기 기록에 들어가지 않는다(NAI 와 같음) · 다시 열면 모델·자세·조명·카메라가 그대로(NAI 가 그림 해시로 기억하는 것과 같은 내용)
+   NAI 와 다르게 한 것: 화면 그리기는 WebGL 대신 2D 캔버스(결과 픽셀은 같은 셈) · 마스크 모드로 저장할 때도 3D 레이어를 새로 그려 합친다
+     (NAI 는 마지막으로 그려 둔 3D 그림을 쓴다 — 카메라만 돌리고 저장하면 돌리기 전 모습이 들어간다)
+     · 마스크 모드 기억: NAI 는 마스크 그림의 해시로 남기고 바탕 그림의 해시로 찾아 다시 열어도 되살아나지 않는다 → 저장한 바탕 그림의 해시로 남긴다
    ═══════════════════════════════════════════════════════════════════════════ */
 
 const CV_DEF = { drawSize: 20, eraseSize: 20, maskSize: 4, safeAreaSize: 96, maskDrawShape: 'circle', brushTip: 'round', pressureSensitivity: false, fillTolerance: 15, blurIntensity: 50 };
@@ -36,6 +43,7 @@ const CV_UNDO_CAP = 0xc800000;        // 200MB (NAI UNDO_MEMORY_CAP)
 const CV_MAX_SIDE = 2560;             // 열 때 긴 쪽 한도 (NAI 와 같음)
 const CV_FOCUS_MAX = 589824;          // 집중 영역 넓이 한도 768×768 (그림 화소)
 const CV_SIZE_KEY = { draw: 'drawSize', erase: 'eraseSize', mask: 'maskSize' };
+const CV_M3D_ACCEPT = '.glb,.gltf,.vrm,.pmx,.pmd,.zip,.png,.jpg,.jpeg,.webp,.bmp,.gif';   // NAI 3D «Import» 단추가 받는 파일 (model3d.js MODEL_ACCEPT 와 같아야 한다)
 const CV_TOOLS = {
   normal: [
     { n: 'draw', ic: '✏️', t: '그리기 (B)', size: 'draw' },
@@ -53,6 +61,11 @@ const CV_TOOLS = {
     { n: 'maskZoomSelection', ic: '⬚', t: '집중 영역 (S) — 이 네모 안만 크게 키워 다시 그립니다' },
     { n: 'maskFill', ic: '🪣', t: '마스크 채우기 (G)' },
   ],
+  // NAI model3dTools = [gi «Model Transform», gt «Pose»] — 3D 레이어를 고르면 이 둘만 나온다
+  model3d: [
+    { n: 'modelTransform', ic: '✥', t: '모델 변형 (T) — 모델을 눌러 고르고, 손잡이로 옮기고 돌리고 크기를 바꿉니다' },
+    { n: 'pose', ic: '🦴', t: '포즈 (P) — 파란 점(뼈)을 눌러 고르고, 손잡이로 돌립니다 · 모델 몸을 누르면 모델 변형으로' },
+  ],
 };
 const CV = {
   el: null, open: false, mode: 'normal', w: 0, h: 0, layers: [], sel: 0, nextId: 1,
@@ -60,16 +73,20 @@ const CV = {
   view: { s: 1, x: 0, y: 0 }, dpr: 1, ptr: null, pan: null, space: false, act: null,
   focus: null, selT: null, onSave: null, src: null, resized: false, hsv: null, layersOpen: true,
   disp: { color: 0, opacity: 50, pattern: 'solid', border: true },
+  // 3D 레이어: 손잡이 방식(NAI 그림판 상태 «translate»에서 시작) · 지금 3D 화면 · 지금 3D 도구 · 열린 칸(뼈대 목록·표정·3D 설정)
+  m3dMode: 'translate', m3dView: null, m3dTool: null, m3dBones: false, m3dMorph: false,
+  storeP: null,   // 저장한 레이어를 IndexedDB 에 쓰는 중이면 그 Promise (NAI canvas-state-cache)
 };
-const CV_CACHE = new WeakMap();       // 그림(Blob)마다 마지막 레이어 — NAI 처럼 다시 열면 이어서 고친다
+const CV_CACHE = new WeakMap();       // 그림(Blob)마다 마지막 레이어 — 이 앱 안에서 다시 열면 이어서 고친다 (껐다 켜도 남기는 것은 cvStorePut)
 
 /* ── 작은 도구들 ── */
 function cvMk(w, h) { const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h)); return c; }
 function cvCtx(c) { return c.getContext('2d', { willReadFrequently: true }); }
 function cvCur() { return CV.layers[CV.sel]; }
 function cvIsMaskLayer(L) { return !!L && L.type === 'mask'; }
-function cvToolDef(n) { return CV_TOOLS.normal.concat(CV_TOOLS.mask).find(t => t.n === n); }
-function cvTools() { return CV_TOOLS[cvIsMaskLayer(cvCur()) ? 'mask' : 'normal']; }
+function cvIsM3d(L) { return !!L && L.type === 'model3d'; }
+function cvToolDef(n) { return CV_TOOLS.normal.concat(CV_TOOLS.mask, CV_TOOLS.model3d).find(t => t.n === n); }
+function cvTools() { const L = cvCur(); return CV_TOOLS[cvIsMaskLayer(L) ? 'mask' : cvIsM3d(L) ? 'model3d' : 'normal']; }
 function cvOpaque(c) { const m = String(c).match(/^rgba?\(([^,]+),([^,]+),([^,]+)(?:,[^)]+)?\)$/); return m ? `rgb(${m[1].trim()}, ${m[2].trim()}, ${m[3].trim()})` : c; }
 function cvRgb(c) { const m = String(c).match(/(\d+)\D+(\d+)\D+(\d+)/); return m ? { r: +m[1], g: +m[2], b: +m[3] } : { r: 0, g: 0, b: 0 }; }
 function cvHex(c) { const { r, g, b } = cvRgb(c); return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join(''); }
@@ -104,9 +121,12 @@ function cvRemoveLayer(i) {
   if (CV.layers.length <= 1) return;
   if (CV.mode === 'mask' && CV.layers[i].type === 'mask' && CV.layers.filter(l => l.type === 'mask').length <= 1) return;
   cvCommitSelection();
+  const L = CV.layers[i], m3 = cvIsM3d(L);
+  if (m3) { if (CV.m3dView && CV.m3dView.L === L) cvM3dDetach(); L.m3d.dispose(); }   // NAI removeLayer: 3D 관리자를 버리고 기록을 비운다
   CV.layers.splice(i, 1);
   if (CV.sel >= CV.layers.length) CV.sel = CV.layers.length - 1;
-  cvSaveState(); cvSyncTools(); cvUI();
+  if (m3) cvClearHistory(); else cvSaveState();
+  cvSyncTools(); cvUI();
 }
 function cvMoveLayer(from, to) {   // 마스크 레이어와 일반 레이어는 서로 자리를 넘지 않는다 (NAI moveLayer)
   if (to < 0 || to >= CV.layers.length || from === to) return;
@@ -137,14 +157,120 @@ function cvSwitchTool(n, quiet) {
   if (prev && prev.size) CV.ts[CV_SIZE_KEY[prev.size]] = CV.ts.size;
   if (next.size) CV.ts.size = CV.ts[CV_SIZE_KEY[next.size]];
   CV.lastTool = CV.tool; CV.tool = n;
+  cvM3dToolSync();
   if (!quiet) cvUI(); else cvRender();
 }
+
+/* ═══ 3D 모델 레이어 (NAI cD.addModel3DLayer · TP 3D 화면 · 도구 켜고 끄기 — 관리자는 model3d.js) ═══ */
+let CV_M3D_P = null, CV_M3D = null;   // CV_M3D: 한 번 불러온 뒤에는 도구를 바로(같은 순간에) 켜기 위해 모듈을 들고 있다
+function cvM3dLib() { return CV_M3D_P || (CV_M3D_P = import('/model3d.js').then(M => (CV_M3D = M)).catch(e => { CV_M3D_P = null; throw e; })); }
+function cvM3dLayerOf(mgr, id, opacity) {
+  return { id: id || 'layer-' + (CV.nextId++), type: 'model3d', m3d: mgr, canvas: mgr.outputCanvas, ctx: mgr.outputCtx, scale: 1, opacity: opacity != null ? opacity : 1, ver: 0 };
+}
+/* 3D 레이어 더하기: 마스크 레이어들 바로 아래에 넣고 기록을 비운다 (NAI 와 같음) */
+async function cvAddModel3DLayer() {
+  cvCommitSelection();
+  let M, mgr;
+  try { M = await cvM3dLib(); mgr = await M.createModel3DManager(CV.w, CV.h); }
+  catch (e) { logErr('3D 레이어를 만들지 못했습니다: ' + e.message); toast('3D 레이어를 만들지 못했습니다 — ' + e.message, 'err'); return null; }
+  if (!CV.open) { mgr.dispose(); return null; }
+  mgr.render();
+  const L = cvM3dLayerOf(mgr), k = CV.layers.findIndex(l => l.type === 'mask');
+  if (k >= 0) { CV.layers.splice(k, 0, L); CV.sel = k; } else { CV.layers.push(L); CV.sel = CV.layers.length - 1; }
+  cvClearHistory(); cvSyncTools(); cvUI();
+  return L;
+}
+/* 다시 열 때: 기억해 둔 3D 레이어를 새로 만든다 (NAI I4: 모델 파일을 다시 읽고 자세·고른 모델·조명·카메라를 되돌린다) */
+async function cvM3dRestore(list) {
+  const out = [];
+  let M; try { M = await cvM3dLib(); } catch (e) { logErr('3D 레이어를 되살리지 못했습니다: ' + e.message); toast('3D 레이어를 되살리지 못했습니다 — ' + e.message, 'err'); return out; }
+  for (const it of list) {
+    const mgr = await M.createModel3DManager(CV.w, CV.h), st = it.state;
+    for (const m of st.models) {
+      try { const id = await mgr.addModelFromData(m.fileName, m.fileData); mgr.applyPoseSnapshot(m.poseSnapshot, id); }
+      catch (e) { logErr('3D 모델을 되살리지 못했습니다(' + m.fileName + '): ' + e.message); }
+    }
+    if (st.selectedModelId !== null) mgr.selectedModelId = st.selectedModelId;
+    mgr.restoreRenderSettings(st.renderSettings, st.cameraState); mgr.render(); mgr.renderToOutput();
+    out.push(cvM3dLayerOf(mgr, it.id, it.opacity));
+  }
+  return out;
+}
+function cvM3dSerialize() { return CV.layers.filter(cvIsM3d).map(L => ({ id: L.id, opacity: L.opacity, state: L.m3d.getSerializableState() })); }
+function cvM3dDisposeAll() { cvM3dDetach(); for (const L of CV.layers) if (cvIsM3d(L)) { try { L.m3d.dispose(); } catch (e) { logErr('3D 레이어 정리 실패: ' + e.message); } } }
+/* 지금 레이어가 3D 면 그 자리에 3D 화면을 띄운다 (NAI: 3D 레이어를 고른 동안 viewportActive, 고르지 않은 3D 레이어는 setLayerActive(false)) */
+function cvM3dSync() {
+  const L = CV.open ? cvCur() : null, want = cvIsM3d(L) ? L : null;
+  if (CV.m3dView && CV.m3dView.L !== want) cvM3dDetach();
+  for (const x of CV.layers) if (cvIsM3d(x)) x.m3d.setLayerActive(x === want);
+  if (want && !CV.m3dView) cvM3dAttach(want);
+  cvM3dToolSync();
+}
+function cvM3dAttach(L) {
+  const view = $('#cvView'); if (!view) return;
+  let box = $('#cvM3d'); if (!box) { box = document.createElement('div'); box.id = 'cvM3d'; box.className = 'cv-m3d'; view.appendChild(box); }
+  const el = L.m3d.getDomElement(); el.style.width = '100%'; el.style.height = '100%'; el.style.display = 'block'; box.appendChild(el);
+  CV.m3dView = { L, box, ro: null }; cvM3dPlace();
+  const r = box.getBoundingClientRect();
+  L.m3d.viewportController.setTransformMode(CV.m3dMode);
+  L.m3d.startViewport(Math.max(1, r.width), Math.max(1, r.height));
+  const ro = new ResizeObserver(es => { for (const e of es) { const { width: w, height: h } = e.contentRect; if (w > 0 && h > 0 && CV.m3dView && CV.m3dView.L === L) L.m3d.viewportController.resize(w, h); } });
+  ro.observe(box); CV.m3dView.ro = ro;
+}
+function cvM3dDetach() {
+  const V = CV.m3dView; if (!V) return;
+  if (CV.m3dTool) { CV.m3dTool.deactivate(); CV.m3dTool = null; }
+  if (V.ro) V.ro.disconnect();
+  if (V.unsub) V.unsub();
+  if (cvM3dSetOpen()) cvM3dSetClose();
+  V.L.m3d.stopViewport();   // NAI stop: 손잡이를 떼고 지금 모습을 그림판 그림으로 남긴다
+  const el = V.L.m3d.getDomElement(); if (el.parentElement === V.box) el.remove();
+  V.box.remove(); CV.m3dView = null; cvBump(V.L);
+  cvM3dAnimUI(); cvM3dSideUI();
+}
+/* 3D 화면 자리 = 그림판 그림이 놓인 자리 (NAI displayRect: 옮긴 만큼·확대한 만큼) */
+function cvM3dPlace() {
+  const V = CV.m3dView; if (!V) return;
+  const v = CV.view, s = V.box.style, l = v.x + 'px', t = v.y + 'px', w = CV.w * v.s + 'px', h = CV.h * v.s + 'px';
+  if (s.left !== l) s.left = l; if (s.top !== t) s.top = t; if (s.width !== w) s.width = w; if (s.height !== h) s.height = h;
+}
+/* 지금 도구가 3D 도구면 그 도구를 3D 화면에 건다 (NAI onActivate·onDeactivate)
+   NAI 는 도구를 바꾸는 그 순간 켠다 — 모델 변형으로 뼈를 누르면 포즈로 바꾸고(포즈는 켤 때 고른 뼈를 푼다) 바로 뒤에 그 뼈를 고른다.
+   그래서 모듈을 불러온 뒤에는 같은 순간에 켜고, 처음 한 번만 불러오기를 기다린다. */
+function cvM3dToolSync() {
+  const V = CV.m3dView, want = V && (CV.tool === 'pose' || CV.tool === 'modelTransform') ? CV.tool : null, T = CV.m3dTool;
+  if (T && (T.name !== want || T.mgr !== (V && V.L.m3d))) { T.deactivate(); CV.m3dTool = null; }
+  if (!want || CV.m3dTool) return;
+  const on = M => {
+    if (!CV.m3dView || CV.m3dView !== V || CV.tool !== want || CV.m3dTool) return;
+    const t = M.makeTool(want);
+    t.activate(V.L.m3d, {
+      saved: () => { cvBump(V.L); cvSaveState(); cvBotUI(); },   // NAI onVersionChange = saveState(지금 레이어)
+      switchTool: (n, then) => { cvSwitchTool(n); if (then) then(); cvM3dSideUI(); },
+    });
+    CV.m3dTool = t;
+  };
+  if (CV_M3D) on(CV_M3D); else cvM3dLib().then(on).catch(e => logErr('3D 도구를 켜지 못했습니다: ' + e.message));
+}
+/* 모델 넣기: 그림판 위 단추·끌어다 놓기·붙여 넣기 (NAI C5 Import · ImageGenImportOverlay — 3D 레이어면 그림도 판으로 넣는다) */
+async function cvM3dImport(L, f, record) {
+  if (!cvIsM3d(L) || !f) return;
+  try {
+    await L.m3d.addModelFromData(f.name, await f.arrayBuffer());
+    L.m3d.render(); L.m3d.renderToOutput(); cvBump(L);
+    if (record) cvSaveState();
+    cvUI();
+  } catch (e) { logErr('3D 모델 넣기 실패(' + f.name + '): ' + e.message); toast('모델을 넣지 못했습니다 — ' + e.message, 'err'); }
+}
+/* 3D 레이어 그림을 새로 그린다 (화면을 띄운 동안은 그 화면 크기로 — NAI renderToOutput) */
+function cvM3dRefresh(L, record) { L.m3d.render(); L.m3d.renderToOutput(); cvBump(L); if (record) cvSaveState(); else { cvRender(); cvLayersUI(); } }
 
 /* ── 되돌리기 (NAI saveState · undo · redo, 바뀌지 않은 레이어는 앞 기록의 픽셀을 같이 쓴다) ── */
 function cvSaveState() {
   const prev = CV.undo[CV.undo.length - 1];
   let owned = 0;
   const data = CV.layers.map(L => {
+    if (cvIsM3d(L)) return { id: L.id, m3d: true };   // NAI: 3D 레이어는 기록에 자리만 남긴다
     const old = prev && prev.data.find(d => d.id === L.id);
     if (old && old.ver === L.ver && old.img.width === L.canvas.width && old.img.height === L.canvas.height) return old;
     const img = L.ctx.getImageData(0, 0, L.canvas.width, L.canvas.height);
@@ -164,11 +290,13 @@ function cvRestore(st) {
     const d = st.data.find(x => x.id === id), m = st.meta.find(x => x.id === id);
     if (!d || !m) continue;
     let L = byId.get(id);
+    if (d.m3d) { if (cvIsM3d(L)) { L.opacity = m.opacity; out.push(L); } continue; }   // 3D 레이어는 그대로 둔다 (NAI restoreState)
     if (!L) { const c = cvMk(d.img.width, d.img.height); L = { id, type: m.type, canvas: c, ctx: cvCtx(c), scale: m.scale, opacity: m.opacity, maskColor: m.maskColor, ver: 0 }; }
     if (L.canvas.width !== d.img.width || L.canvas.height !== d.img.height) { L.canvas.width = d.img.width; L.canvas.height = d.img.height; }
     L.ctx.putImageData(d.img, 0, 0); L.ver = d.ver; L.opacity = m.opacity; L.maskColor = m.maskColor;
     out.push(L);
   }
+  for (const L of CV.layers) if (cvIsM3d(L) && !st.order.includes(L.id)) out.push(L);   // NAI: 기록에 없는 3D 레이어도 버리지 않고 맨 위에
   CV.layers = out; CV.w = st.w; CV.h = st.h;
   CV.sel = Math.min(st.sel || 0, Math.max(0, out.length - 1));
   cvSyncTools();
@@ -189,6 +317,7 @@ function cvClearHistory() { CV.undo = []; CV.redo = []; CV.undoBytes = 0; cvSave
 
 /* ── 합치기 (NAI getImage · getBackgroundImage) ── */
 function cvCompositeNormal() {
+  for (const L of CV.layers) if (cvIsM3d(L)) L.m3d.renderToOutput();   // NAI getImage: 3D 레이어를 지금 모습으로 다시 그린 뒤 합친다
   const c = cvMk(CV.w, CV.h), x = c.getContext('2d');
   for (const L of CV.layers) { if (L.type === 'mask') continue; x.globalAlpha = L.opacity; x.drawImage(L.canvas, 0, 0, CV.w, CV.h); x.globalAlpha = 1; }
   return c;
@@ -221,14 +350,24 @@ async function cvOpen(opts) {
   CV.mode = opts.mode === 'mask' ? 'mask' : 'normal';
   CV.layers = []; CV.sel = 0; CV.nextId = 1; CV.undo = []; CV.redo = []; CV.undoBytes = 0;
   CV.focus = null; CV.selT = null; CV.clone = null; CV.resized = false; CV.hsv = null; CV.onSave = opts.onSave || null; CV.src = opts.image || null;
+  CV.m3dView = null; CV.m3dTool = null; CV.m3dMode = 'translate'; CV.m3dBones = false; CV.m3dMorph = false;   // NAI 그림판을 열 때마다 처음 상태
   CV.ts = Object.assign({ color: 'rgb(0, 0, 0)', opacity: 1, size: 20 }, CV_DEF, S.cvTools || {});
   CV.tool = null;
   const d = S.cvMaskDisp || {}; CV.disp = { color: d.color != null ? d.color : 0, opacity: d.opacity != null ? d.opacity : 50, pattern: d.pattern || 'solid', border: d.border != null ? d.border : true };
-  // 같은 그림을 같은 모드로 다시 열면 레이어를 그대로 (NAI 는 그림 해시로 기억한다)
+  // 같은 그림을 같은 모드로 다시 열면 레이어를 그대로 — 이 앱 안에서는 CV_CACHE, 앱을 다시 켠 뒤에는 NAI 처럼 그림 해시로 IndexedDB 에서
   const cached = CV.src && CV_CACHE.get(CV.src);
+  let stored = null;
+  if (CV.src && !(cached && cached.mode === CV.mode)) {
+    try { stored = await cvStoreGet(CV.src); if (stored && stored.mode !== CV.mode) stored = null; }
+    catch (e) { logErr('그림판: 기억해 둔 레이어를 읽지 못했습니다(새로 엽니다): ' + e.message); }
+  }
+  if (stored) { try { await cvStoreRestore(stored); } catch (e) { stored = null; logErr('그림판: 기억해 둔 레이어를 되살리지 못했습니다(새로 엽니다): ' + e.message); } }
   if (cached && cached.mode === CV.mode) {
     CV.w = cached.st.w; CV.h = cached.st.h; CV.nextId = cached.nextId; CV.layers = [];
+    if (cached.m3d && cached.m3d.length) CV.layers = await cvM3dRestore(cached.m3d);   // 3D 레이어를 먼저 다시 만들어야 기록이 그 자리에 놓는다
     cvRestore(cached.st); CV.focus = cached.focus || null; CV.resized = !!cached.resized;
+  } else if (stored) {
+    // cvStoreRestore 가 레이어·크기·고른 레이어·집중 영역을 채웠다
   } else if (!CV.src) {
     CV.w = Math.max(64, opts.width || 1024); CV.h = Math.max(64, opts.height || 1024);
     if (CV.mode === 'mask') { cvAddLayer(false); cvAddMaskLayer(false); } else cvAddLayer(false);
@@ -279,12 +418,57 @@ function cvMask8Of(c) {        // 1/8 마스크 그림 → {w8,h8,data} (NAI bin
   for (let k = 0; k < out.length; k++) if (d[k * 4 + 3] > 155) { out[k] = 1; any = 1; }
   return { w8: c.width, h8: c.height, data: out, any: !!any };
 }
-function cvClose(saved) {
+/* 다시 열 때 이어서 고치게 남기는 것 — 마지막 기록 + 3D 레이어(모델 파일·자세·조명·카메라, NAI getSerializableState) */
+function cvCacheEntry() {
+  return { mode: CV.mode, st: CV.undo[CV.undo.length - 1], nextId: CV.nextId, focus: CV.focus, resized: CV.resized, m3d: cvM3dSerialize() };
+}
+/* NAI canvas-state-cache (I6·IJ·I1·I0·I4): 저장한 그림의 SHA-256 을 열쇠로 레이어를 IndexedDB 에 남긴다 — 앱을 껐다 켜도, 최근 5개.
+   NAI 와 다른 점: 마스크 모드에서 NAI 는 마스크 그림의 해시로 남기고 다시 열 때는 바탕 그림의 해시로 찾아 한 번도 맞지 않는다
+   → 저장한 바탕 그림(다음 인페인트에 쓰이는 그림)의 해시로 남긴다. 같은 앱 안에서는 닫기만 해도 이어서 고친다(CV_CACHE, 우리 앱). */
+const CV_STORE_KEEP = 5;
+async function cvHash(b) { return [...new Uint8Array(await crypto.subtle.digest('SHA-256', await b.arrayBuffer()))].map(v => v.toString(16).padStart(2, '0')).join(''); }
+async function cvStoreRec() {   // NAI I6 — 그림 레이어는 PNG, 3D 레이어는 모델 파일·자세·조명·카메라(파일이 있는 모델만, NAI filter(fileData))
+  const png = c => new Promise(r => c.toBlob(r, 'image/png')), layers = [];
+  for (const L of CV.layers) {
+    if (cvIsM3d(L)) { const st = L.m3d.getSerializableState(); st.models = st.models.filter(m => m.fileData); layers.push({ id: L.id, type: L.type, opacity: L.opacity, state: st }); }
+    else layers.push({ id: L.id, type: L.type, imageBlob: await png(L.canvas), scale: L.scale, opacity: L.opacity, maskColor: L.maskColor });
+  }
+  return { timestamp: Date.now(), mode: CV.mode, canvasWidth: CV.w, canvasHeight: CV.h, selectedLayer: CV.sel, focus: CV.focus, resized: CV.resized, layers };
+}
+async function cvStorePut(img, rec) {   // NAI IJ + I1: 넣은 뒤 오래된 것부터 지워 5개만 남긴다
+  const key = await cvHash(img); rec.imageHash = key;
+  await idbSet('cvc:' + key, rec);
+  const idx = ((await idbGet('cvcidx')) || []).filter(x => x.key !== key).concat([{ key, timestamp: rec.timestamp }]).sort((a, b) => a.timestamp - b.timestamp);
+  for (const o of idx.splice(0, Math.max(0, idx.length - CV_STORE_KEEP))) await idbDel('cvc:' + o.key);
+  await idbSet('cvcidx', idx);
+}
+async function cvStoreGet(img) { return (await idbGet('cvc:' + await cvHash(img))) || null; }   // NAI I0
+async function cvStoreRestore(r) {   // NAI I4: 레이어를 새로 만든다 · 겹친 번호는 새 번호로(syncNextLayerId)
+  const out = [], ow = CV.w, oh = CV.h;
+  CV.w = r.canvasWidth; CV.h = r.canvasHeight;   // 3D 관리자는 CV.w·CV.h 크기로 만든다
+  try {
+    for (const d of r.layers) {
+      if (d.type === 'model3d') { out.push(...await cvM3dRestore([d])); continue; }
+      const c = cvMk(CV.w / d.scale, CV.h / d.scale), x = cvCtx(c);
+      x.drawImage(await blobToImage(d.imageBlob), 0, 0, c.width, c.height);
+      out.push({ id: d.id, type: d.type, canvas: c, ctx: x, scale: d.scale, opacity: d.opacity, maskColor: d.maskColor, ver: 0 });
+    }
+    if (!out.length || (CV.mode === 'mask' && !out.some(L => L.type === 'mask'))) throw new Error('되살릴 레이어가 없습니다');
+  } catch (e) { for (const L of out) if (cvIsM3d(L)) L.m3d.dispose(); CV.w = ow; CV.h = oh; throw e; }
+  CV.nextId = 1 + Math.max(0, ...out.map(L => +((/^layer-(\d+)$/.exec(L.id) || [])[1] || 0)));
+  const seen = new Set(); for (const L of out) { if (seen.has(L.id)) L.id = 'layer-' + (CV.nextId++); seen.add(L.id); }
+  CV.layers = out; CV.sel = Math.max(0, Math.min(r.selectedLayer, out.length - 1)); CV.focus = r.focus || null; CV.resized = !!r.resized;
+}
+function cvClose(saved, entry) {
   if (!CV.open) return;
   cvCommitSelection();
   if (CV.hsv) cvHsvCancel();
-  if (CV.src) CV_CACHE.set(CV.src, { mode: CV.mode, st: CV.undo[CV.undo.length - 1], nextId: CV.nextId, focus: CV.focus, resized: CV.resized });
+  cvM3dDetach();
+  const e = entry || cvCacheEntry();
+  if (CV.src) CV_CACHE.set(CV.src, e);
+  cvM3dDisposeAll();   // 3D 레이어의 WebGL 은 닫을 때 놓는다 — 다시 열면 기억한 내용으로 새로 만든다
   CV.open = false; R.cvOpen = false; CV.el.hidden = true; $('#cvPop').hidden = true;
+  cvM3dAnimUI(); cvM3dSideUI();
   if (!saved) toast('그림판을 닫았습니다 — 저장하지 않은 고침은 다시 열면 이어서 할 수 있습니다');
 }
 async function cvSave() {
@@ -301,19 +485,27 @@ async function cvSave() {
       res.focus = { x: x0, y: y0, width: Math.max(f.from.x, f.to.x) - x0, height: Math.max(f.from.y, f.to.y) - y0, fullSizeMask: m.full };
     } else res.focus = null;
   }
-  const cb = CV.onSave;
-  if (CV.src) CV_CACHE.set(CV.src, { mode: CV.mode, st: CV.undo[CV.undo.length - 1], nextId: CV.nextId, focus: CV.focus, resized: CV.resized });
+  const cb = CV.onSave, entry = cvCacheEntry();
+  if (CV.src) CV_CACHE.set(CV.src, entry);
   // 저장한 그림으로도 다시 열면 이어서 고치게 같은 기록을 붙인다
-  if (res.image) CV_CACHE.set(res.image, { mode: CV.mode, st: CV.undo[CV.undo.length - 1], nextId: CV.nextId, focus: CV.focus, resized: CV.resized });
-  cvClose(true);
+  if (res.image) CV_CACHE.set(res.image, entry);
+  // 앱을 다시 켠 뒤에도 (NAI: 저장할 때 저장한 그림의 해시로) — 3D 관리자를 버리기 전에 담는다
+  let rec = null;
+  if (res.image) { try { rec = await cvStoreRec(); } catch (e) { logErr('그림판: 레이어를 기억하지 못했습니다: ' + e.message); } }
+  cvClose(true, entry);
+  if (rec) CV.storeP = cvStorePut(res.image, rec).catch(e => logErr('그림판: 레이어를 기억하지 못했습니다: ' + e.message));
   if (cb) await cb(res);
 }
 
 /* ── 화면 (확대·옮기기·그리기) ── */
+function cvFitScale() {   // NAI Iq fitScale: 둘레 여유를 뺀 자리에 그림이 다 들어가는 배율
+  const r = $('#cvView').getBoundingClientRect();
+  return r.width && r.height ? Math.max(0.01, Math.min((r.width - 40) / CV.w, (r.height - 40) / CV.h)) : 1;
+}
 function cvFit() {
   const v = $('#cvView'), r = v.getBoundingClientRect();
   if (!r.width || !r.height) return;
-  const s = Math.max(0.01, Math.min((r.width - 40) / CV.w, (r.height - 40) / CV.h));
+  const s = cvFitScale();
   CV.view = { s, x: (r.width - CV.w * s) / 2, y: (r.height - CV.h * s) / 2 };
   cvResizeScreen(); cvRender();
 }
@@ -324,21 +516,41 @@ function cvResizeScreen() {
   sc.style.width = r.width + 'px'; sc.style.height = r.height + 'px';
 }
 function cvRender() { if (!CV.open || CV._raf) return; CV._raf = requestAnimationFrame(() => { CV._raf = 0; cvDraw(); }); }
-let CV_CHECK = null;
-function cvChecker(x) {
-  if (!CV_CHECK) { const t = cvMk(16, 16), c = t.getContext('2d'); c.fillStyle = '#cfcfcf'; c.fillRect(0, 0, 16, 16); c.fillStyle = '#ffffff'; c.fillRect(0, 0, 8, 8); c.fillRect(8, 8, 8, 8); CV_CHECK = t; }
-  return x.createPattern(CV_CHECK, 'repeat');
+/* 투명한 곳 체크무늬 — NAI 그림판 C1: 흰 바탕에 #A0A0A0 15px 칸(화면 화소, 확대해도 칸 크기 그대로) /
+   레이어 작은 그림 TH: 흰 바탕에 #a0a0a0 8px 칸 */
+const CV_CHECK = {};
+function cvChecker(x, small) {
+  const k = small ? 'thumb' : 'stage';
+  if (!CV_CHECK[k]) { const n = small ? 16 : 30, t = cvMk(n, n), c = t.getContext('2d'); c.fillStyle = '#ffffff'; c.fillRect(0, 0, n, n); c.fillStyle = small ? '#a0a0a0' : '#A0A0A0'; c.fillRect(0, 0, n / 2, n / 2); c.fillRect(n / 2, n / 2, n / 2, n / 2); CV_CHECK[k] = t; }
+  return x.createPattern(CV_CHECK[k], 'repeat');
+}
+/* 3D 화면을 띄운 동안의 바탕 — NAI: 테마 바탕색(bg0)이 밝으면 흰색, 어두우면 검은색 (체크무늬 없음)
+   밝다 = colorIsLight: polished getLuminance(sRGB 를 선형으로 바꾼 상대 휘도, 소수 셋째 자리) > 0.179 */
+let CV_BG = null;
+function cvStageBg() {
+  const m = getComputedStyle(document.documentElement).getPropertyValue('--bg0').trim();
+  if (CV_BG && CV_BG.k === m) return CV_BG.v;
+  const c = cvMk(1, 1), x = c.getContext('2d'); x.fillStyle = m || '#000'; x.fillRect(0, 0, 1, 1);
+  const [r, g, b] = [...x.getImageData(0, 0, 1, 1).data].slice(0, 3).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+  CV_BG = { k: m, v: parseFloat((0.2126 * r + 0.7152 * g + 0.0722 * b).toFixed(3)) > 0.179 ? '#ffffff' : '#000000' };
+  return CV_BG.v;
 }
 function cvDraw() {
-  const sc = $('#cvScreen'), x = sc.getContext('2d'), v = CV.view, d = CV.dpr;
+  const sc = $('#cvScreen'), x = sc.getContext('2d'), v = CV.view, d = CV.dpr, m3on = !!CV.m3dView;
   x.setTransform(1, 0, 0, 1, 0, 0); x.clearRect(0, 0, sc.width, sc.height);
   x.setTransform(d, 0, 0, d, 0, 0);
-  x.save(); x.translate(v.x, v.y); x.fillStyle = cvChecker(x); x.fillRect(0, 0, CV.w * v.s, CV.h * v.s); x.restore();
+  x.save(); x.translate(v.x, v.y);
+  if (m3on) { x.fillStyle = cvStageBg(); x.fillRect(0, 0, CV.w * v.s, CV.h * v.s); } else { x.fillStyle = cvChecker(x); x.fillRect(0, 0, CV.w * v.s, CV.h * v.s); }
+  x.restore();
   x.setTransform(d * v.s, 0, 0, d * v.s, d * v.x, d * v.y);
   const st = CV.ts;
   for (let i = 0; i < CV.layers.length; i++) {
     const L = CV.layers[i], cur = i === CV.sel;
     if (L.type === 'mask') { cvDrawMask(x, L); continue; }
+    if (cvIsM3d(L)) {   // NAI: 3D 화면을 띄운 레이어는 그 화면이 대신 보인다
+      if (cur && m3on) continue;
+      x.imageSmoothingEnabled = true; x.globalAlpha = L.opacity; x.drawImage(L.canvas, 0, 0, CV.w, CV.h); x.globalAlpha = 1; continue;
+    }
     x.imageSmoothingEnabled = v.s < 1;
     const ov = cur ? st.overlay : null;
     x.globalAlpha = L.opacity;
@@ -348,7 +560,9 @@ function cvDraw() {
     if (cur && CV.selT && CV.selT.cap) cvDrawSelContent(x);
   }
   x.setTransform(d, 0, 0, d, 0, 0);
+  x.strokeStyle = 'rgba(0,0,0,0.5)'; x.lineWidth = 1; x.strokeRect(v.x, v.y, CV.w * v.s, CV.h * v.s);   // NAI: 그림판 테두리 (화면 1화소)
   cvDrawOverlay(x);
+  cvM3dPlace();
 }
 /* 마스크 레이어 보이기 — NAI 마스크 표시 셰이더와 같은 뜻: 칠한 칸에 색을 입히고, 무늬·테두리(안쪽으로 깎은 자리)를 보이고, 불투명도를 건다 */
 function cvDrawMask(x, L) {
@@ -807,8 +1021,10 @@ function cvSelToLayer(cut) {
 }
 
 /* ── 포인터 묶음 ── */
+/* 3D 화면 위의 누르기·휠은 3D 조종(궤도·손잡이·뼈 고르기)이 맡는다 — NAI 도 3D 화면이 그림판 위를 덮는다 */
+function cvInM3d(e) { return !!(e.target && e.target.closest && e.target.closest('#cvM3d')); }
 function cvPointerDown(e) {
-  if (!CV.open) return;
+  if (!CV.open || cvInM3d(e)) return;
   const view = $('#cvView');
   if (e.button === 1 || (e.button === 0 && CV.space)) { CV.pan = { x: e.clientX, y: e.clientY, vx: CV.view.x, vy: CV.view.y }; view.setPointerCapture(e.pointerId); e.preventDefault(); return; }
   if (e.button !== 0) return;
@@ -833,6 +1049,7 @@ function cvPointerDown(e) {
 function cvPointerMove(e) {
   if (!CV.open) return;
   if (CV.pan) { CV.view.x = CV.pan.vx + e.clientX - CV.pan.x; CV.view.y = CV.pan.vy + e.clientY - CV.pan.y; cvRender(); return; }
+  if (!CV.act && cvInM3d(e)) { if (CV.ptr) { CV.ptr = null; cvRender(); } return; }
   const p = cvImgPt(e); CV.ptr = p;
   const a = CV.act;
   if (a) {
@@ -865,11 +1082,12 @@ function cvPointerUp(e) {
   else if (a.kind === 'pick') cvPickColor(p);
   CV.act = null; cvRender(); cvLayersUI();
 }
-function cvWheel(e) {   // NAI: 한 칸에 1.1배 / 0.9배, 누른 자리 기준
-  if (!CV.open) return;
+function cvWheel(e) {   // NAI C1: 한 칸에 1.1배 / 0.9배, 누른 자리 기준 · 맞춤 배율의 1/4 ~ 10배
+  if (!CV.open || cvInM3d(e)) return;
   e.preventDefault();
   const r = $('#cvView').getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top, v = CV.view;
-  const ns = Math.max(0.02, Math.min(32, e.deltaY > 0 ? v.s * 0.9 : v.s * 1.1));
+  const ns = Math.max(0.25 * cvFitScale(), Math.min(10, e.deltaY > 0 ? v.s * 0.9 : v.s * 1.1));
+  if (ns === v.s) return;
   v.x = mx - (mx - v.x) * ns / v.s; v.y = my - (my - v.y) * ns / v.s; v.s = ns; cvRender();
 }
 function cvSetSize(n) {
@@ -882,10 +1100,15 @@ function cvKey(e) {   // NAI 그림판 단축키 (글 칸에 쓰는 중이면 �
   if (e.key === ' ' && !/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) { CV.space = e.type === 'keydown'; if (e.type === 'keydown') e.preventDefault(); return; }
   if (e.type !== 'keydown') return;
   if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName) || !$('#modalOverlay').hidden) return;
-  const mask = cvIsMaskLayer(cvCur()), ctrl = e.ctrlKey || e.metaKey;
+  const mask = cvIsMaskLayer(cvCur()), ctrl = e.ctrlKey || e.metaKey, k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
   const go = n => { if (cvTools().some(t => t.n === n)) cvSwitchTool(n); };
   let hit = true;
-  switch (e.key.length === 1 ? e.key.toLowerCase() : e.key) {
+  /* 3D 레이어 (NAI): P 포즈 · T 모델 변형 — 그리기 도구 글쇠는 쓰지 않고, W·A·S·D·Q·E 는 3D 화면 카메라가 받는다 */
+  if (cvIsM3d(cvCur()) && !ctrl) {
+    if (k === 'p') go('pose'); else if (k === 't') go('modelTransform'); else return;
+    e.preventDefault(); e.stopPropagation(); return;
+  }
+  switch (k) {
     case 'b': if (ctrl) { hit = false; break; } go(mask ? 'maskDraw' : 'draw'); break;
     case 'e': if (ctrl) { hit = false; break; } go(mask ? 'maskErase' : 'erase'); break;
     case 'g': if (ctrl) { hit = false; break; } go(mask ? 'maskFill' : 'fill'); break;
@@ -935,6 +1158,7 @@ function cvChangeDims(top, left, right, bottom) {
   const nw = CV.w + left + right, nh = CV.h + top + bottom;
   if (nw < 8 || nh < 8) { toast('그보다 작게는 줄일 수 없습니다', 'err'); return false; }
   CV.layers = CV.layers.map(L => {
+    if (cvIsM3d(L)) { L.m3d.resize(nw, nh); L.m3d.render(); L.ver++; return L; }   // NAI: 3D 레이어는 그림 크기만 바꿔 다시 그린다
     const k = L.scale, W = Math.round(nw / k), H = Math.round(nh / k), l = left / k, t = top / k;
     const c = cvMk(W, H), x = cvCtx(c);
     x.drawImage(L.canvas, Math.max(0, -l), Math.max(0, -t), W, H, Math.max(0, l), Math.max(0, t), W, H);
@@ -1102,8 +1326,9 @@ function cvBuild() {
         <button class="btn sm go" id="cvSave">저장 후 닫기</button>
         <button class="btn sm" id="cvX" title="저장하지 않고 닫기 — 다시 열면 이어서 고칠 수 있습니다">✕</button>
       </div></div>
-    <div class="cv-mid"><div class="cv-view" id="cvView"><canvas id="cvScreen"></canvas></div><div class="cv-layers" id="cvLayers"></div></div>
+    <div class="cv-mid"><div class="cv-view" id="cvView"><canvas id="cvScreen"></canvas></div><div class="cv-side" id="cvSide" hidden></div><div class="cv-layers" id="cvLayers"></div></div>
     <div class="cv-bot" id="cvBot"></div>
+    <div class="cv-anim" id="cvAnim" hidden></div>
     <div class="cv-pop" id="cvPop" hidden></div>`;
   document.body.appendChild(el); CV.el = el;
   const v = $('#cvView');
@@ -1115,24 +1340,35 @@ function cvBuild() {
   v.addEventListener('wheel', cvWheel, { passive: false });
   v.addEventListener('contextmenu', e => e.preventDefault());
   v.addEventListener('dragover', e => { e.preventDefault(); });
-  v.addEventListener('drop', e => { e.preventDefault(); e.stopPropagation(); const f = [...(e.dataTransfer && e.dataTransfer.files || [])].find(f => /^image\//.test(f.type)); if (f) cvImportImage(f).catch(err => { logErr('그림판 그림 넣기 실패: ' + err.message); toast('그림을 넣지 못했습니다: ' + err.message, 'err'); }); });
+  v.addEventListener('drop', e => {
+    e.preventDefault(); e.stopPropagation();
+    const fs = [...(e.dataTransfer && e.dataTransfer.files || [])], L = cvCur();
+    if (cvIsM3d(L)) { if (fs[0]) cvM3dImport(L, fs[0], false); return; }   // NAI: 3D 레이어면 떨군 파일을 모델로 (그림도 판으로)
+    const f = fs.find(f => /^image\//.test(f.type)); if (f) cvImportImage(f).catch(err => { logErr('그림판 그림 넣기 실패: ' + err.message); toast('그림을 넣지 못했습니다: ' + err.message, 'err'); });
+  });
   document.addEventListener('keydown', cvKey, true); document.addEventListener('keyup', cvKey, true);
   document.addEventListener('paste', e => {
     if (!CV.open || /INPUT|TEXTAREA/.test((e.target || {}).tagName || '')) return;
-    const f = [...(e.clipboardData && e.clipboardData.files || [])].find(f => /^image\//.test(f.type));
+    const fs = [...(e.clipboardData && e.clipboardData.files || [])], L = cvCur();
+    if (cvIsM3d(L)) { if (fs[0]) { e.preventDefault(); e.stopImmediatePropagation(); cvM3dImport(L, fs[0], false); } return; }
+    const f = fs.find(f => /^image\//.test(f.type));
     if (f) { e.preventDefault(); e.stopImmediatePropagation(); cvImportImage(f).catch(err => { logErr('그림판 붙여 넣기 실패: ' + err.message); toast('붙여 넣지 못했습니다: ' + err.message, 'err'); }); }
   }, true);
   addEventListener('resize', () => { if (CV.open) { cvResizeScreen(); cvRender(); } });
   $('#cvSave').onclick = () => cvSave().catch(err => { logErr('그림판 저장 실패: ' + err.message); toast('그림판을 저장하지 못했습니다: ' + err.message, 'err'); });
   $('#cvX').onclick = () => cvClose(false);
-  $('#cvImp').onclick = () => pickFiles(false, f => cvImportImage(f).catch(err => { logErr('그림판 그림 넣기 실패: ' + err.message); toast('그림을 넣지 못했습니다: ' + err.message, 'err'); }));
+  $('#cvImp').onclick = () => {
+    const L = cvCur();
+    if (cvIsM3d(L)) { pickFiles(false, f => cvM3dImport(L, f, true), CV_M3D_ACCEPT); return; }
+    pickFiles(false, f => cvImportImage(f).catch(err => { logErr('그림판 그림 넣기 실패: ' + err.message); toast('그림을 넣지 못했습니다: ' + err.message, 'err'); }));
+  };
   $('#cvDl').onclick = () => {
     const c = CV.mode === 'mask' ? cvCompositeMask().canvas : cvCompositeNormal();
     if (!c) { toast('내려받을 마스크가 없습니다', 'err'); return; }
     c.toBlob(b => { if (b) downloadBlob(b, 'canvas.png'); else toast('PNG 를 만들지 못했습니다', 'err'); }, 'image/png');
   };
 }
-function cvUI() { cvSettingsUI(); cvBotUI(); cvLayersUI(); cvRender(); }
+function cvUI() { cvM3dSync(); cvSettingsUI(); cvBotUI(); cvLayersUI(); cvM3dSideUI(); cvM3dAnimUI(); cvRender(); }
 /* 위 줄: 지금 도구의 설정 (NAI 도구 설정 칸) */
 function cvSettingsUI() {
   const box = $('#cvSet'); if (!box) return;
@@ -1151,7 +1387,9 @@ function cvSettingsUI() {
   else if (t === 'select' || t === 'lasso') parts.push('<span class="hint">끌어서 고르기 · 안을 끌어 옮기기 · 모서리로 크기(Shift 는 가로세로 따로) · 위 동그라미로 돌리기 · Alt+L 새 레이어로 복사 · Alt+Shift+L 잘라내기</span>');
   else if (t === 'maskDraw' || t === 'maskErase') parts.push(sizeUI, `<button class="btn xs${ts.maskDrawShape === 'square' ? ' primary' : ''}" id="cvSq" title="네모 붓">■ 네모</button>`);
   else if (t === 'maskZoomSelection') parts.push(`<label class="rng">최소 둘레 <output>${ts.safeAreaSize}</output><input type="range" id="cvSafe" min="32" max="96" step="8" value="${ts.safeAreaSize}"></label>`, `<button class="btn xs" id="cvFocusClr" ${CV.focus ? '' : 'disabled'}>집중 영역 지우기</button>`);
+  else if (t === 'pose' || t === 'modelTransform') parts.push(cvM3dBarHtml());
   box.innerHTML = parts.join('');
+  cvM3dBarBind(box);
   const on = (id, ev, f) => { const n = $(id); if (n) n[ev] = f; };
   on('#cvColor', 'oninput', e => { const h = e.target.value; CV.ts.color = `rgb(${parseInt(h.slice(1, 3), 16)}, ${parseInt(h.slice(3, 5), 16)}, ${parseInt(h.slice(5, 7), 16)})`; });
   on('#cvSize', 'oninput', e => { cvSetSize(+e.target.value); });
@@ -1166,16 +1404,22 @@ function cvSettingsUI() {
 /* 아래 줄: 도구 단추 · 지금 레이어 지우기 · 캔버스 크기 · 되돌리기 · 색조 조정 / 마스크 표시 (NAI Tm) */
 function cvBotUI() {
   const box = $('#cvBot'); if (!box) return;
-  const L = cvCur(), list = cvTools();
+  const L = cvCur(), list = cvTools(), m3 = cvIsM3d(L), setOpen = cvM3dSetOpen();
   box.innerHTML = list.map(t => `<button class="btn sm cv-tool${t.n === CV.tool ? ' primary' : ''}" data-t="${t.n}" title="${escHtml(t.t)}">${t.ic}</button>`).join('')
-    + `<span class="cv-sep"></span><button class="btn sm" id="cvClear" title="지금 레이어를 비웁니다">🗑 레이어 비우기</button>`
+    + `<span class="cv-sep"></span>` + (m3 ? '' : `<button class="btn sm" id="cvClear" title="지금 레이어를 비웁니다">🗑 레이어 비우기</button>`)   // NAI: 3D 레이어에는 지우기 단추가 없다
     + `<button class="btn sm" id="cvResize" title="캔버스 크기 바꾸기 — 양옆·위아래로 늘리거나 자릅니다">⤢ 캔버스 크기</button>`
     + `<button class="btn sm" id="cvUndo" title="되돌리기 (Ctrl+Z)" ${CV.undo.length > 1 ? '' : 'disabled'}>↶</button><button class="btn sm" id="cvRedo" title="다시 하기 (Ctrl+Y)" ${CV.redo.length ? '' : 'disabled'}>↷</button>`
     + (L && L.type === 'normal' ? `<button class="btn sm" id="cvHsv" title="색조 조정 — 지금 레이어의 색상·채도·밝기">🎨 색조</button>` : '')
     + (CV.mode === 'mask' ? `<button class="btn sm" id="cvMaskDisp" title="마스크 표시 — 색·불투명도·테두리·무늬">👁 마스크 표시</button>` : '')
+    + (m3 ? `<button class="btn sm${setOpen ? ' primary' : ''}" id="cvM3dSet" title="3D 설정 — 투영·시야각·조명·빛 방향·그림자·뼈대 보이기·물리">⚙ 3D 설정</button>`
+      + `<button class="btn sm${CV.m3dBones ? ' primary' : ''}" id="cvM3dBones" title="뼈대 목록 — 누르면 그 뼈를 고릅니다">🦴 뼈대 목록</button>`
+      + `<button class="btn sm${CV.m3dMorph ? ' primary' : ''}" id="cvM3dMorph" title="표정·모프 — VRM 표정과 모델의 모프 값을 바꿉니다">🙂 표정·모프</button>` : '')
     + `<span class="cv-sep"></span><button class="btn sm" id="cvFitB" title="화면에 맞추기 (Ctrl+0) · 휠로 확대 · 가운데 단추나 Space+끌기로 옮기기">⊡ 맞추기</button>`;
   box.querySelectorAll('.cv-tool').forEach(b => b.onclick = () => cvSwitchTool(b.dataset.t));
-  $('#cvClear').onclick = () => { const L2 = cvCur(); if (!L2) return; cvCommitSelection(); L2.ctx.clearRect(0, 0, L2.canvas.width, L2.canvas.height); cvBump(L2); cvSaveState(); cvBotUI(); };
+  if ($('#cvClear')) $('#cvClear').onclick = () => { const L2 = cvCur(); if (!L2 || cvIsM3d(L2)) return; cvCommitSelection(); L2.ctx.clearRect(0, 0, L2.canvas.width, L2.canvas.height); cvBump(L2); cvSaveState(); cvBotUI(); };
+  if ($('#cvM3dSet')) $('#cvM3dSet').onclick = () => { if (cvM3dSetOpen()) cvM3dSetClose(); else cvM3dSetShow(); };
+  if ($('#cvM3dBones')) $('#cvM3dBones').onclick = () => { CV.m3dBones = !CV.m3dBones; cvBotUI(); cvM3dSideUI(); };
+  if ($('#cvM3dMorph')) $('#cvM3dMorph').onclick = () => { CV.m3dMorph = !CV.m3dMorph; cvBotUI(); cvM3dSideUI(); };
   $('#cvResize').onclick = cvOpenResize;
   $('#cvUndo').onclick = cvUndo; $('#cvRedo').onclick = cvRedo;
   if ($('#cvHsv')) $('#cvHsv').onclick = () => { if (CV.hsv) cvHsvCancel(); else cvHsvOpen(); };
@@ -1189,13 +1433,13 @@ function cvLayersUI() {
   const rows = CV.layers.map((L, i) => ({ L, i })).reverse().map(({ L, i }) => {
     const canMove = d => { const j = i + d, o = CV.layers[j]; return o && (o.type === 'mask') === (L.type === 'mask'); };
     return `<div class="cv-lay${i === CV.sel ? ' on' : ''}" data-i="${i}"><canvas class="cv-thumb" data-i="${i}"></canvas>
-      <span class="cv-lname">${L.type === 'mask' ? '마스크' : '레이어'} ${i + 1}</span>
+      <span class="cv-lname">${L.type === 'mask' ? '마스크' : cvIsM3d(L) ? '🧊 3D 모델' : '레이어'} ${i + 1}</span>
       <span class="cv-lbtn"><button class="btn xs" data-up="${i}" ${canMove(1) ? '' : 'disabled'} title="위로">↑</button><button class="btn xs" data-dn="${i}" ${canMove(-1) ? '' : 'disabled'} title="아래로">↓</button><button class="btn xs" data-del="${i}" ${n <= 1 || (CV.mode === 'mask' && L.type === 'mask' && CV.layers.filter(l => l.type === 'mask').length <= 1) ? 'disabled' : ''} title="레이어 지우기">✕</button></span></div>`;
   }).join('');
-  box.innerHTML = `<div class="row"><b>레이어</b><button class="btn xs" id="cvAddL" style="margin-left:auto" title="빈 레이어를 더합니다">＋ 레이어</button></div>${rows}`;
+  box.innerHTML = `<div class="row"><b>레이어</b><button class="btn xs" id="cvAddL" style="margin-left:auto" title="빈 레이어를 더합니다">＋ 레이어</button><button class="btn xs" id="cvAdd3D" title="3D 모델 레이어 더하기 — 고르면 그 자리에 3D 화면이 뜨고, 모델(glb·gltf·vrm·pmx·pmd·zip·그림)을 넣을 수 있습니다">＋ 3D</button></div>${rows}`;
   box.querySelectorAll('.cv-thumb').forEach(c => {
     const L = CV.layers[+c.dataset.i], k = Math.min(56 / CV.w, 56 / CV.h); c.width = Math.max(1, Math.round(CV.w * k)); c.height = Math.max(1, Math.round(CV.h * k));
-    const x = c.getContext('2d'); x.fillStyle = cvChecker(x); x.fillRect(0, 0, c.width, c.height);
+    const x = c.getContext('2d'); x.fillStyle = cvChecker(x, true); x.fillRect(0, 0, c.width, c.height);
     if (L.type === 'mask') { x.imageSmoothingEnabled = false; const t = cvMk(L.canvas.width, L.canvas.height), tx = t.getContext('2d'); tx.drawImage(L.canvas, 0, 0); tx.globalCompositeOperation = 'source-in'; tx.fillStyle = CV_MASK_COLORS[CV.disp.color] || L.maskColor; tx.fillRect(0, 0, t.width, t.height); x.drawImage(t, 0, 0, c.width, c.height); }
     else x.drawImage(L.canvas, 0, 0, c.width, c.height);
   });
@@ -1204,4 +1448,130 @@ function cvLayersUI() {
   box.querySelectorAll('[data-dn]').forEach(b => b.onclick = () => cvMoveLayer(+b.dataset.dn, +b.dataset.dn - 1));
   box.querySelectorAll('[data-del]').forEach(b => b.onclick = () => cvRemoveLayer(+b.dataset.del));
   $('#cvAddL').onclick = () => { cvCommitSelection(); cvAddLayer(true); cvUI(); };
+  $('#cvAdd3D').onclick = () => { cvAddModel3DLayer(); };
+}
+
+/* ── 3D 레이어 화면 (NAI C5 도구 설정 · Is 뼈대 목록 · If 표정 · T7 3D 설정 · IT 동작 재생) ── */
+/* 위 줄: 모델 목록(누르면 고르기·🗑 빼기) · 모델 넣기 · 처음 자리로 · 이동·회전·크기 */
+function cvM3dBarHtml() {
+  const L = cvCur(); if (!cvIsM3d(L)) return '';
+  const mgr = L.m3d, sel = mgr.selectedModelId;
+  const chips = mgr.getModels().map(m => `<span class="cv-mchip${m.id === sel ? ' on' : ''}"><button class="cv-mname" data-mid="${escHtml(m.id)}" title="이 모델 고르기">${escHtml(m.name)}</button><button class="cv-mdel" data-mdel="${escHtml(m.id)}" title="모델 빼기">🗑</button></span>`).join('');
+  const seg = [['translate', '✥', '이동'], ['rotate', '⟳', '회전'], ['scale', '⤡', '크기']].map(([v, ic, n]) => `<button class="btn xs${CV.m3dMode === v ? ' primary' : ''}" data-tm="${v}" title="손잡이: ${n}">${ic} ${n}</button>`).join('');
+  return `<span class="cv-mlist">${chips}<button class="btn xs" id="cvM3dImp" title="3D 모델 넣기 — glb·gltf·vrm·pmx·pmd·zip·그림(그림은 판으로)">⬆ 모델 넣기</button><button class="btn xs" id="cvM3dReset" title="고른 모델을 처음 자리·처음 자세로">↺ 처음 자리로</button></span><span class="cv-seg">${seg}</span>`;
+}
+function cvM3dBarBind(box) {
+  const L = cvCur(); if (!cvIsM3d(L)) return;
+  const mgr = L.m3d;
+  box.querySelectorAll('[data-mid]').forEach(b => b.onclick = () => {
+    mgr.selectModel(b.dataset.mid);
+    if (CV.m3dTool && CV.m3dTool.name === 'modelTransform') CV.m3dTool.attachToModel(b.dataset.mid);   // 손잡이도 고른 모델로 (NAI 는 목록에서 고르면 손잡이가 앞 모델에 남는다)
+    cvBump(L); cvSaveState(); cvSettingsUI(); cvM3dSideUI(); cvM3dAnimUI();
+  });
+  box.querySelectorAll('[data-mdel]').forEach(b => b.onclick = () => {
+    const id = b.dataset.mdel;
+    if (mgr.getSelectedBoneModelId() === id) mgr.deselectBone();
+    mgr.removeModel(id);
+    if (CV.m3dTool && CV.m3dTool.name === 'modelTransform') { mgr.viewportController.detach(); if (mgr.selectedModelId) CV.m3dTool.attachToModel(mgr.selectedModelId); }   // 뺀 모델에 손잡이가 남지 않게
+    cvM3dRefresh(L, true); cvUI();
+  });
+  const on = (id, f) => { const n = box.querySelector(id); if (n) n.onclick = f; };
+  on('#cvM3dImp', () => pickFiles(false, f => cvM3dImport(L, f, true), CV_M3D_ACCEPT));
+  on('#cvM3dReset', () => { mgr.resetModelPosition(); cvM3dRefresh(L, true); cvUI(); });
+  box.querySelectorAll('[data-tm]').forEach(b => b.onclick = () => { CV.m3dMode = b.dataset.tm; mgr.viewportController.setTransformMode(CV.m3dMode); cvSettingsUI(); });
+}
+/* 왼쪽 칸: 뼈대 목록 · 표정·모프 (NAI 그림판 왼쪽 위, 둘 다 켤 수 있다) */
+function cvM3dSideUI() {
+  const box = $('#cvSide'); if (!box) return;
+  const V = CV.m3dView, L = V && V.L, show = CV.open && !!L && (CV.m3dBones || CV.m3dMorph);
+  if (V && !V.unsub) V.unsub = L.m3d.subscribe(() => { if (CV.m3dView === V) cvM3dSideUI(); });
+  box.hidden = !show; if (!show) { box.innerHTML = ''; return; }
+  const mgr = L.m3d, mid = mgr.selectedModelId, parts = [];
+  if (CV.m3dBones) {
+    const bones = mid ? mgr.getBones(mid) : new Map(), phys = mid ? mgr.getPhysicsBoneNamesForModel(mid) : new Set(), pe = mgr.getPhysicsEnabled();
+    const selB = mgr.getSelectedBoneName(), selM = mgr.getSelectedBoneModelId();
+    const rows = mid && bones.size ? [...bones.keys()].map(n => { const on = selM === mid && selB === n, ph = pe && phys.has(n);
+      return `<div class="cv-bone${on ? ' on' : ''}${ph ? ' phys' : ''}" data-bone="${escHtml(n)}" title="${escHtml(n)}${ph ? ' — 물리로 움직이는 뼈' : ''}">${escHtml(n)}${ph ? '<span class="cv-btag">P</span>' : ''}</div>`; }).join('')
+      : '<div class="cv-empty">뼈대가 없습니다</div>';
+    parts.push(`<div class="cv-panel cv-bones"><div class="cv-ptitle">뼈대 목록</div><div class="cv-plist" id="cvBoneList">${rows}</div></div>`);
+  }
+  if (CV.m3dMorph) {
+    const ex = mid ? mgr.getExpressions(mid) : [], mt = mid ? mgr.getMorphTargets(mid) : [];
+    const row = (k, n, v) => `<label class="cv-mrow" title="${escHtml(n)}"><span class="cv-mlab">${escHtml(n)}</span><input type="range" min="0" max="1" step="0.01" value="${v}" data-${k}="${escHtml(n)}"><output>${(+v).toFixed(2)}</output></label>`;
+    parts.push(`<div class="cv-panel cv-morph">${ex.length ? `<div class="cv-psec${mt.length ? ' bordered' : ''}"><div class="cv-ptitle">표정</div>${ex.map(e => row('ex', e.name, e.value)).join('')}</div>` : ''}`
+      + `<div class="cv-ptitle">모프</div><div class="cv-plist">${mt.length ? mt.map(e => row('mt', e.name, e.value)).join('') : '<div class="cv-empty">모프가 없습니다</div>'}</div></div>`);
+  }
+  // 슬라이더를 끄는 중이면 다시 그리지 않는다 (값 글자만 바꾼다)
+  if (box.contains(document.activeElement) && document.activeElement.type === 'range' && box.dataset.sig === String(mid) + CV.m3dBones + CV.m3dMorph) return;
+  box.dataset.sig = String(mid) + CV.m3dBones + CV.m3dMorph;
+  box.innerHTML = parts.join('');
+  box.querySelectorAll('[data-bone]').forEach(r => r.onclick = () => {
+    const n = r.dataset.bone;
+    if (mgr.getSelectedBoneModelId() === mid && mgr.getSelectedBoneName() === n) mgr.deselectBone(); else mgr.selectBone(mid, n);
+  });
+  const selRow = box.querySelector('.cv-bone.on'), list = $('#cvBoneList');
+  if (selRow && list) { const t = selRow.offsetTop - list.offsetTop, b = t + selRow.offsetHeight; if (t < list.scrollTop || b > list.scrollTop + list.clientHeight) selRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+  let raf = 0;
+  const redraw = () => { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; mgr.render(); mgr.renderToOutput(); cvBump(L); cvRender(); cvLayersUI(); }); };   // NAI If: 한 프레임에 한 번 그린다
+  box.querySelectorAll('input[data-ex]').forEach(i => i.oninput = () => { const v = parseFloat(i.value); mgr.setExpressionValue(i.dataset.ex, v, mid); i.nextElementSibling.textContent = v.toFixed(2); redraw(); });
+  box.querySelectorAll('input[data-mt]').forEach(i => i.oninput = () => { const v = parseFloat(i.value); mgr.setMorphTargetValue(i.dataset.mt, v, mid); i.nextElementSibling.textContent = v.toFixed(2); redraw(); });
+}
+/* 3D 설정 창 (NAI T7) — 바깥을 누르면 닫힌다 */
+function cvM3dSetOpen() { const p = $('#cvPop'); return !!p && !p.hidden && !!p.querySelector('.cv-m3dset'); }
+function cvM3dSetClose() { const p = $('#cvPop'); if (p && cvM3dSetOpen()) p.hidden = true; if (CV._m3dOut) { document.removeEventListener('mousedown', CV._m3dOut, true); CV._m3dOut = null; } cvBotUI(); }
+async function cvM3dSetShow() {
+  const L = cvCur(); if (!cvIsM3d(L)) return;
+  const M = await cvM3dLib(), mgr = L.m3d, pop = $('#cvPop');
+  if (CV.hsv) cvHsvCancel();
+  const seg = (k, items, cur) => `<div class="cv-seg2" data-k="${k}">${items.map(([v, n]) => `<button class="btn xs${v === cur ? ' primary' : ''}" data-v="${v}">${n}</button>`).join('')}</div>`;
+  const paint = () => {
+    const proj = mgr.getProjection(), fov = mgr.getFov(), amb = Math.round(100 * mgr.getAmbientIntensity()), dir = Math.round(100 * mgr.getDirectionalIntensity()), ld = mgr.getLightDirection();
+    let li = 1, best = -Infinity;   // NAI: 지금 빛 방향과 가장 가까운 단추
+    for (const [i, r] of M.LIGHT_DIRS.entries()) { const a = Math.hypot(r.x, r.y, r.z), b = Math.hypot(ld.x, ld.y, ld.z); if (!a || !b) continue; const c = (r.x * ld.x + r.y * ld.y + r.z * ld.z) / (a * b); if (c > best) { best = c; li = i; } }
+    const DIRN = { front: '앞', frontTop: '앞 위', top: '위', left: '왼쪽', right: '오른쪽', back: '뒤' };
+    const QN = [['veryLow', '매우 낮음'], ['low', '낮음'], ['medium', '보통'], ['high', '높음'], ['veryHigh', '매우 높음']];
+    pop.innerHTML = `<div class="cv-m3dset"><b>3D 설정</b>
+      <div class="cv-sh">투영</div>${seg('proj', [['perspective', '원근'], ['orthographic', '직교']], proj)}
+      ${proj === 'perspective' ? `<label class="rng">시야각 <output>${fov}</output><input type="range" id="cv3Fov" min="10" max="120" step="1" value="${fov}"></label>` : ''}
+      <div class="cv-sh">조명</div>
+      <label class="rng">주변광 <output>${amb}%</output><input type="range" id="cv3Amb" min="0" max="200" step="1" value="${amb}"></label>
+      <label class="rng">직접광 <output>${dir}%</output><input type="range" id="cv3Dir" min="0" max="300" step="1" value="${dir}"></label>
+      <div class="cv-sh">빛 방향</div>${seg('ld', M.LIGHT_DIRS.map((d, i) => [String(i), DIRN[d.key]]), String(li))}
+      <div class="cv-sh">그림자</div>${seg('sh', [['1', '켬'], ['0', '끔']], mgr.getShadowsEnabled() ? '1' : '0')}
+      ${mgr.getShadowsEnabled() ? `<div class="cv-sh sub">품질</div>${seg('q', QN, mgr.getShadowQuality())}` : ''}
+      <div class="cv-sh">표시</div><div class="cv-sh sub">뼈대 보이기</div>${seg('bones', [['1', '켬'], ['0', '끔']], mgr.getShowBoneHelpers() ? '1' : '0')}
+      <div class="cv-sh">물리</div>${seg('phys', [['1', '켬'], ['0', '끔']], mgr.getPhysicsEnabled() ? '1' : '0')}</div>`;
+    const rng = (id, f, unit) => { const n = pop.querySelector(id); if (n) n.oninput = () => { f(+n.value); n.previousElementSibling.textContent = n.value + unit; }; };
+    rng('#cv3Fov', v => mgr.setFov(v), ''); rng('#cv3Amb', v => mgr.setAmbientIntensity(v / 100), '%'); rng('#cv3Dir', v => mgr.setDirectionalIntensity(v / 100), '%');
+    pop.querySelectorAll('.cv-seg2 button').forEach(b => b.onclick = () => {
+      const k = b.parentElement.dataset.k, v = b.dataset.v;
+      if (k === 'proj') mgr.setProjection(v);
+      else if (k === 'ld') { const d = M.LIGHT_DIRS[+v]; mgr.setLightDirection(d.x, d.y, d.z); }
+      else if (k === 'sh') mgr.setShadowsEnabled(v === '1');
+      else if (k === 'q') mgr.setShadowQuality(v);
+      else if (k === 'bones') { mgr.setShowBoneHelpers(v === '1'); }
+      else if (k === 'phys') mgr.setPhysicsEnabled(v === '1');
+      paint(); cvM3dSideUI();
+    });
+  };
+  pop.hidden = false; paint(); cvBotUI();
+  if (CV._m3dOut) document.removeEventListener('mousedown', CV._m3dOut, true);
+  CV._m3dOut = e => { if (!pop.contains(e.target) && !(e.target.closest && e.target.closest('#cvM3dSet'))) cvM3dSetClose(); };
+  document.addEventListener('mousedown', CV._m3dOut, true);
+}
+/* 동작 재생 줄 (NAI IT — 3D 화면을 띄웠고 고른 모델에 동작이 있을 때만) */
+function cvM3dAnimUI() {
+  const box = $('#cvAnim'); if (!box) return;
+  const V = CV.m3dView, mgr = V && V.L.m3d, id = mgr && mgr.selectedModelId;
+  if (!CV.open || !V || !id || !mgr.hasAnimation(id)) { box.hidden = true; box.innerHTML = ''; return; }
+  const list = mgr.getAnimations(id), cur = mgr.getActiveAnimationIndex(id), playing = mgr.isAnimationPlaying(id), sp = mgr.getAnimationSpeed(id);
+  box.hidden = false;
+  box.innerHTML = (list.length > 1 ? `<select id="cvAnimSel" title="동작 고르기">${list.map(a => `<option value="${a.index}"${a.index === cur ? ' selected' : ''}>${escHtml(a.name)}</option>`).join('')}</select>` : `<span class="cv-aname" title="${escHtml(list[0].name)}">${escHtml(list[0].name)}</span>`)
+    + `<button class="btn xs" id="cvAnimPlay" title="${playing ? '일시 정지' : '재생'}">${playing ? '⏸' : '▶'}</button><button class="btn xs" id="cvAnimStop" title="정지 — 처음 자세로">⏹</button>`
+    + `<span class="cv-aspd"><output>${sp.toFixed(1)}x</output><input type="range" id="cvAnimSpd" min="0.1" max="3" step="0.1" value="${sp}" title="속도"></span>`;
+  const done = () => { mgr.render(); mgr.renderToOutput(); cvBump(V.L); cvM3dAnimUI(); cvLayersUI(); };
+  const sel = $('#cvAnimSel'); if (sel) sel.onchange = () => { mgr.setActiveAnimation(parseInt(sel.value, 10), id); done(); };
+  $('#cvAnimPlay').onclick = async () => { if (mgr.isAnimationPlaying(id)) mgr.pauseAnimation(id); else { try { await mgr.playAnimation(id); } catch (e) { logErr('3D 동작 재생 실패: ' + e.message); toast('동작을 틀지 못했습니다 — ' + e.message, 'err'); } } cvM3dAnimUI(); };
+  $('#cvAnimStop').onclick = () => { mgr.stopAnimation(id); done(); };
+  $('#cvAnimSpd').oninput = e => { const v = parseFloat(e.target.value); mgr.setAnimationSpeed(v, id); e.target.previousElementSibling.textContent = v.toFixed(1) + 'x'; };
 }
