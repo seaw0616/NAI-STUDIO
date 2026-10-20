@@ -51,7 +51,7 @@ VERSION = 17
 # 같은 PC 의 다른 프로그램은 127.0.0.1 에 닿을 수는 있어도 이 값은 모른다.
 SESSION_KEY = secrets.token_urlsafe(24)
 
-RELEASE = "12.22"   # 배포 버전. GitHub 릴리스 태그 "v12.22" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
+RELEASE = "12.23"   # 배포 버전. GitHub 릴리스 태그 "v12.23" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
 # 이 앱이 배포되는 저장소. 비워 두면 ⬆ 업데이트 버튼이 아예 안 뜬다 —
 # 사용자가 ⚙설정에 직접 타이핑해 넣기 전까지는 새 버전이 나온 줄도 모른다.
 # 실제로 그 때문에 옛 버전을 계속 쓰시는 분들이 있었다. 기본값을 박아 둔다.
@@ -1513,6 +1513,72 @@ def nai_quickstart(force=False):
             return {"ok": False, "build": _nai_qs["build"], "data": None, "err": _nai_qs["err"]}
 
 
+# ── NAI 결과 화면 장식 무늬 ───────────────────────────────────────────────────────
+# 캔버스 결과 화면이 묶음 둘레에 그리는 별자리·나침반·반짝이 무늬(SVG symbol 정의, NAI UL)는 NAI 그림 저작물이라
+# 이 저장소에 넣지 않는다. 빠른 시작 그림 모음과 같게 사용자 PC 에서 novelai.net 공개 웹앱 스크립트를 받아 그 정의 글만 뽑아 앱에 내준다.
+# 무늬를 늘어놓는 셈(UP)은 앱(app.js ornBuilder)이 NAI 와 같게 한다. 정의 글은 SVG 모양 태그만 남았는지 확인한 뒤에만 쓴다.
+_nai_orn = {"t": 0.0, "build": "", "defs": "", "err": ""}
+_nai_orn_lock = threading.Lock()
+_ORN_TAGS = {"linearGradient", "radialGradient", "stop", "symbol", "g", "path", "circle", "ellipse", "rect", "polygon", "polyline", "line", "defs"}
+
+
+def nai_orn_extract(src):
+    """NAI 스크립트 글에서 장식 무늬 정의(`…<symbol id="nai-sparkle" …` 이 든 템플릿 글)를 뽑아 확인한다. 이상하면 RuntimeError."""
+    i = src.find('<symbol id="nai-sparkle"')
+    if i < 0:
+        raise RuntimeError("NAI 스크립트에서 결과 화면 장식 무늬(nai-sparkle)를 찾지 못했습니다 (NAI 사이트가 바뀐 것 같습니다)")
+    a, b = src.rfind("`", 0, i), src.find("`", i)
+    if a < 0 or b < 0 or b - a > 65536:
+        raise RuntimeError("결과 화면 장식 무늬 정의의 처음·끝을 찾지 못했습니다")
+    defs = src[a + 1:b]
+    if "${" in defs or "\\" in defs:
+        raise RuntimeError("결과 화면 장식 무늬 정의에 바뀌는 글이 섞여 쓰지 않습니다")
+    tags = set(re.findall(r"</?\s*([A-Za-z][\w:-]*)", defs))
+    bad = sorted(t for t in tags if t not in _ORN_TAGS)
+    low = defs.lower()
+    if bad or re.search(r"\son\w+\s*=", low) or "href" in low or "javascript:" in low or "<!" in defs or "<?" in defs \
+            or re.search(r"url\(\s*(?!#)", low) or "@import" in low:
+        raise RuntimeError("결과 화면 장식 무늬 정의에 쓰면 안 되는 것이 섞여 쓰지 않습니다%s" % (": " + ", ".join(bad[:5]) if bad else ""))
+    for nm in ("nai-sparkle", "nai-nested-rings", "nai-compass", "nai-spoke", "nai-comet"):
+        if 'id="%s"' % nm not in defs:
+            raise RuntimeError("결과 화면 장식 무늬 %s 가 정의에 없습니다 (NAI 사이트가 바뀐 것 같습니다)" % nm)
+    return defs.strip()
+
+
+def nai_ornaments(force=False):
+    """장식 무늬 정의 → {"ok", "build", "defs", "err"}. 받아 둔 것이 하루 안이면 그대로 쓴다. 실패하면 까닭을 돌려줘 앱이 기록에 남긴다."""
+    with _nai_orn_lock:
+        now = time.time()
+        if _nai_orn["defs"] and not force and now - _nai_orn["t"] < 86400:
+            return {"ok": True, "build": _nai_orn["build"], "defs": _nai_orn["defs"], "err": ""}
+        try:
+            build, paths = _nai_page()
+            cdir = DATA / "cache"
+            cfile = cdir / ("nai_ornaments_%s.svg" % re.sub(r"[^\w.-]", "_", build)[:80])
+            if not force and cfile.exists():
+                try:
+                    defs = nai_orn_extract("`" + cfile.read_text(encoding="utf-8") + "`")   # 둔 것도 다시 확인한다
+                    _nai_orn.update(t=now, build=build, defs=defs, err="")
+                    return {"ok": True, "build": build, "defs": defs, "err": ""}
+                except Exception as e:
+                    err_add({"msg": "장식 무늬 캐시를 쓰지 못해 다시 받습니다: %s" % e, "where": "nai_ornaments"})
+            hit = _nai_scan(paths, {"orn": (re.compile(r'<symbol id="nai-sparkle"'), "결과 화면 장식 무늬")})["orn"]
+            defs = nai_orn_extract(hit)
+            try:
+                cdir.mkdir(parents=True, exist_ok=True)
+                for old in cdir.glob("nai_ornaments_*.svg"):     # 옛 빌드 것은 지운다
+                    if old != cfile:
+                        old.unlink()
+                cfile.write_text(defs, encoding="utf-8")
+            except Exception as e:
+                err_add({"msg": "장식 무늬 캐시 저장 실패: %s" % e, "where": "nai_ornaments"})
+            _nai_orn.update(t=now, build=build, defs=defs, err="")
+            return {"ok": True, "build": build, "defs": defs, "err": ""}
+        except Exception as e:
+            _nai_orn["err"] = str(e)[:200]
+            return {"ok": False, "build": _nai_orn["build"], "defs": "", "err": _nai_orn["err"]}
+
+
 # ── NAI Pixel Snap (도트 그림 다듬기) ─────────────────────────────────────────────
 # NAI 는 Pixel Snap 을 서버가 아니라 브라우저 안 작업자(Worker)에서 돌린다(웹GL·웹GPU·WASM, Anlas 안 듦).
 # 작업자 파일은 NAI 저작물이라 이 저장소에 넣지 않는다. 사용자 PC 에서 novelai.net 이 공개로 내주는 그 파일들(작업자 시작 파일·
@@ -2684,6 +2750,9 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if path == "/nai-quickstart":   # NAI 빠른 시작 그림 모음 — 사용자 PC 에서 NAI 웹앱 스크립트로 뽑는다
             self._json(200, nai_quickstart(bool((qs.get("force") or [""])[0])))
+            return True
+        if path == "/nai-ornaments":   # NAI 결과 화면 장식 무늬 정의 — 사용자 PC 에서 NAI 웹앱 스크립트로 뽑는다
+            self._json(200, nai_ornaments(bool((qs.get("force") or [""])[0])))
             return True
         if path == "/nai-pixelsnap":   # NAI Pixel Snap 작업자 준비 — 사용자 PC 에서 NAI 공개 사이트 파일을 받아 둔다
             self._json(200, nai_pixelsnap(bool((qs.get("force") or [""])[0])))

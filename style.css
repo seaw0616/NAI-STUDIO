@@ -939,15 +939,26 @@ input.sc-name-in:hover, input.sc-name-in:focus { border-bottom-color: var(--acc)
 /* NAI Pixel Snap 결과는 점이 번지지 않게 그린다 (imageRendering pixelated) */
 .pixelated { image-rendering: pixelated; }
 
-/* NAI 캔버스 결과 화면 (빌드 b50892a BO) — 단순 결과 화면을 끄면 큰 그림 자리를 덮는다 */
+/* NAI 캔버스 결과 화면 (빌드 b50892a BO) — 큰 그림 자리를 덮는다 (단순 결과 화면도 같은 캔버스, 고른 묶음 하나만) */
 .ovw-stage { position: absolute; inset: 0; z-index: 1; overflow: hidden; background: var(--bg0); touch-action: none; user-select: none; outline: none; }
 .ovw-stage.locked { touch-action: auto; }
 .ovw-stage.panning { cursor: grabbing; }
 .ovw-stage.shift .ovw-tile { cursor: grab; }   /* NAI: Shift 를 누르는 동안 (카메라 잠금이면 빼고) */
-.ovw-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+.ovw-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform;
+  --nai-structure: var(--bg3); --nai-accent: var(--acc); --nai-bg: var(--bg1); }   /* NAI: 장식 색 = 테마 bg3 · 채운 점 = bg1 */
+/* 묶음 장식 (NAI BF·BU): 무늬 정의는 크기 0 인 SVG 하나, 묶음마다 SVG 한 장(그림 아래, 마우스는 통과) */
+.ovw-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+.ovw-orn > svg { position: absolute; overflow: visible; pointer-events: none; }
+.ovw-tile:hover { z-index: 10; }   /* NAI BB: 마우스를 올린 그림의 단추 줄이 이웃 그림 위에 보이게 */
 .ovw-tile { position: absolute; cursor: pointer; background: var(--tbg, transparent); }   /* NAI: 투명한 곳은 «투명 부분 보이기» 무늬 */
 .ovw-tile img { display: block; width: 100%; height: 100%; object-fit: contain; -webkit-user-drag: element; }
 .ovw-tile.sel { outline: var(--ovw-ring, 3px) solid var(--acc); outline-offset: 0; z-index: 1; }
+/* NAI ImageContainer hover: 그림은 98% 로 두었다가 마우스를 올리면 100% (0.25초) — 고른 그림·단순 화면의 한 장짜리 묶음·움직임 줄이기면 그대로 100%
+   · 생성 중인 장이 있는 묶음은 손 모양이 아니다 (NAI allImagesFinished) */
+.ovw-tile > img:first-child, .ovw-tile > img.ovw-old, .ovw-tile > img.ovw-oldmask { transform: scale(.98); transition: transform .25s cubic-bezier(.22, 1, .36, 1); }
+.ovw-tile:hover > img:first-child, .ovw-tile:hover > img.ovw-old, .ovw-tile:hover > img.ovw-oldmask { transform: scale(1); }
+.ovw-tile.sel > img, .ovw-tile.nohov > img, .ovw-stage.rm .ovw-tile > img { transform: none; transition: none; }
+.ovw-tile.busy { cursor: default; }
 .vstage.ovw-on #viewerImg, .vstage.ovw-on #viewerBg, .vstage.ovw-on #viewerOldMask, .vstage.ovw-on .vnav, .vstage.ovw-on #viewerOrigTag { display: none !important; }
 .vstage.ovw-on #varBar, .vstage.ovw-on #enhPanel, .vstage.ovw-on #genBar, .vstage.ovw-on #previewImg { z-index: 3; }
 /* 생성 중 빈 칸 (NAI dummy 그림): 그 장의 생성 중 그림을 흐리게(5px), «생성 중 그림 그대로 보기»거나 다 된 장이면 그대로 · 단추 없음 */

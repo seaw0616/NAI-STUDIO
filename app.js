@@ -274,8 +274,8 @@ const DEFAULTS = {
   rawIntermediates: false, inspectResults: false, scaleUp: true,
   hideQuickstart: false,   // NAI 설정 «Hide Quickstart Gallery»(hideQuickstartGallery, 기본 꺼짐 = 보고 있는 그림이 없으면 빠른 시작 그림 모음을 보여 준다)
   /* NAI 설정 «Simple Output Viewer»(simpleOutputViewer)·«Reduced Motion»(canvasReducedMotion)·«Lock Output Viewer Camera»(canvasLockCamera).
-     NAI 의 «단순 결과 화면» 기본값은 꺼짐(= 캔버스 결과 화면)이다. 이 앱은 주 화면이 크게 바뀌므로 사용자가 고를 때까지 지금 화면(켜짐)으로 둔다 — ⚙ 에서 끈다. */
-  simpleOutputViewer: true, canvasReducedMotion: false, canvasLockCamera: false,
+     NAI 와 같게 «단순 결과 화면» 기본값은 꺼짐(= 최근 묶음을 늘어놓는 캔버스 결과 화면)이다. 켜면 NAI 처럼 고른 묶음 하나만 보이는 캔버스가 된다 (ovwSimple) */
+  simpleOutputViewer: false, canvasReducedMotion: false, canvasLockCamera: false,
   pinBoards: null,   // 핀 보드 { boards: [{ id, name, items, size? }], activeBoardId } — NAI emptyBoardsState 와 같은 모양, 처음 쓸 때 만든다 (pbState)
   // NAI 설정 «Custom File Name Template»(imageFilenameTemplateEnabled 끔 · imageFilenameTemplate «{prompt} s-{seed}»)
   fnTplOn: false, fnTpl: '{prompt} s-{seed}',
@@ -1472,7 +1472,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.22';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.23';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -3839,7 +3839,7 @@ function clearViewer() {
   ovwSync();
 }
 
-/* ── NAI 캔버스 결과 화면 (빌드 b50892a BO — 설정 «단순 결과 화면»을 끄면) ─────────────────────────────
+/* ── NAI 캔버스 결과 화면 (빌드 b50892a BO — 기본 화면, «단순 결과 화면»도 이 캔버스) ─────────────────────────────
    최근에 생성한 결과 묶음을 한 판에 위에서 아래로(최신이 위) 늘어놓고, 끌어 옮기고 확대해 본다. NAI 와 같은 셈:
    · 묶음 안 배치 — 3장이면 삼각 배치 넷 중 하나(묶음 id 해시), 그 밖은 가로 ceil(√n)칸 격자, 그림 사이 48 · 묶음 사이 340 · 묶음마다 가운데 맞춤
    · 처음엔 8묶음, 아래 끝 800 앞까지 내려가면 8묶음씩 더 · 그림을 고르면 그 그림에 맞춰 날아간다(여백 10, 화면 가장자리 5%·6~26px,
@@ -3847,14 +3847,20 @@ function clearViewer() {
    · 휠 = 옮기기(Shift 면 가로) · Ctrl+휠 = 확대(0.1~8) · 가운데 단추나 Shift+끌기·손가락 = 옮기기(놓으면 미끄러짐) · 두 손가락 = 확대
    · 키: F 맞추기 · + − 확대 · 1 실제 크기 · Esc 묶음 전체 · W A S D 옮기기 · 멈추고 0.12초 뒤 가운데에 가장 가까운 묶음을 고른다
    · 설정 «움직임 줄이기»면 바로 옮겨 가고, «카메라 잠그기»면 손으로 옮기거나 확대하지 못한다(고르면 맞추는 것은 그대로)
-   화면 폭 900 이하(휴대폰)는 NAI 처럼 늘 단순 결과 화면이다. 장식 그림(NAI 별자리 무늬)은 넣지 않았다. */
+   · 그림에 마우스를 올리면 98% → 100% 로 커진다(0.25초) — 고른 그림·움직임 줄이기·단순 화면의 한 장짜리 묶음은 빼고 (NAI ImageContainer hover)
+   «단순 결과 화면»(설정을 켜거나 화면 폭 900 이하 휴대폰)도 NAI 처럼 같은 캔버스다(BO 의 recentGroups 0): 고른 묶음 하나만 놓고,
+   다른 묶음을 고르면 그 그림을 다 읽을 때까지(최대 0.8초) 지금 묶음을 두었다가 바꾼 뒤 움직임 없이 맞춘다. 묶음을 더 불러오지 않고, 장식이 없다.
+   장식 그림(NAI 별자리 무늬)은 캔버스에도 넣지 않았다. */
 const OVW = { cam: { x: 0, y: 0, scale: 1 }, tgt: null, k: 11, raf: 0, shown: 8, lay: null, tiles: new Map(), pan: null, ptrs: new Map(), pinch: null,
   inertia: 0, settleT: 0, idleT: 0, rq: 0, keys: new Set(), keyRaf: 0, groupOnly: false, keepGroup: false, quiet: false, wasDrag: false, size: null, newest: '', lastSel: null,
-  board: null, wall: null, prev: null, _pinShow: false, pending: null, pendSel: false };   // pending: 생성 중 결과 자리 · pendSel: 그 자리를 고름   // board: 핀 보드 배치(pbLayout) · wall: 핀 보드를 고름(NAI 묶음 «pin-wall») · prev: 그 전 선택(Q 로 돌아감)
+  board: null, wall: null, prev: null, _pinShow: false, pending: null, pendSel: false,   // pending: 생성 중 결과 자리 · pendSel: 그 자리를 고름   // board: 핀 보드 배치(pbLayout) · wall: 핀 보드를 고름(NAI 묶음 «pin-wall») · prev: 그 전 선택(Q 로 돌아감)
+  simpleKey: '', simpleShown: '', simpleTok: 0, simpleBusy: false, tileClick: false };   // 단순 화면: simpleKey 고른 묶음(NAI k) · simpleShown 보이는 묶음(NAI C) · simpleTok 바꾸기 차례 · tileClick 결과 그림을 눌러 고름(NAI 는 날아가며 고른다)
 function ovwOn() {
-  return S.mode === 'main' && S.simpleOutputViewer === false && window.innerWidth > 900 && R.hist.length > 0 && (!!curItem() || !!S.hideQuickstart);
+  return S.mode === 'main' && R.hist.length > 0 && (!!curItem() || !!S.hideQuickstart);
 }
-// 창 폭이 900 을 넘나들면 단순 화면과 캔버스가 바뀐다 (NAI: 휴대폰 폭에서는 늘 단순)
+// NAI BO: o = 설정 «단순 결과 화면» || 화면 폭 900 이하 → recentGroups 0 (고른 묶음 하나만)
+function ovwSimple() { return S.simpleOutputViewer === true || window.innerWidth <= 900; }
+// 창 폭이 900 을 넘나들면 단순 화면과 여러 묶음 화면이 바뀐다 (NAI: 휴대폰 폭에서는 늘 단순)
 window.addEventListener('resize', () => { clearTimeout(OVW.rzT); OVW.rzT = setTimeout(() => ovwSync(), 150); });
 const ovwReduced = () => !!S.canvasReducedMotion || (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 const ovwHash01 = s => { let t = 0x811c9dc5; for (let i = 0; i < s.length; i++) { t ^= s.charCodeAt(i); t = Math.imul(t, 0x1000193); } return (t >>> 0) / 0x100000000; };
@@ -3881,6 +3887,229 @@ function ovwGroupLayout(sizes, key) {
   const cols = Math.max(1, Math.ceil(Math.sqrt(sizes.length))), rects = []; let x = 0, y = 0, rowH = 0, w = 0;
   sizes.forEach((s, t) => { if (t > 0 && t % cols === 0) { y += rowH + 48; x = 0; rowH = 0; } rects.push({ x, y, width: s.width, height: s.height }); x += s.width + 48; rowH = Math.max(rowH, s.height); w = Math.max(w, x - 48); });
   return { rects, size: { width: w, height: y + rowH } };
+}
+/* ── 결과 화면 장식 (NAI 빌드 b50892a UP·Uk·UM·UI·UA·UE·UR·BU·BF) ─────────────────────────────────────────
+   묶음마다 둘레에 별자리(점과 선)·나침반·겹고리·반짝이·혜성 무늬를 그리고, 묶음 사이를 별자리 선으로 잇는다(단순 화면은 장식 없음).
+   늘어놓는 셈은 NAI 와 같다(묶음 이름에서 뽑은 씨앗으로 정해지므로 같은 묶음은 늘 같은 무늬). 무늬 그림(symbol 정의)은 NAI 저작물이라
+   저장소에 넣지 않고 서버가 사용자 PC 에서 NAI 공개 스크립트로 뽑아 준다(/nai-ornaments) — 못 받으면 점·선·고리만 그려지고 기록에 남긴다. */
+const ORN_K = { 'nai-nested-rings': 2, 'nai-compass': 1, 'nai-sparkle': 14 / 29, 'nai-spoke': 14 / 198, 'nai-comet': 14 / 128 };   // NAI Uk: 무늬 가로 = 세로 × 이 값
+const ORN_C = 'var(--nai-structure)', ORN_T = 'stroke-width:var(--canvas-hairline-width, 1.25px)';   // NAI UC·UT
+function ornSeed(s) { let t = 0x811c9dc5; for (let i = 0; i < s.length; i++) { t ^= s.charCodeAt(i); t = Math.imul(t, 0x1000193); } return t >>> 0; }   // NAI US
+function ornRand(e) {   // NAI UM (씨앗이 같으면 같은 수열)
+  return function () { e |= 0; let t = Math.imul((e = e + 0x6d2b79f5 | 0) ^ e >>> 15, 1 | e); return (((t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t) ^ t >>> 14) >>> 0) / 0x100000000; };
+}
+function ornSegDist(e, t, i, r, n, a) { const o = n - i, s = a - r, l = o * o + s * s; let c = l ? ((e - i) * o + (t - r) * s) / l : 0; return Math.hypot(e - (i + (c = Math.max(0, Math.min(1, c))) * o), t - (r + c * s)); }   // NAI UI: 점과 선분 거리
+function ornCross(e, t) { const i = (a, b, c) => (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]), [r, n] = e, [a, o] = t, s = i(a, o, r), l = i(a, o, n), c = i(r, n, a), d = i(r, n, o); return s > 0 != l > 0 && c > 0 != d > 0; }   // NAI UA: 두 선분이 엇갈리나
+function ornRectDist(e, t, i) { return Math.hypot(Math.max(i.x - e, 0, e - (i.x + i.width)), Math.max(i.y - t, 0, t - (i.y + i.height))); }   // NAI UE
+function ornInRect(e, t, i) { return e >= i.x && e <= i.x + i.width && t >= i.y && t <= i.y + i.height; }   // NAI UR
+/* NAI UP: 장식 조각을 모아 SVG 글로 낸다. 무늬끼리·그림과 겹치지 않게 자리를 찾는다 (난수를 부르는 차례까지 NAI 와 같다) */
+function ornBuilder() {
+  const out = [], placed = [], nodes = [], lines = [], blocks = [], inner = [];
+  function use(id, x, y, h, a) {
+    const w = h * (ORN_K[id] || 1), x0 = x - w / 2, y0 = y - h / 2, rot = a.rot ? ` transform="rotate(${a.rot.toFixed(1)} ${x.toFixed(1)} ${y.toFixed(1)})"` : '',
+      op = a.opacity !== undefined ? ` opacity="${a.opacity.toFixed(2)}"` : '', c = a.color || ORN_C;
+    out.push(`<use href="#${id}" x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" color="${c}" style="color:${c}"${op}${rot}/>`);
+  }
+  function spot(rnd, rc, r, margin) {   // 빈자리 (12번 찾아본다)
+    for (let k = 0; k < 12; k++) {
+      const p = { x: rc.x + rnd() * rc.width, y: rc.y + rnd() * rc.height };
+      if (blocks.every(b => ornRectDist(p.x, p.y, b) > margin) && placed.every(q => Math.hypot(q.x - p.x, q.y - p.y) > (q.r + r) * .6)) return p;
+    }
+    return null;
+  }
+  function place(x, y, r) { placed.push({ x, y, r }); }
+  function lineOk(x1, y1, x2, y2, A, B, sys) {   // 선을 그어도 되나: 다른 점을 비켜 가고, 그림 안쪽 네모·다른 선과 엇갈리지 않는다
+    const away = q => q === A || q === B || ornSegDist(q.x, q.y, x1, y1, x2, y2) >= q.r + 10;
+    if (!nodes.every(away) || !sys.every(away)) return false;
+    const u = [[x1, y1], [x2, y2]];
+    return !inner.some(rc => (function (e, t) {
+      if (ornInRect(e[0][0], e[0][1], t) || ornInRect(e[1][0], e[1][1], t)) return true;
+      const i = t.x + t.width, r = t.y + t.height;
+      return [[[t.x, t.y], [i, t.y]], [[i, t.y], [i, r]], [[i, r], [t.x, r]], [[t.x, r], [t.x, t.y]]].some(s => ornCross(e, s));
+    })(u, rc)) && !lines.some(s => ornCross(s, u));
+  }
+  function nodeOk(x, y, r, sys) {   // 점을 놓아도 되나
+    return sys.every(q => Math.hypot(q.x - x, q.y - y) > q.r + r + 24) && nodes.every(q => Math.hypot(q.x - x, q.y - y) > q.r + r + 16)
+      && lines.every(s => ornSegDist(x, y, s[0][0], s[0][1], s[1][0], s[1][1]) > r + 10) && inner.every(rc => ornRectDist(x, y, rc) > r);
+  }
+  return {
+    blockRect(rc) { blocks.push(rc); const m = Math.min(120, rc.width / 3, rc.height / 3); inner.push({ x: rc.x + m, y: rc.y + m, width: rc.width - 2 * m, height: rc.height - 2 * m }); },
+    anchorMotif(seed, rc, opt) {   // 겹고리·나침반·동심원·호 하나
+      const n = ornRand(seed), pick = a => a[n() * a.length | 0], rg = (a, b) => a + n() * (b - a);
+      const kind = pick(['nai-nested-rings', 'nai-compass', 'concentric', 'arcs']), d = rg(.7, 1.2) * rc.height;
+      const u = rc.x + pick([rg(-.05, .25), rg(.75, 1.05)]) * rc.width, h = rc.y + rg(.1, .9) * rc.height;
+      const p = rg(opt?.opacity?.[0] ?? .2, opt?.opacity?.[1] ?? .45);
+      if (kind === 'concentric' || kind === 'arcs') {
+        const t = [], circ = (r, at) => `<circle cx="${u.toFixed(1)}" cy="${h.toFixed(1)}" r="${r.toFixed(1)}" ${at}/>`, st = `fill="none" stroke="${ORN_C}" style="${ORN_T}"`;
+        let o = d / 2;
+        for (; o > 60 && t.length < 12;) {
+          if (kind === 'arcs' && .65 > n()) {
+            const e = 2 * o * Math.PI, l = e / pick([1, 1, 2]), c = l * rg(.25, .65);
+            t.push(circ(o, `${st} stroke-dasharray="${c.toFixed(1)} ${(l - c).toFixed(1)}" stroke-dashoffset="${(n() * e).toFixed(1)}"`));
+          } else t.push(circ(o, st));
+          if (.3 > n()) { const e = rg(0, 2 * Math.PI); t.push(`<circle cx="${(u + Math.cos(e) * o).toFixed(1)}" cy="${(h + Math.sin(e) * o).toFixed(1)}" r="${rg(5, 11).toFixed(1)}" fill="${ORN_C}"/>`); }
+          o -= .4 > n() ? rg(7, 16) : rg(.12, .3) * (d / 2);
+        }
+        if (.4 > n()) t.push(circ(rg(5, 10), `fill="${ORN_C}"`));
+        out.push(`<g opacity="${p.toFixed(2)}" data-motif="1">\n${t.join('\n')}\n</g>`);
+      } else use(kind, u, h, d, { opacity: p, rot: kind === 'nai-compass' ? rg(-30, 30) : 0 });
+      place(u, h, d / 3);
+    },
+    spoke(seed, rc) {   // 가시·튕김·혜성 하나
+      const n = ornRand(seed), pick = a => a[n() * a.length | 0], rg = (a, b) => a + n() * (b - a), kind = pick(['spike', 'spike', 'flick', 'comet']);
+      let len, rot;
+      if (kind === 'comet') { len = rg(200, 480); rot = .5 > n() ? rg(-55, 55) : rg(125, 235); }
+      else if (kind === 'flick') { len = rg(140, 300); rot = pick([45, 135]); }
+      else { len = rg(240, 560); rot = pick([0, 0, rg(-25, 25)]); }
+      const p = spot(n, rc, len / 2, len / 2);
+      if (p) { use(kind === 'comet' ? 'nai-comet' : 'nai-spoke', p.x, p.y, len, { opacity: rg(.3, .5), rot }); place(p.x, p.y, len / 2); }
+    },
+    sparkleCluster(seed, rc) {   // 반짝이 1~3개 모음
+      const rnd = ornRand(seed), rg = (a, b) => a + rnd() * (b - a), cnt = 1 + (3 * rnd() | 0), R0 = 30 + 22 * cnt, rot = rg(-35, 35), c = spot(rnd, rc, 2 * R0, R0 + 24);
+      if (!c) return;
+      const got = [];
+      for (let e = 0; e < cnt; e++) {
+        const sz = e === 0 ? rg(30, 48) : rg(14, 36);
+        for (let k = 0; k < 12; k++) {
+          const an = rg(0, 2 * Math.PI), dist = e === 0 ? 0 : R0 * rnd(), x = c.x + Math.cos(an) * dist, y = c.y + Math.sin(an) * dist;
+          if (!got.every(q => Math.hypot(q.x - x, q.y - y) > (q.r + sz / 2) * .9)) continue;
+          got.push({ x, y, r: sz / 2 });
+          const f = (sz - 14) / 34;
+          use('nai-sparkle', x, y, sz, { opacity: Math.min(.5, .16 + .34 * f + rg(-.03, .03)), rot: rot + rg(-8, 8) });
+          break;
+        }
+      }
+      place(c.x, c.y, R0);
+    },
+    nodeSystem(seed, a = {}) {   // 별자리: 씨앗 점에서 가지를 뻗으며 점·선을 잇는다 (target 이 있으면 그쪽으로)
+      const o = ornRand(seed), pick = e => e[o() * e.length | 0], u = (e, t) => e + o() * (t - e), h = a.color || ORN_C, p = a.opacity ?? u(.2, .5),
+        m = a.maxDegree || pick([3, 3, 4]), g = a.nodeBudget || 5 + (6 * o() | 0), f = a.branchChance ?? .35, _ = a.x ?? 0, y = a.y ?? 0, v = a.target, b = a.stopRadius ?? 90;
+      let n = v ? Math.atan2(v.y - y, v.x - _) : (a.angle ?? u(0, 360)) * Math.PI / 180;
+      const x = a.distance ?? (v ? 2 * Math.hypot(v.x - _, v.y - y) : u(600, 1300)), w = (a.curve ?? 0) * Math.PI / 180,
+        S = Math.min(1, Math.max(.45, (w ? x / Math.abs(w) : 1 / 0) / 320)) * (a.scale ?? 1), M = a.wander ?? u(.35, .75), k = a.linkChance ?? .3,
+        C = [], T = [], A = new Set(), E = (e, t) => (e.id < t.id ? `${e.id}-${t.id}` : `${t.id}-${e.id}`);
+      let I = 0;
+      function R(e, t, i) {
+        const r = { id: I++, x: e, y: t, r: i, degree: 0, style: i < 14 ? 'dot' : pick(['ring', 'ring', 'ring', 'echo', 'echo', 'pad', 'filled', 'satellite']) };
+        if (r.style === 'echo') { r.gap = Math.min(u(2, 7), .3 * i); r.rings = i > 40 && .25 > o() ? 3 : 2; }
+        else if (r.style === 'pad') r.innerFrac = u(.45, .7);
+        else if (r.style === 'satellite') { r.satAngle = u(0, 2 * Math.PI); r.satR = Math.min(u(3, 6), .2 * i); }
+        return r;
+      }
+      function P(e, t) {   // 두 점 잇기
+        const i = t.x - e.x, nn = t.y - e.y, aa = Math.hypot(i, nn), s = i / aa, l = nn / aa, c = e.x + s * e.r, d = e.y + l * e.r, pp = t.x - s * t.r, mm = t.y - l * t.r;
+        T.push(`<line x1="${c.toFixed(1)}" y1="${d.toFixed(1)}" x2="${pp.toFixed(1)}" y2="${mm.toFixed(1)}" stroke="${h}" style="${ORN_T}"/>`);
+        if (.1 > o()) { const q = u(.3, .7), r = u(3, 6.5); T.push(`<circle cx="${(c + (pp - c) * q).toFixed(1)}" cy="${(d + (mm - d) * q).toFixed(1)}" r="${r.toFixed(1)}" fill="${h}"/>`); }
+        lines.push([[c, d], [pp, mm]]); A.add(E(e, t)); e.degree++; t.degree++;
+      }
+      function L(e, t, i, r) {   // e 에서 t 쪽으로 새 점 하나 (20번 찾아본다)
+        if (e.degree >= m) return null;
+        for (let q = 0; q < 20; q++) {
+          const aa = r * (.35 + q / 19), s = t + u(-aa, aa), l = (.25 > o() ? u(9, 16) : u(22, 78)) * i * S, hh = e.r + l + u(35, 130) * i * S, pp = e.x + Math.cos(s) * hh, mm = e.y + Math.sin(s) * hh;
+          if (!nodeOk(pp, mm, l, C)) continue;
+          const gg = R(pp, mm, l), ff = (pp - e.x) / hh, __ = (mm - e.y) / hh;
+          if (lineOk(e.x + ff * e.r, e.y + __ * e.r, pp - ff * l, mm - __ * l, e, gg, C)) { C.push(gg); P(e, gg); return gg; }
+        }
+        return null;
+      }
+      let D = null; const [j, N] = a.seedRadius ?? [24, 80];
+      for (let e = 0; e < 14 && !D; e++) {
+        const t = (e === 0 && !a.seedRadius && .3 > o() ? u(90, 170) : u(j, N)) * S, i = _ + (e ? u(-60, 60) : 0), r = y + (e ? u(-60, 60) : 0);
+        if (nodeOk(i, r, t, C)) { D = R(i, r, t); C.push(D); }
+      }
+      if (!D) return;
+      let O = 0, F = 0, U = 0;
+      for (; O < x && C.length < g;) {
+        if (v) { if (Math.hypot(v.x - D.x, v.y - D.y) < b) break; n = Math.atan2(v.y - D.y, v.x - D.x); }
+        const e = L(D, n + F + U, 1, .45);
+        if (!e) break;
+        const t = Math.hypot(e.x - D.x, e.y - D.y);
+        O += t; F += w * Math.min(t / x, 1); U = .75 * U + u(-1, 1) * M * 1.3;
+        if (o() < .5 * M) U += (.5 > o() ? 1 : -1) * u(1.6, 2.6);
+        U = Math.max(-2.6, Math.min(2.6, U)); D = e;
+        if (o() < f && C.length < g) {
+          const ang = n + F + U + (.5 > o() ? 1 : -1) * u(.9, 1.9), t2 = L(D, ang, .55, .35);
+          if (t2 && .35 > o() && C.length < g) L(t2, ang + u(-.5, .5), .5, .35);
+        }
+      }
+      if (C.length === 0) return;
+      let z = 0;
+      for (let e = 0; e < C.length && z < 3; e++) for (let t = e + 1; t < C.length && z < 3; t++) {   // 가까운 점끼리 몇 개 더 잇는다
+        const i = C[e], r = C[t];
+        if (A.has(E(i, r))) continue;
+        const nn = Math.hypot(r.x - i.x, r.y - i.y), gap = nn - i.r - r.r;
+        if (gap < 14 || gap > 160 || o() >= k || i.degree >= m || r.degree >= m) continue;
+        const s = (r.x - i.x) / nn, l = (r.y - i.y) / nn;
+        if (lineOk(i.x + s * i.r, i.y + l * i.r, r.x - s * r.r, r.y - l * r.r, i, r, C)) { P(i, r); z++; }
+      }
+      for (const e of C) {
+        nodes.push(e);
+        T.unshift((function (e, t) {   // 점 모양 (고리·메아리·속고리·채움·위성·점)
+          const ci = (r, at) => `<circle cx="${e.x.toFixed(1)}" cy="${e.y.toFixed(1)}" r="${r.toFixed(1)}" ${at}/>`, st = `fill="none" stroke="${t}" style="${ORN_T}"`;
+          switch (e.style) {
+            case 'echo': { let s = ci(e.r, st) + ci(e.r - (e.gap ?? 0), st); if (e.rings === 3) s += ci(e.r - (e.gap ?? 0) * 2, st); return s; }
+            case 'pad': return ci(e.r, st) + ci(e.r * (e.innerFrac ?? .5), st);
+            case 'satellite': { const sx = e.x + Math.cos(e.satAngle ?? 0) * e.r, sy = e.y + Math.sin(e.satAngle ?? 0) * e.r; return ci(e.r, st) + `<circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${(e.satR ?? 3).toFixed(1)}" fill="${t}"/>`; }
+            case 'filled': return ci(e.r, `fill="var(--nai-bg)" stroke="${t}" style="${ORN_T}"`);
+            case 'dot': return ci(e.r, `fill="${t}"`);
+            default: return ci(e.r, st);
+          }
+        })(e, h));
+      }
+      out.push(`<g opacity="${p.toFixed(2)}">\n${T.join('\n')}\n</g>`);
+      for (const q of C) place(q.x, q.y, q.r);
+    },
+    markup() { return out.join('\n'); }
+  };
+}
+/* NAI BO 의 to·markup: 묶음 하나의 장식 — 이웃 묶음 그림까지 막고, 다음 묶음으로 별자리 선을 잇고, 장식이면 무늬를 둘레에 */
+function ornMarkup(o) {
+  const { id: t, width: i, height: r, tiles: n, connector: a, garnish: g } = o, s = ornBuilder();
+  for (const e of n) s.blockRect(e);
+  const l = { x: 0, y: 0, width: i, height: r };
+  if (g && .15 > ovwHash01(t + ':motif')) s.anchorMotif(ornSeed(t + ':motif'), ovwPad(l, 340));
+  if (a) { const e = `${t}->${a.nextId}`; s.nodeSystem(ornSeed(e), { x: i / 2, y: r - a.startInset - 40, target: { x: a.targetX, y: a.targetY }, wander: .2 + .25 * ovwHash01(e + ':w'), scale: 1.15, seedRadius: [24, 56], opacity: .3 + .2 * ovwHash01(e + ':o') }); }
+  if (g) {
+    const e = ovwPad(l, 340), cnt = Math.floor(4 * ovwHash01(t + ':sysc')), flip = .5 > ovwHash01(t + ':sysflip') ? 0 : 1;
+    for (let k = 0; k < cnt; k++) {
+      const q = `${t}:sys${k}`, side = (k + flip) % 2 == 0 ? -1 : 1;
+      s.nodeSystem(ornSeed(q), { x: side < 0 ? -200 - 420 * ovwHash01(q + 'x') : i + 200 + 420 * ovwHash01(q + 'x'), y: (k + ovwHash01(q + 'y')) / cnt * r, nodeBudget: 1 + Math.floor(6 * ovwHash01(q + 'n')), distance: 500 + 500 * ovwHash01(q + 'd'), scale: 1.5 + .6 * ovwHash01(q + 's'), seedRadius: [40, 110] });
+    }
+    if (.55 > ovwHash01(t + ':spoke')) s.spoke(ornSeed(t + ':spoke'), e);
+    const sp = Math.floor(4 * ovwHash01(t + ':sparkc'));
+    for (let k = 0; k < sp; k++) s.sparkleCluster(ornSeed(`${t}:spark${k}`), e);
+  }
+  return s.markup();
+}
+/* 묶음마다 장식 입력 (NAI to): 앞·뒤 묶음 그림까지 막는 네모로, 다음 묶음이 있으면 그 위로 잇는 선 */
+function ornInputs(groups, place, bounds, garnish) {
+  const e = groups.map(g => ({ id: g.key, bounds: bounds.get(g.key) })).filter(x => !!x.bounds), t = new Map(), top = new Map();
+  for (const p of place) { const k = p.g.key; if (!t.has(k)) t.set(k, []); t.get(k).push(p.rect); }
+  for (const p of place) { const k = p.g.key, b = p.rect.y + p.rect.height, r = top.get(k);
+    if (!r) { top.set(k, { topY: p.rect.y, topH: p.rect.height, bottomY: b, bottomH: p.rect.height }); continue; }
+    if (p.rect.y < r.topY) { r.topY = p.rect.y; r.topH = p.rect.height; } if (b > r.bottomY) { r.bottomY = b; r.bottomH = p.rect.height; } }
+  return e.map((a, n) => {
+    const s = e[n - 1], l = e[n + 1], c = a.bounds, d = [];
+    for (const id of [s && s.id, a.id, l && l.id]) if (id !== undefined) for (const q of t.get(id) || []) d.push({ x: q.x - c.x, y: q.y - c.y, width: q.width, height: q.height });
+    const u = { id: a.id, width: c.width, height: c.height, tiles: d,
+      connector: l ? { nextId: l.id, startInset: .010000000000000009 * ((top.get(a.id) || {}).bottomH || 0), targetX: l.bounds.x + l.bounds.width / 2 - c.x, targetY: l.bounds.y + .010000000000000009 * ((top.get(l.id) || {}).topH || 0) + 40 - c.y } : undefined,
+      garnish };
+    return { id: a.id, key: JSON.stringify(u), input: u, x: c.x, y: c.y, width: c.width, height: c.height };
+  });
+}
+/* NAI BF: 무늬 정의를 한 번 받아 판에 둔다 (못 받으면 기록에 남기고, 점·선·고리는 그대로 그려진다) */
+function ornDefsLoad(world) {
+  if (OVW.ornDefs) return;
+  OVW.ornDefs = 'loading';
+  fetch('/nai-ornaments').then(r => r.json()).then(d => {
+    if (!d || !d.ok || !d.defs) { OVW.ornDefs = 'fail'; logErr('결과 화면 장식 무늬를 NAI 에서 받지 못했습니다: ' + ((d && d.err) || '응답 없음')); return; }
+    if (/<script|\son\w+\s*=|javascript:|href/i.test(d.defs)) { OVW.ornDefs = 'fail'; logErr('결과 화면 장식 무늬 정의에 쓰면 안 되는 것이 섞여 쓰지 않았습니다'); return; }
+    const sv = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    sv.setAttribute('aria-hidden', 'true'); sv.setAttribute('class', 'ovw-defs');
+    sv.innerHTML = '<defs>' + d.defs + '</defs>';
+    world.insertBefore(sv, world.firstChild);
+    OVW.ornDefs = 'ok';
+  }).catch(e => { OVW.ornDefs = 'fail'; logErr('결과 화면 장식 무늬를 받지 못했습니다: ' + e.message); });
 }
 /* 결과 묶음 — 최신부터. 같은 요청으로 받은 그림(gid 가 같고 이어진 것)은 한 묶음, gid 가 없는 옛 그림은 한 장씩.
    생성 중이면 맨 위에 그 요청의 빈 칸(아직 안 온 장)을 둔다 (NAI Eb·Ex 의 dummy 그림) */
@@ -3910,7 +4139,8 @@ function ovwPendingStart(gid, n, w, h, focus) {
   OVW.pendSel = !!focus;
   if (focus) { OVW.wall = null; OVW.prev = null; }
   ovwLayout(); ovwRender();
-  if (focus) { const b = ovwGroupFit(OVW.pending.gid); if (b) ovwFlyRect(b, true); }
+  // NAI: 고른 묶음이 바뀌면 날아간다(단순 화면은 그 묶음으로 바꾼 뒤 움직임 없이 — ovwSimpleSwitch)
+  if (focus) { const b = ovwGroupFit(OVW.pending.gid); if (b) ovwFlyRect(b, !ovwSimple()); }
 }
 function ovwPendingImage(si, bytes, final) {
   const P = OVW.pending; if (!P || si == null || si < 0 || si >= P.n || !ovwVisible()) return false;
@@ -3926,8 +4156,38 @@ function ovwPendingEnd(silent) {
   OVW.pending = null; OVW.pendSel = false;
   if (!silent && ovwVisible()) { ovwLayout(); ovwRender(); }
 }
+/* 단순 화면에서 고른 묶음 (NAI k: 생성 중 자리를 고르면 그 묶음 · 핀 보드를 고른 동안은 마지막으로 고른 진짜 묶음(w) · 아니면 고른 그림의 묶음) */
+function ovwSimpleTarget(all) {
+  if (OVW.pendSel && OVW.pending) return String(OVW.pending.gid);
+  if (OVW.wall) return OVW.simpleKey;
+  const it = curItem(), g = it && all.find(x => x.items.includes(it));
+  return g ? g.key : '';
+}
+/* NAI BO 단순 모드의 묶음 바꾸기: 새 묶음 그림을 다 읽을 때까지(최대 0.8초) 지금 묶음을 두었다가 바꾸고, 움직임 없이 맞춘다(CanvasFlyRequest → 날기 !o) */
+function ovwSimpleSwitch(k, all) {
+  OVW.simpleKey = k;
+  const g = all.find(x => x.key === k), tok = ++OVW.simpleTok;
+  OVW.simpleBusy = !!g;
+  if (!g) return;   // NAI: 그 묶음이 아직 없으면 기다린다 — 생기면 ovwLayout 이 다시 부른다
+  let t = 0;
+  const done = () => {
+    if (tok !== OVW.simpleTok) return;
+    OVW.simpleTok++; clearTimeout(t); OVW.simpleBusy = false; OVW.simpleShown = k;
+    if (!ovwVisible() || !ovwSimple()) return;
+    ovwLayout(); ovwRender(); ovwFitCur(false);
+  };
+  t = setTimeout(done, 800);
+  Promise.all(g.items.filter(x => !x._pending).map(x => { const im = new Image(); im.src = viewUrlOf(x); return im.decode().catch(() => {}); })).then(done);
+}
 function ovwLayout() {
-  const all = ovwGroups(), groups = all.slice(0, OVW.shown), place = [], bounds = new Map(); let y = 0;
+  const all = ovwGroups(), place = [], bounds = new Map(); let y = 0, groups;
+  if (ovwSimple()) {   // NAI R(l=0): 보이는 묶음(C) 하나 — 고른 묶음이 바뀌면 다 읽은 뒤에 바꾼다 · 찾는 묶음이 없으면 최신 묶음
+    const k = ovwSimpleTarget(all);
+    if (k === OVW.simpleShown) { if (OVW.simpleBusy || OVW.simpleKey !== k) { OVW.simpleTok++; OVW.simpleBusy = false; OVW.simpleKey = k; } }   // 보이는 묶음으로 돌아오면 바꾸던 것을 그만둔다
+    else if (k !== OVW.simpleKey || (!OVW.simpleBusy && all.some(x => x.key === k))) ovwSimpleSwitch(k, all);
+    const sh = (all.some(x => x.key === k) ? all.find(x => x.key === OVW.simpleShown) : all.find(x => x.key === k)) || all[0];
+    groups = sh ? [sh] : [];
+  } else groups = all.slice(0, OVW.shown);
   for (const g of groups) {
     const { rects, size } = ovwGroupLayout(g.items.map(it => ({ width: it.w || 832, height: it.h || 1216 })), g.key);
     const x0 = -size.width / 2;
@@ -3935,7 +4195,7 @@ function ovwLayout() {
     bounds.set(g.key, { x: x0, y, width: size.width, height: size.height });
     y += size.height + 340;
   }
-  OVW.lay = { all, groups, place, bounds, height: Math.max(0, y - 340) };
+  OVW.lay = { all, groups, place, bounds, height: Math.max(0, y - 340), orn: ornInputs(groups, place, bounds, !ovwSimple()) };   // orn: 묶음 장식 (NAI to, 단순 화면은 garnish 없음)
   /* NAI eR·shiftWorldY: 맨 위에 새 묶음(생성 중 자리 포함)이 끼어 아래 묶음이 밀리면, 전에도 있던 묶음 가운데 가장 위의 것이
      밀린 만큼 카메라도 옮겨 보던 화면이 튀지 않게 한다 (날아가는 중이면 목표도 같이) */
   { const prev = OVW.prevY, now = new Map([...bounds].map(([k, b]) => [k, b.y]));
@@ -3957,9 +4217,10 @@ function ovwEl() {
   let st = $('#ovwStage');
   if (st) return st;
   st = document.createElement('div'); st.id = 'ovwStage'; st.className = 'ovw-stage'; st.hidden = true; st.tabIndex = -1;
-  st.innerHTML = '<div class="ovw-world" id="ovwWorld"></div>';
+  st.innerHTML = '<div class="ovw-world" id="ovwWorld"><div class="ovw-orn" id="ovwOrn"></div></div>';   // ovwOrn: 장식(그림 아래에 깔린다)
   const vs = $('#vstage'); vs.insertBefore(st, $('#btnPrev'));
   ovwBind(st);
+  ornDefsLoad($('#ovwWorld'));
   return st;
 }
 /* 결과 그림 한 칸 (NAI Uu): 그림 · 마우스를 올리면 아래 가운데 «핀·복사·내려받기» 줄과 오른쪽 위 시드 단추(고른 그림에는 안 뜸)
@@ -3973,10 +4234,30 @@ function ovwTileEl() {
     + '<button type="button" class="ovw-seed" data-a="seed" title="이 시드 쓰기 (NAI Copy to Seed)"><span></span>🌱</button>');
   return el;
 }
+/* NAI BU: 보이는 곳 둘레 max(1800, 묶음 높이×1.25+1000) 안의 묶음 장식만 그린다 (배율 0.02 넘을 때) · 무늬 글은 묶음 입력이 같으면 다시 만들지 않는다(NAI ta) */
+function ornRender(vis) {
+  const box = $('#ovwOrn'), L = OVW.lay; if (!box || !L) return;
+  const cache = OVW.ornCache || (OVW.ornCache = new Map()), els = OVW.ornEls || (OVW.ornEls = new Map()), want = new Set(), ids = new Set();
+  for (const o of L.orn || []) {
+    ids.add(o.id);
+    if (!(OVW.cam.scale > .02) || !ovwHit(ovwPad(o, Math.max(1800, 1.25 * o.height + 1000)), vis)) continue;
+    let c = cache.get(o.id);
+    if (!c || c.key !== o.key) { c = { key: o.key, markup: ornMarkup(o.input) }; cache.set(o.id, c); }
+    if (!c.markup) continue;
+    want.add(o.id);
+    let el = els.get(o.id);
+    if (!el) { el = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); el.setAttribute('aria-hidden', 'true'); box.appendChild(el); els.set(o.id, el); }
+    const a = Math.max(1, o.width), h = Math.max(1, o.height), sig = c.key + '|' + o.x + ',' + o.y;
+    if (el._sig !== sig) { el.setAttribute('viewBox', `0 0 ${a} ${h}`); el.style.left = o.x + 'px'; el.style.top = o.y + 'px'; el.style.width = a + 'px'; el.style.height = h + 'px'; el.innerHTML = c.markup; el._sig = sig; }
+  }
+  for (const [k, el] of els) if (!want.has(k)) { el.remove(); els.delete(k); }
+  for (const k of cache.keys()) if (!ids.has(k)) cache.delete(k);
+}
 /* 화면에 보이는 그림만 그린다 (NAI 처럼 보이는 곳 둘레 400 까지) */
 function ovwRender() {
   const w = $('#ovwWorld'); if (!w || !OVW.lay) return;
-  const vis = ovwPad(ovwViewRect(), 400 / OVW.cam.scale), cur = curItem(), want = new Set(), pinned = pbPinnedKeys();
+  const vis = ovwPad(ovwViewRect(), 400 / OVW.cam.scale), cur = curItem(), want = new Set(), pinned = pbPinnedKeys(), simple = ovwSimple();
+  ornRender(vis);
   const canCopy = typeof ClipboardItem === 'function' && !!(navigator.clipboard && navigator.clipboard.write);
   for (const p of OVW.lay.place) {
     if (!ovwHit(p.rect, vis)) continue;
@@ -3986,6 +4267,7 @@ function ovwRender() {
     if (p.it._pending) {   // 생성 중 빈 칸: 그 장의 생성 중 그림(흐리게) · 다 된 장은 그대로 · 단추 없음 (NAI dummy 그림)
       const P = OVW.pending, u = (P && P.urls[p.it._pi]) || '', im = el.firstChild;
       el.classList.add('pending'); el.classList.toggle('raw', !!S.rawIntermediates || !!(P && P.fin[p.it._pi])); el.classList.remove('sel');
+      el.classList.toggle('nohov', p.g.items.length === 1 && (simple || OVW.pendSel));   // NAI disableHover: 고른 한 장짜리(생성 중 자리를 고름)·단순 화면 한 장짜리
       if (el._src !== u) { if (u) { im.src = u; im.hidden = false; } else { im.removeAttribute('src'); im.hidden = true; } el._src = u; }
       el._it = p.it; el._p = p;
       const s = el.style; s.left = p.rect.x + 'px'; s.top = p.rect.y + 'px'; s.width = p.rect.width + 'px'; s.height = p.rect.height + 'px';
@@ -3999,6 +4281,9 @@ function ovwRender() {
     // NAI: 고른 그림(묶음 전체를 고른 때는 한 장짜리 묶음일 때만)에 테두리 — 핀 보드를 고른 동안은 결과 묶음에 테두리가 없다
     const sel = !OVW.wall && !OVW.pendSel && p.it === cur && (!OVW.groupOnly || p.g.items.length === 1);
     el.classList.toggle('sel', sel);
+    // NAI disableHover = 고른 그림 || (단순 화면 && 한 장짜리 묶음) — 마우스를 올려도 커지지 않는다 · 묶음에 생성 중인 장이 있으면 손 모양이 아니다(NAI allImagesFinished)
+    el.classList.toggle('nohov', simple && p.g.items.length === 1);
+    el.classList.toggle('busy', p.g.items.some(x => x._pending));
     el.firstChild.classList.toggle('pixelated', p.it.tool === 'pixel-snap');
     el.querySelector('.orig-tag').hidden = !p.it.varOrig;
     const pb = el.querySelector('[data-a="pin"]'), on = pinned.has(key);
@@ -4017,14 +4302,20 @@ function ovwTileAction(a, it) {
   else if (a === 'dl') saveItem(it, !!S.stripOnSave);
   else if (a === 'seed') { if (it.seed != null) { fixSeed(it.seed); toast('시드 고정: ' + it.seed); } }
 }
+/* NAI Z: 배율에 따라 바뀌는 굵기·크기 — 손으로 옮길 때는 그때그때, 날아가는 동안에는 시작할 때 목표 배율로 한 번만(NAI K) */
+function ovwScaleVars(s) {
+  const st = $('#ovwStage'); if (!st) return;
+  st.style.setProperty('--ovw-ring', Math.max(2, 3 / s) + 'px');
+  // NAI: 판 위 단추·글은 확대해도 화면 크기로 보이게 (--canvas-ui-scale = min(2.5, 1/배율)) · 보드 칸 선은 배율 0.35 아래에서 흐려진다
+  st.style.setProperty('--ovw-ui', String(Math.min(2.5, 1 / s)));
+  st.style.setProperty('--ovw-scale', String(s));
+  st.style.setProperty('--canvas-hairline-width', Math.max(1.25, 1.25 / s) + 'px');   // NAI: 장식 선 굵기는 화면에서 1.25px 아래로 가늘어지지 않는다
+}
 function ovwApply() {
   const w = $('#ovwWorld'), st = $('#ovwStage'); if (!w || !st) return;
   const c = OVW.cam;
   w.style.transform = `translate(${c.x}px, ${c.y}px) scale(${c.scale})`;
-  st.style.setProperty('--ovw-ring', Math.max(2, 3 / c.scale) + 'px');
-  // NAI: 판 위 단추·글은 확대해도 화면 크기로 보이게 (--canvas-ui-scale = min(2.5, 1/배율)) · 보드 칸 선은 배율 0.35 아래에서 흐려진다
-  st.style.setProperty('--ovw-ui', String(Math.min(2.5, 1 / c.scale)));
-  st.style.setProperty('--ovw-scale', String(c.scale));
+  if (!OVW.raf) ovwScaleVars(c.scale);
   // 날아가는 동안에는 한 장면에 한 번만, 그 밖(바로 옮기기·끌기·휠)에는 바로 그린다 — 화면에 들어온 그림이 늦게 뜨지 않게
   if (OVW.raf) { if (!OVW.rq) OVW.rq = requestAnimationFrame(() => { OVW.rq = 0; ovwRender(); }); }
   else ovwRender();
@@ -4044,6 +4335,7 @@ function ovwFlyTo(t, animate, k) {
   if (!t) return;
   if (!animate || ovwReduced()) { ovwStop(); OVW.cam = { ...t }; ovwApply(); return; }
   OVW.tgt = { ...t }; OVW.k = k || 11;
+  ovwScaleVars(t.scale);   // NAI ey: Z(목표 배율)
   if (OVW.raf) return;
   let last = performance.now();
   const step = now => {
@@ -4092,8 +4384,10 @@ function ovwSettleSoon() {
   if (OVW.raf || OVW.pan || OVW.pinch || OVW.inertia) return;
   OVW.settleT = setTimeout(() => {
     if (!ovwVisible() || !OVW.lay || OVW.raf || OVW.pan) return;
+    const simple = ovwSimple();
+    if (simple && OVW.simpleBusy) return;   // NAI E: 단순 화면에서 묶음을 바꾸는 중에는 고르지 않는다
     const v = ovwViewRect();
-    if (OVW.shown < OVW.lay.all.length && v.y + v.height > OVW.lay.height - 800) { OVW.shown = Math.min(OVW.shown + 8, OVW.lay.all.length); ovwLayout(); ovwRender(); }
+    if (!simple && OVW.shown < OVW.lay.all.length && v.y + v.height > OVW.lay.height - 800) { OVW.shown = Math.min(OVW.shown + 8, OVW.lay.all.length); ovwLayout(); ovwRender(); }   // NAI: 단순 화면은 더 불러오지 않는다(l=0)
     const cx = v.x + v.width / 2, cy = v.y + v.height / 2; let best = null, bd = Infinity, wall = false;
     const near = r => { const dx = r.x + r.width / 2 - cx, dy = r.y + r.height / 2 - cy; return dx * dx + dy * dy; };
     for (const p of OVW.lay.place) { const d = near(p.rect); if (d < bd) { bd = d; best = p; wall = false; } }
@@ -4129,6 +4423,7 @@ function ovwSync() {
   if (!on) { if (st) st.hidden = true; ovwStop(); return; }
   st = ovwEl(); const first = st.hidden; st.hidden = false;
   st.classList.toggle('locked', !!S.canvasLockCamera);
+  st.classList.toggle('rm', ovwReduced());   // NAI: 움직임 줄이기면 결과 그림이 마우스를 올려도 커지지 않는다
   const lay = ovwLayout(), newest = lay.groups[0] ? lay.groups[0].key : '';
   const it = curItem();
   if (!it) { OVW.lastSel = null; ovwRender(); if (first) { const b = lay.bounds.get(newest); if (b) ovwFlyRect(b, false); } return; }
@@ -4140,7 +4435,7 @@ function ovwSync() {
   // NAI 는 고른 그림이 바뀔 때만 날아간다 (즐겨찾기·변형 바꾸기처럼 같은 그림을 다시 그릴 때는 그대로)
   if (it === OVW.lastSel && !R._ovwNew && !first) { ovwRender(); return; }
   OVW.lastSel = it;
-  if (!ovwGroupOf(it)) {   // 고른 그림이 늘어놓은 묶음 밖(오래된 그림)이면 거기까지 묶음을 늘린다
+  if (!ovwGroupOf(it) && !ovwSimple()) {   // 고른 그림이 늘어놓은 묶음 밖(오래된 그림)이면 거기까지 묶음을 늘린다 (단순 화면은 그 묶음으로 바꾼다 — ovwLayout)
     const at = lay.all.findIndex(x => x.items.includes(it));
     if (at >= 0) { OVW.shown = at + 1; ovwLayout(); }
   }
@@ -4148,7 +4443,8 @@ function ovwSync() {
   if (R._ovwNew) OVW.groupOnly = true;          // NAI: 새 결과는 묶음 전체에 맞춘다
   else if (!OVW.keepGroup) OVW.groupOnly = false;
   ovwRender();
-  ovwFitCur(!first);
+  // NAI e4: 고른 것이 바뀌면 날아간다 — 단순 화면이면 움직임 없이(!o). 결과 그림을 눌러 고른 때는 NAI 도 늘 날아간다
+  ovwFitCur(!first && (!ovwSimple() || OVW.tileClick));
 }
 function ovwKeyFree(e) {
   const a = document.activeElement;
@@ -4239,7 +4535,7 @@ function ovwBind(st) {
     }
     const idx = R.hist.indexOf(it); if (idx < 0) return;
     OVW.groupOnly = false; OVW.keepGroup = false;
-    if (cur === it) { ovwRender(); ovwFitCur(true); } else showImage(idx);
+    if (cur === it) { ovwRender(); ovwFitCur(true); } else { OVW.tileClick = true; try { showImage(idx); } finally { OVW.tileClick = false; } }   // NAI: 누른 그림으로 늘 날아간다
   });
   // 창 크기가 바뀌면 바뀐 만큼의 반을 옮겨 가운데를 지킨다 (NAI)
   new ResizeObserver(() => {
@@ -4264,7 +4560,7 @@ function ovwBind(st) {
       const { w, h } = ovwSize(), s = px ? ovwSnapPx(1, px) : 1; ovwFlyTo({ x: w / 2 - (r.x + r.width / 2) * s, y: h / 2 - (r.y + r.height / 2) * s, scale: s }, true); return; }
     if (k === 'Escape') {
       if (OVW.wall) { if (!OVW.wall.pin) return; e.preventDefault(); OVW.wall = { pin: null }; ovwRender(); ovwFitCur(true); return; }   // 핀 → 보드 전체
-      const it = curItem(); if (!it || OVW.groupOnly) return; e.preventDefault(); OVW.groupOnly = true; ovwRender(); ovwFitCur(true); return; }
+      const it = curItem(); if (!it || OVW.groupOnly) return; e.preventDefault(); OVW.groupOnly = true; ovwRender(); ovwFitCur(!ovwSimple()); return; }   // NAI e4: 단순 화면이면 움직임 없이
     if (k === 'q' || k === 'Q') {   // NAI: 핀 보드와 그 전 선택 사이를 오간다
       e.preventDefault();
       if (OVW.wall) pbLeaveWall(); else if (OVW.board) pbSelectWall(null, true);
@@ -4296,9 +4592,9 @@ function ovwBind(st) {
    · 끌기·크기 바꾸기는 다른 것의 가장자리·가운데(화면 8px)와 64 칸(화면 4px)에 붙는다(Alt 면 안 붙음) · 잠근 것은 옮기지 못한다
    · 보드 여러 개(이름 바꾸기·지우기·«보드 N») · Q 키 = 핀 보드와 지난 선택 사이 오가기
    NAI 는 보드를 그림 기록과 함께 IndexedDB(history-boards)에 두는데, 우리 그림 기록은 늘 남으므로 보드는 설정(S.pinBoards)에 둔다.
-   우리 «단순 결과 화면»은 NAI 와 달리 캔버스가 아닌 예전 화면이라, 거기서는 핀을 꽂기만 하고 보드는 캔버스 결과 화면에서 본다. */
+   «단순 결과 화면»도 NAI 처럼 같은 캔버스라 보드가 보인다(보이는 묶음 왼쪽). */
 const PB = { cap: 50, imgW: 416, defW: 1680, defH: 920, minW: 480, minH: 320, aspMax: 1680 / 920, aspMin: .55, area: 1545600, gap: 48, noteW: 460, noteH: 300, noteMinW: 120, noteMinH: 80 };
-const PBU = { menu: false, menuT: 0, menuSig: '', renaming: null, renameText: '', arrowMode: false, draft: null, selArrow: null, guides: [], active: null, resizeFrame: null, rz: null, pins: new Map(), notes: new Map(), hinted: false };
+const PBU = { menu: false, menuT: 0, menuSig: '', renaming: null, renameText: '', arrowMode: false, draft: null, selArrow: null, guides: [], active: null, resizeFrame: null, rz: null, pins: new Map(), notes: new Map() };
 function pbEmpty() { return { boards: [{ id: 'default', name: '', items: [] }], activeBoardId: 'default' }; }
 function pbState() {
   const s = S.pinBoards;
@@ -4367,8 +4663,6 @@ function pbTogglePin(it) {
   const rects = pbResolved().map(p => ({ x: p.item.x, y: p.item.y, width: p.item.width, height: Math.max(1, Math.round(p.item.width * pbRatio(p.it))) }));
   for (const x of b.items) if (x.kind === 'note') rects.push({ x: x.x, y: x.y, width: x.width, height: x.height });
   pbItemsSet(xs => [...xs, pbMakeImage(k, pbTopZ(xs) + 1, rects, pbRatio(it), ovwStageAspect())]);
-  // 우리 단순 결과 화면에는 보드가 없다(NAI 는 단순 화면도 캔버스라 보드가 보인다) — 어디서 보는지 한 번 알린다
-  if (!ovwOn() && !PBU.hinted) { PBU.hinted = true; toast('핀 보드에 꽂았습니다 — 핀 보드는 캔버스 결과 화면(⚙ «단순 결과 화면» 끄기) 왼쪽에 있습니다'); }
 }
 function paintPinBtn() {
   const b = $('#tPin'); if (!b) return;
@@ -4429,7 +4723,7 @@ function pbLeaveWall() {
     OVW.groupOnly = !!p.groupOnly; OVW.keepGroup = true;
     try { if (curItem() !== p.it) showImage(R.hist.indexOf(p.it)); } finally { OVW.keepGroup = false; }
   }
-  ovwRender(); ovwFitCur(true);
+  ovwRender(); ovwFitCur(!ovwSimple());   // NAI Q: 그 전 선택으로 — 고른 것이 바뀌어 날아간다(e4, 단순 화면은 움직임 없이)
 }
 /* «생성 결과로» (NAI jumpToGeneration): 최신 묶음을 고르고 그 묶음에 맞춘다 */
 function pbJumpToGen() {
@@ -6794,15 +7088,16 @@ function openSettings() {
       const sv = body.querySelector('#mSimpleView'), sh = body.querySelector('#mSimpleViewHint'), keys = body.querySelector('#mOvwKeys');
       const rm = body.querySelector('#mOvwReduced'), rh = body.querySelector('#mOvwReducedHint'), lk = body.querySelector('#mOvwLock'), lh = body.querySelector('#mOvwLockHint');
       const paint = () => {
-        sh.textContent = sv.checked ? '— 지금 생성한 그림만 장식 없이 보여 줍니다 (NAI 기본값은 꺼짐 = 캔버스 결과 화면)'
-          : '— 최근에 생성한 그림 묶음을 한 판에 늘어놓고 끌어 옮기거나 확대해 봅니다 (화면 폭이 900 이하면 늘 단순 화면)';
-        keys.hidden = sv.checked;
+        // NAI simpleOutputViewerChecked·Unchecked: «Only the current generation is shown, without decorations» · «… recent generations with decorations» · «Only applies on desktop»
+        sh.textContent = sv.checked ? '— 지금 고른 결과 묶음 하나만 장식 없이 보여 줍니다. 컴퓨터 화면에서만 적용됩니다 (화면 폭이 900 이하면 늘 이 화면)'
+          : '— 최근 결과 묶음을 한 판에 늘어놓고 장식과 함께 보여 줍니다 (NAI 기본값). 컴퓨터 화면에서만 적용됩니다';
+        keys.hidden = false;   // 단순 화면도 같은 캔버스라 키가 같다 (NAI)
         rh.textContent = rm.checked ? '— 결과 화면이 움직이는 모습 없이 바로 옮겨 갑니다' : '— 결과 화면이 부드럽게 움직입니다';
         lh.textContent = lk.checked ? '— 결과 화면을 끌어 옮기거나 확대할 수 없습니다' : '— 결과 화면을 끌어 옮기고 확대할 수 있습니다';
       };
-      sv.checked = S.simpleOutputViewer !== false; rm.checked = !!S.canvasReducedMotion; lk.checked = !!S.canvasLockCamera; paint();
+      sv.checked = S.simpleOutputViewer === true; rm.checked = !!S.canvasReducedMotion; lk.checked = !!S.canvasLockCamera; paint();
       sv.onchange = () => { S.simpleOutputViewer = sv.checked; save(); paint(); ovwSync(); };
-      rm.onchange = () => { S.canvasReducedMotion = rm.checked; save(); paint(); };
+      rm.onchange = () => { S.canvasReducedMotion = rm.checked; save(); paint(); const st = $('#ovwStage'); if (st) st.classList.toggle('rm', ovwReduced()); };
       lk.onchange = () => { S.canvasLockCamera = lk.checked; save(); paint(); const st = $('#ovwStage'); if (st) st.classList.toggle('locked', lk.checked); };
     }
     { // 투명 그림 — NAI 설정 두 칸
