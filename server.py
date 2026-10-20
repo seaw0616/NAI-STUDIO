@@ -51,7 +51,7 @@ VERSION = 17
 # 같은 PC 의 다른 프로그램은 127.0.0.1 에 닿을 수는 있어도 이 값은 모른다.
 SESSION_KEY = secrets.token_urlsafe(24)
 
-RELEASE = "12.24"   # 배포 버전. GitHub 릴리스 태그 "v12.24" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
+RELEASE = "12.25"   # 배포 버전. GitHub 릴리스 태그 "v12.25" 과 짝을 이룬다. app.js 의 APP_VERSION 과 같아야 한다.
 # 이 앱이 배포되는 저장소. 비워 두면 ⬆ 업데이트 버튼이 아예 안 뜬다 —
 # 사용자가 ⚙설정에 직접 타이핑해 넣기 전까지는 새 버전이 나온 줄도 모른다.
 # 실제로 그 때문에 옛 버전을 계속 쓰시는 분들이 있었다. 기본값을 박아 둔다.
@@ -803,6 +803,22 @@ EXPECT_SAMPLERS = {"plms", "ddim", "k_euler",
                    "k_dpmpp_2m_sde", "k_dpmpp_2s_ancestral", "k_dpmpp_3m_sde", "k_dpmpp_sde",
                    "k_euler_ancestral", "k_lms", "nai_smea", "nai_smea_dyn"}
 EXPECT_SCHEDULES = {"exponential", "karras", "native", "polyexponential"}
+# 12.25: 화면 배치 틀 Layout A~E (builtInPresets) — layout.js NL_PRESETS 가 이 빌드(b50892a)의 배치를 그대로 옮긴 것이다.
+# 모듈 글의 열쇠·글자·숫자만 차례로 모아 셈한 지문(변수 이름은 빌드마다 바뀌어 빼고 센다). 다르면 NAI 가 배치를 바꾼 것.
+EXPECT_LAYOUT_SIG = "e08ca853d78e1b29"
+_LAYOUT_TOK = re.compile(r'([A-Za-z_]\w*):|("(?:[^"\\]|\\.)*")|(!0|!1)|(?<![\w$.])(\d+(?:\.\d+)?)')
+
+
+def nai_layout_sig(js):
+    """NAI 번들에서 화면 배치 틀 모듈을 찾아 지문을 낸다. 못 찾으면 None."""
+    i = js.find('id:"layout-a",name:"Layout A"')
+    if i < 0:
+        return None
+    a, b = js.rfind('"use strict";', 0, i), js.find('.s(["builtInPresets"', i)
+    if a < 0 or b < 0:
+        return None
+    flat = [x for t in _LAYOUT_TOK.findall(js[a:b]) for x in t if x]
+    return hashlib.sha256("\n".join(flat).encode()).hexdigest()[:16]
 
 
 def nai_spec_drift(js):
@@ -896,6 +912,12 @@ def nai_spec_drift(js):
     for rx, label in EXPECT_PRICE:
         if not re.search(rx, js):
             out.append("%s 를 번들에서 못 찾음 (요금식이 바뀌었을 수 있음)" % label)
+    # 5) 화면 배치 틀 Layout A~E — 바뀌면 ⚙ «화면 배치»가 NAI 와 달라진다
+    lsig = nai_layout_sig(js)
+    if lsig is None:
+        out.append("화면 배치 틀(Layout A~E)을 번들에서 못 찾음")
+    elif lsig != EXPECT_LAYOUT_SIG:
+        out.append("화면 배치 틀(Layout A~E)이 바뀜 (지문 %s → %s) — layout.js 의 NL_PRESETS 를 새 배치로 맞출 것" % (EXPECT_LAYOUT_SIG, lsig))
     return out
 
 
@@ -927,7 +949,8 @@ def nai_model_watch(max_age=86400):
         if not paths:
             raise RuntimeError("NAI 페이지에서 스크립트 주소를 하나도 찾지 못했습니다 (사이트 구조가 또 바뀐 것 같습니다)")
         need = [r'get GenerateImage\(\)\{return this\.', r'controlnet:!0,vibetransfer:!1,scaleMax:25',
-                r'"k_euler_ancestral"', r'"polyexponential"', r'"bg-removal"', r'2951823174884865e-21']
+                r'"k_euler_ancestral"', r'"polyexponential"', r'"bg-removal"', r'2951823174884865e-21',
+                r'id:"layout-a",name:"Layout A"']
         texts, got, fails = [], set(), 0
 
         def one(p):
@@ -2003,7 +2026,7 @@ def _chk(name, ok, detail="", level="err"):
     return {"name": name, "ok": bool(ok), "detail": str(detail)[:300], "level": level}
 
 
-SRC_FILES = ("server.py", "app.js", "tools.js", "tags.js", "scenes.js", "canvas.js", "index.html", "style.css")
+SRC_FILES = ("server.py", "app.js", "tools.js", "tags.js", "scenes.js", "canvas.js", "layout.js", "index.html", "style.css")
 
 
 def _src_stamp():

@@ -276,6 +276,9 @@ const DEFAULTS = {
   /* NAI 설정 «Simple Output Viewer»(simpleOutputViewer)·«Reduced Motion»(canvasReducedMotion)·«Lock Output Viewer Camera»(canvasLockCamera).
      NAI 와 같게 «단순 결과 화면» 기본값은 꺼짐(= 최근 묶음을 늘어놓는 캔버스 결과 화면)이다. 켜면 NAI 처럼 고른 묶음 하나만 보이는 캔버스가 된다 (ovwSimple) */
   simpleOutputViewer: false, canvasReducedMotion: false, canvasLockCamera: false,
+  /* NAI 디버그 설정 «Page Layout»(imagegen-layout-active) — 'classic' 은 우리 앱 3단 배치, 'layout-a'~'layout-e' 는 NAI 배치(layout.js).
+     layoutOverlay 는 NAI ImageLayoutOverlay 와 같은 모양 { [배치]: { panelWidths, collapsedPanels, collapsed, groupHeights, activeTabs } } */
+  pageLayout: 'classic', layoutOverlay: {},
   pinBoards: null,   // 핀 보드 { boards: [{ id, name, items, size? }], activeBoardId } — NAI emptyBoardsState 와 같은 모양, 처음 쓸 때 만든다 (pbState)
   // NAI 설정 «Custom File Name Template»(imageFilenameTemplateEnabled 끔 · imageFilenameTemplate «{prompt} s-{seed}»)
   fnTplOn: false, fnTpl: '{prompt} s-{seed}',
@@ -1610,7 +1613,7 @@ async function blobHasStealth(blob) {
 /* ─────────────── 서버 연결 / API ─────────────── */
 const IS_FILE = location.protocol === 'file:';
 const PORTS = [8765, 8766, 8767, 8768, 8769];
-const APP_VERSION = '12.24';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
+const APP_VERSION = '12.25';   // 화면 표시용 앱 버전 (상단) — server.py 의 RELEASE 와 같아야 한다
 const NEED_SERVER_VER = 17;   // 이 앱(html/js)이 필요로 하는 server.py 버전 — 낮으면 "start.bat 재실행" 안내
 /* 한 번 실패했다고 '서버 꺼짐' 으로 단정하면 안 된다.
    이 앱의 요청은 전부 같은 오리진으로 나가는데(생성·유튜브 프록시·태그 사전),
@@ -3891,7 +3894,7 @@ function paintViewTools(it) {
   const ci = $('#tCopyImg'); if (ci) ci.hidden = !(it && typeof ClipboardItem === 'function' && navigator.clipboard && navigator.clipboard.write);
   const iv = $('#viewerImg'); if (iv) iv.classList.toggle('noscale', S.scaleUp === false);
   $$('.vtools .vgroup.act').forEach(g => { g.hidden = !it; });   // NAI: 그림에 쓰는 단추 줄은 보고 있는 그림이 없으면 숨긴다
-  paintPinBtn();
+  paintPinBtn();   // (NAI 화면 배치의 단추 줄도 여기서 맞춘다 — paintPinBtn → nlRefreshSoon)
   const ot = $('#viewerOrigTag'); if (ot) ot.hidden = !(it && it.varOrig);   // 변형 묶음의 원본 (NAI «ORIGINAL»)
 }
 function itemVarIdx(it) { return it && Array.isArray(it.vars) && it.vars.length ? Math.min(R.varSel || 0, it.vars.length - 1) : -1; }
@@ -4061,7 +4064,7 @@ function clearViewer() {
    · 그림에 마우스를 올리면 98% → 100% 로 커진다(0.25초) — 고른 그림·움직임 줄이기·단순 화면의 한 장짜리 묶음은 빼고 (NAI ImageContainer hover)
    «단순 결과 화면»(설정을 켜거나 화면 폭 900 이하 휴대폰)도 NAI 처럼 같은 캔버스다(BO 의 recentGroups 0): 고른 묶음 하나만 놓고,
    다른 묶음을 고르면 그 그림을 다 읽을 때까지(최대 0.8초) 지금 묶음을 두었다가 바꾼 뒤 움직임 없이 맞춘다. 묶음을 더 불러오지 않고, 장식이 없다.
-   장식 그림(NAI 별자리 무늬)은 캔버스에도 넣지 않았다. */
+   묶음 장식(NAI 별자리·나침반·겹고리·반짝이·혜성과 잇는 선)은 12.23 에 넣었다(ornRender — 여러 묶음 화면에서만). */
 const OVW = { cam: { x: 0, y: 0, scale: 1 }, tgt: null, k: 11, raf: 0, shown: 8, lay: null, tiles: new Map(), pan: null, ptrs: new Map(), pinch: null,
   inertia: 0, settleT: 0, idleT: 0, rq: 0, keys: new Set(), keyRaf: 0, groupOnly: false, keepGroup: false, quiet: false, wasDrag: false, size: null, newest: '', lastSel: null,
   board: null, wall: null, prev: null, _pinShow: false, pending: null, pendSel: false,   // pending: 생성 중 결과 자리 · pendSel: 그 자리를 고름   // board: 핀 보드 배치(pbLayout) · wall: 핀 보드를 고름(NAI 묶음 «pin-wall») · prev: 그 전 선택(Q 로 돌아감)
@@ -4880,6 +4883,7 @@ function paintPinBtn() {
   const on = pbIsPinned(curItem());
   b.classList.toggle('on', on);
   b.title = on ? '핀 빼기 — 이 그림을 핀 보드에서 뺍니다 (NAI Remove Pinned Image)' : '핀 꽂기 — 이 그림을 핀 보드에 모읍니다(보드마다 50장 · 캔버스 결과 화면 왼쪽 판, Q 키) (NAI Pin Image)';
+  if (typeof nlRefreshSoon === 'function') nlRefreshSoon();   // NAI 화면 배치: 접힌 히스토리 띠의 핀 수 배지 · 그림 단추 줄
 }
 function pbAddBoard(name) { const s = pbState(), b = { id: pbUuid(), name, items: [] }; s.boards.push(b); s.activeBoardId = b.id; save(); }
 function pbRenameBoard(id, name) { const b = pbState().boards.find(x => x.id === id); if (b) { b.name = name; save(); } }
@@ -5987,7 +5991,9 @@ function switchRefTab(t) {
   const tb = $(`.reftab[data-t="${t}"]`);
   if (!tb || tb.hidden) t = 'i2i';
   $$('.reftab').forEach(b => b.classList.toggle('on', b.dataset.t === t));
-  $('#panelI2i').hidden = t !== 'i2i'; $('#panelVibe').hidden = t !== 'vibe'; $('#panelPref').hidden = t !== 'pref';
+  // NAI 화면 배치에서는 세 칸이 탭 없이 따로 보인다(배치 틀의 탭·묶음이 대신 고른다)
+  const all = typeof NL !== 'undefined' && NL.on;
+  $('#panelI2i').hidden = !all && t !== 'i2i'; $('#panelVibe').hidden = !all && t !== 'vibe'; $('#panelPref').hidden = !all && t !== 'pref';
 }
 /* 인페인트 마스크 — NAI 새 방식(빌드 78a367e generateInfill)과 같게 보낸다.
    ① 칠한 칸 = 그림의 1/8 격자(8×8 칸). 칸 안에 칠한 곳이 하나라도 있으면 그 칸을 칠한 것으로 본다(우리 붓은 원본 해상도라 칸으로 모은다).
@@ -6688,7 +6694,9 @@ function applyUcLayout() {
   const card = $('#promptCard'), tabs = $('#promptTabs'), pane = $('#ucTabPane'), box = $('#ucBox');
   if (!card || !tabs || !pane || !box) return;
   const uc = $('#uc'), w = (uc && uc.closest('.pwrap')) || uc;
-  const detached = S.ucDetached !== false;
+  // NAI Layout B 의 결과 화면 아래 프롬프트 칸(options.disableUcDetach)은 네거티브를 떼지 못하고 탭으로만 쓴다
+  const noDetach = typeof NL !== 'undefined' && NL.on && NL.noUcDetach;
+  const detached = S.ucDetached !== false && !noDetach;
   tabs.hidden = detached; box.hidden = !detached;
   const ucTab = !detached && R.promptTab === 'u';
   card.classList.toggle('uc-tab', ucTab);
@@ -6696,7 +6704,7 @@ function applyUcLayout() {
   if (detached) { if (w && w.parentElement !== box) box.appendChild(w); }
   else if (w && w.parentElement !== pane) pane.appendChild(w);
   $$('#promptTabs button[data-t]').forEach(b => b.classList.toggle('on', (b.dataset.t === 'u') === ucTab));
-  const db = $('#ucDetachBtn'); if (db) db.hidden = !ucTab;
+  const db = $('#ucDetachBtn'); if (db) db.hidden = !ucTab || noDetach;
 }
 function renderRandPrompt() {
   const box = $('#randBox'), ta = $('#randPrompt'), secs = $('#secList'); if (!box || !ta) return;
@@ -7074,6 +7082,7 @@ function setMode(m) {
   if (m === 'library' && window.renderLibrary) renderLibrary();
   if (m === 'tools' && window.renderSmartTools) renderSmartTools();
   if (typeof qsSync === 'function') qsSync();   // 빠른 시작 단추는 메인 화면에서만 보인다 (NAI: 그림 생성 화면 메뉴에만 있음)
+  if (typeof nlSync === 'function') nlSync();   // NAI 화면 배치(Layout A~E)는 메인 화면에서만 — 다른 탭에서는 3단 배치로 되돌린다
   ovwSync();
 }
 
@@ -7127,6 +7136,8 @@ function openSettings() {
       <div class="hint" id="mOvwKeys" hidden style="margin:-2px 0 4px 24px">캔버스 결과 화면: 휠 = 옮기기(Shift 면 가로) · Ctrl+휠 = 확대 · 가운데 단추나 Shift+끌기 = 옮기기 · 그림을 누르면 그 그림으로, 한 번 더 누르면 묶음 전체로 · F 맞추기 · + − 확대 · 1 실제 크기 · Esc 묶음 전체 · W A S D 옮기기 (NAI 와 같음 — 이 화면에서는 F 가 즐겨찾기가 아니라 «맞추기»입니다)</div>
       <label class="ck"><input type="checkbox" id="mOvwReduced"> 결과 화면 움직임 줄이기 (Reduced Motion) <span class="hint" id="mOvwReducedHint"></span></label>
       <label class="ck"><input type="checkbox" id="mOvwLock"> 결과 화면 카메라 잠그기 (Lock Output Viewer Camera) <span class="hint" id="mOvwLockHint"></span></label>
+      <label class="fld">화면 배치 (Page Layout) <span class="hint" id="mLayoutHint"></span>
+        <select id="mLayout"><option value="classic">NAI Studio 3단 배치</option><option value="layout-a">Layout A (NAI 기본 화면)</option><option value="layout-b">Layout B</option><option value="layout-c">Layout C</option><option value="layout-d">Layout D</option><option value="layout-e">Layout E</option></select></label>
       <hr>
       <div class="mtitle">투명 그림 <span class="hint">(NAI 설정과 같은 칸)</span></div>
       <label class="fld">투명 부분 보이기 <span class="hint">— 배경 제거·투명 배경 그림의 투명한 곳을 무엇으로 보여 줄지 (NAI «Transparency Background», 기본값 테마 체크무늬)</span>
@@ -7307,6 +7318,14 @@ function openSettings() {
         lh.textContent = lk.checked ? '— 결과 화면을 끌어 옮기거나 확대할 수 없습니다' : '— 결과 화면을 끌어 옮기고 확대할 수 있습니다';
       };
       sv.checked = S.simpleOutputViewer === true; rm.checked = !!S.canvasReducedMotion; lk.checked = !!S.canvasLockCamera; paint();
+      { // NAI «Page Layout» — NAI 그림 생성 화면 기본은 Layout A (설정값 "classic" 이 목록에 없어 Layout A 로 그린다)
+        const ly = body.querySelector('#mLayout'), lh = body.querySelector('#mLayoutHint');
+        const lpaint = () => { lh.textContent = ly.value === 'classic'
+          ? '— 그림 생성 화면의 패널을 어떻게 놓을지 고릅니다. 지금은 이 앱의 원래 3단 화면입니다. NAI 사이트의 그림 생성 화면은 Layout A 입니다'
+          : '— NAI 와 같은 패널 배치입니다. 패널 가장자리를 끌어 넓이를 바꾸고, 접었다 펼 수 있습니다(배치마다 기억). 화면 폭이 900 이하이거나 메인 화면이 아니면 3단 화면으로 돌아갑니다'; };
+        ly.value = typeof NL_PRESETS !== 'undefined' && NL_PRESETS.some(p => p.id === S.pageLayout) ? S.pageLayout : 'classic'; lpaint();
+        ly.onchange = () => { S.pageLayout = ly.value; save(); lpaint(); if (typeof nlSync === 'function') nlSync(); };
+      }
       sv.onchange = () => { S.simpleOutputViewer = sv.checked; save(); paint(); ovwSync(); };
       rm.onchange = () => { S.canvasReducedMotion = rm.checked; save(); paint(); const st = $('#ovwStage'); if (st) st.classList.toggle('rm', ovwReduced()); };
       lk.onchange = () => { S.canvasLockCamera = lk.checked; save(); paint(); const st = $('#ovwStage'); if (st) st.classList.toggle('locked', lk.checked); };
@@ -7446,6 +7465,7 @@ function syncUI() {
   if (typeof renderStyleSelects === 'function') renderStyleSelects();
   // 코드로 value 를 바꾼 textarea 들은 input 이벤트가 안 나므로 하이라이트 미러를 직접 다시 그린다
   if (typeof refreshHighlights === 'function') refreshHighlights();
+  if (typeof nlRefreshSoon === 'function') nlRefreshSoon();   // NAI 화면 배치: 모델에 따라 칸이 생기고 사라진다 · 요약 칩·배지
 }
 /* 첨부(i2i·바이브·레퍼런스)가 바뀌면 예상 비용도 달라진다.
    예전엔 이 경로에 갱신이 없어서, 레퍼런스 4장을 붙여도 ◈ 숫자가 그대로였다
@@ -7488,6 +7508,7 @@ function updateRefBadge() {
     R.prefs.length ? '레퍼런스 ' + R.prefs.length + (prefOk ? '' : ' (안 쓰임)') : ''].filter(Boolean);
   b.textContent = parts.join(' · ');
   renderAttachBar();
+  if (typeof nlRefreshSoon === 'function') nlRefreshSoon();   // NAI 화면 배치: 레퍼런스가 붙으면 바이브 칸이 사라진다 · 탭·띠 배지
 }
 /* 붙어 있는 이미지 입력을 생성 버튼 옆에서 바로 떼는 줄.
    칩 본문을 누르면 해당 패널이 열리고, ✕ 를 누르면 그 자리에서 떨어진다. */
@@ -7531,6 +7552,8 @@ function renderAttachBar() {
   }
 }
 function openRefPanel(tab) {   // '이미지 입력' 카드를 펼치고 해당 탭으로 (칩에서 바로 이동)
+  // NAI 화면 배치에서는 그 칸이 든 패널·접힌 묶음·탭을 연다
+  if (typeof nlReveal === 'function' && typeof NL !== 'undefined' && NL.on && nlReveal({ i2i: 'input-image', vibe: 'vibe-transfer', pref: 'character-references' }[tab] || 'input-image')) return;
   const card = $('#refBadge') && $('#refBadge').closest('details');
   if (card) { card.open = true; card.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
   switchRefTab(tab);
@@ -7854,6 +7877,7 @@ function init() {
     const n = (curChars() || []).length, off = (curChars() || []).filter(x => x && x.off).length;
     const cc = $('#charCount');
     if (cc) cc.textContent = n ? (off ? `${n}명 중 ${n - off}명 사용` : `${n}명`) : '';
+    if (typeof nlRefreshSoon === 'function') nlRefreshSoon();   // NAI 화면 배치: 캐릭터 수 배지
   }
   window.applyCharFold = applyCharFold;
   $('#btnCharFold').onclick = () => { S.charsOpen = S.charsOpen === false; save(); applyCharFold(); };

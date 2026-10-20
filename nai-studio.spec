@@ -18,6 +18,7 @@ APP_FILES = [
     ('tools.js', '.'),
     ('scenes.js', '.'),
     ('canvas.js', '.'),
+    ('layout.js', '.'),
     ('style.css', '.'),
     ('assets/hls.min.js', 'assets'),
     ('assets/pica.min.js', 'assets'),
